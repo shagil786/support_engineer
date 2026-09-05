@@ -1,4 +1,4 @@
-# Freebuff Desktop — Support Voice Agent
+# Desktop — Support Voice Agent
 
 A meeting-etiquette voice agent for standups, war rooms, and client calls.
 
