@@ -37,6 +37,11 @@ Integrations are dependency-free ports you wire in:
 - `InMemoryRunbookProvider` — in-memory runbook registry + executor (default for local dev and tests).
 - `SlackWebhookNotifier` — incoming-webhook summaries.
 
+**Layer 1 — Memory** (`src/support-voice-agent/memory/`):
+- `KeyValueStore` port (+ in-memory impl with TTL) — meeting summaries persist across sessions; swap in Redis by satisfying the same port.
+- `VectorMemory` port (+ in-memory impl) — RAG over feedback, alerts, and runbook runs using a deterministic keyless embedder (hashed words + char trigrams). Relevant notes answer questions as "From my notes: …"; swap in a real embedding API or Pinecone behind the same `Embedder`/`VectorMemory` types later.
+- Config: `memory: { kv, vectors }` on `SupportVoiceAgent`; both optional, agent degrades to no-memory behavior when absent.
+
 **Layer 4 — Guardrails** (`src/support-voice-agent/guardrails.ts`):
 - RBAC speaker registry (`admin`/`engineer`/`viewer`/`guest`; unknown speakers default to `guest`).
 - Destructive runbook actions hard-gated to approver roles — enforced in BOTH the deterministic

@@ -52,6 +52,10 @@ export type {
 } from './support-voice-agent/integrations/logs';
 export { renderMeetingSummary } from './support-voice-agent/summary';
 export { Guardrails } from './support-voice-agent/guardrails';
+export { InMemoryKeyValueStore } from './support-voice-agent/memory/store';
+export type { KeyValueStore } from './support-voice-agent/memory/store';
+export { InMemoryVectorMemory, hashEmbedder, cosine } from './support-voice-agent/memory/vector';
+export type { Embedder, MemoryRecord, SearchHit, VectorMemory } from './support-voice-agent/memory/vector';
 export type { SpeakerRole, SpeakerRegistry, GuardrailsConfig, ApprovalDecision } from './support-voice-agent/guardrails';
 export {
   JiraClient,

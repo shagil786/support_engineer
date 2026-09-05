@@ -32,6 +32,8 @@ import { LlmOrchestrator, DEFAULT_SYSTEM_PROMPT } from './tools/orchestrator';
 import type { LlmClient } from './tools/llm';
 import { Guardrails } from './guardrails';
 import type { GuardrailsConfig } from './guardrails';
+import type { KeyValueStore } from './memory/store';
+import type { MemoryRecord, VectorMemory } from './memory/vector';
 
 export interface SupportVoiceAgentConfig {
   mode?: AgentMode;
@@ -58,6 +60,8 @@ export interface SupportVoiceAgentConfig {
   llm?: LlmClient;
   /** Layer 4 guardrails: RBAC + destructive-action approval + escalation. */
   guardrails?: GuardrailsConfig;
+  /** Layer 1 memory: KV for meeting state, vector store for RAG retrieval. */
+  memory?: { kv?: KeyValueStore; vectors?: VectorMemory };
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -123,6 +127,8 @@ export class SupportVoiceAgent {
   private orchestrator?: LlmOrchestrator;
   readonly guardrails: Guardrails;
   private lastSpeaker?: string;
+  private readonly kv?: KeyValueStore;
+  private readonly vectors?: VectorMemory;
   private pendingRunbook: { actionId: string; at: number } | null = null;
   private pendingBug: PendingBug | null = null;
   private spokenCount = 0;
@@ -152,6 +158,8 @@ export class SupportVoiceAgent {
     this.runbookProvider = this.cfg.runbooks;
     this.slackNotifier = this.cfg.slack;
     this.guardrails = new Guardrails({ notifier: this.slackNotifier, ...config.guardrails });
+    this.kv = config.memory?.kv;
+    this.vectors = config.memory?.vectors;
     if (config.llm) {
       this.orchestrator = new LlmOrchestrator({
         llm: config.llm,
@@ -342,6 +350,7 @@ export class SupportVoiceAgent {
   ingestAlert(alert: AlertSignal): void {
     this.alerts.push(alert);
     this.emitter.emit('alert', alert);
+    this.remember('alert', `${alert.severity} from ${alert.source}: ${alert.summary}`, { severity: alert.severity, source: alert.source });
     const severe = alert.severity === 'P0' || alert.severity === 'P1' || /down|outage|unreachable|5xx|failed/i.test(alert.summary);
     if (severe) {
       this.speak(
@@ -437,6 +446,11 @@ export class SupportVoiceAgent {
       alerts: [...this.alerts],
       spokenResponseCount: this.spokenCount,
     };
+    if (this.kv) {
+      void this.kv
+        .set(`summary:${data.startedAt}`, JSON.stringify(data))
+        .catch((err: Error) => this.log('warn', `Summary persist failed: ${err.message}`));
+    }
     this.emitter.emit('summary', data);
     return data;
   }
@@ -513,11 +527,13 @@ export class SupportVoiceAgent {
         return;
       }
       this.feedbackItems.push({ at: ts, speakerId, original: text, paraphrase });
+      this.remember('feedback', `${paraphrase} (from ${speakerId})`, { speakerId });
       this.emitter.emit('log', { level: 'info', message: `Silent mode: feedback noted — "${paraphrase}"` });
       return;
     }
     // Response / interrupt mode: paraphrase + ask about the bug.
     this.pendingBug = { paraphrase, original: text, speakerId, at: ts };
+    this.remember('feedback', `${paraphrase} (from ${speakerId})`, { speakerId });
     this.queueSpeech(`Got it — "${paraphrase}" Should I create a Jira bug for this? What priority?`);
   }
 
@@ -562,6 +578,24 @@ export class SupportVoiceAgent {
           this.log('warn', `Log query failed: ${err.message}`);
           this.queueSpeech(`The log service is inaccessible — I couldn't run that query. I will retry shortly. I have also alerted the infrastructure team via Slack.`, { forceFull: true });
           void this.guardrails.pageInfra(`Log provider failure (${err.message}) — agent failover engaged`);
+        });
+      return;
+    }
+
+    // Layer 1 RAG: any indexed runbook/note relevant to the question?
+    if (this.vectors) {
+      const vectors = this.vectors;
+      this.queueSpeech('Checking my notes.');
+      void vectors
+        .search(text, 1, 0.3)
+        .then((hits: Array<{ text: string }>) => {
+          const hit = hits[0];
+          if (hit) this.speak(`From my notes: ${hit.text.replace(/^\[[^\]]+\]\s*/, '')}`, { forceFull: true });
+          else this.queueSpeech("I don't have that data in my current context, but I can pull it from Jira now.");
+        })
+        .catch((err: Error) => {
+          this.log('warn', `Memory search failed: ${err.message}`);
+          this.queueSpeech("I don't have that data in my current context, but I can pull it from Jira now.");
         });
       return;
     }
@@ -614,6 +648,7 @@ export class SupportVoiceAgent {
     this.speak('On it.', {});
     try {
       const result = await this.runbookProvider.run(actionId);
+      this.remember('runbook', `Ran '${actionId}': ${result.ok ? `ok — ${result.output ?? ''}` : `failed — ${result.error ?? 'unknown'}`}`, { actionId, ok: result.ok });
       this.speak(result.ok ? `Done — ${result.output ?? 'runbook completed.'}` : `That didn't fully work: ${result.error ?? 'unknown error'}`, {});
     } catch (err) {
       this.log('warn', `Runbook execution failed: ${(err as Error).message}`);
@@ -693,6 +728,13 @@ export class SupportVoiceAgent {
     const base = `${result.provider}: ${result.rows.length} matching event(s)`;
     if (result.error) return `${base} (query issue: ${result.error})`;
     return tops ? `${base}. Top: ${tops}` : `${base}.`;
+  }
+
+  /** Layer 1: index a durable note into vector memory (never blocks speech). */
+  private remember(kind: string, text: string, metadata: Record<string, unknown> = {}): void {
+    if (!this.vectors) return;
+    const record: MemoryRecord = { id: `${kind}:${this.cfg.now()}:${this.spokenCount}:${Math.random().toString(36).slice(2, 7)}`, text: `[${kind}] ${text}`, metadata: { kind, ...metadata } };
+    void this.vectors.add(record).catch((err: Error) => this.log('warn', `Memory index failed: ${err.message}`));
   }
 
   private recordJira(type: JiraChange['type'], issueKey: string, detail: string): void {
