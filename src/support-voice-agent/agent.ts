@@ -118,7 +118,7 @@ export class SupportVoiceAgent {
   private readonly jiraChanges: JiraChange[] = [];
   private readonly alerts: AlertSignal[] = [];
 
-  private pendingSpeech: string[] = [];
+  private pendingSpeech: Array<{ text: string; forceFull?: boolean }> = [];
   private mutedUntil = 0;
   private orchestrator?: LlmOrchestrator;
   readonly guardrails: Guardrails;
@@ -334,7 +334,7 @@ export class SupportVoiceAgent {
   flushSpeech(): number {
     const queued = this.pendingSpeech;
     this.pendingSpeech = [];
-    for (const text of queued) this.speak(text, {});
+    for (const item of queued) this.speak(item.text, { forceFull: item.forceFull });
     return queued.length;
   }
 
@@ -354,7 +354,10 @@ export class SupportVoiceAgent {
         void this.jiraClient
           .addComment(alert.ticketKey, `Agent detected: ${alert.summary}`)
           .then(() => this.recordJira('commented', alert.ticketKey!, 'Alert noted'))
-          .catch((err: Error) => this.log('warn', `Alert comment failed: ${err.message}`));
+          .catch((err: Error) => {
+            this.log('warn', `Alert comment failed: ${err.message}`);
+            void this.guardrails.pageInfra(`Jira API failure adding alert comment (${err.message}) — agent failover engaged`);
+          });
       } else {
         void this.jiraClient
           .createIssue({
@@ -364,7 +367,10 @@ export class SupportVoiceAgent {
             issueType: 'Incident',
           })
           .then((issue) => this.recordJira('created', issue.key, `Incident created from ${alert.severity} alert`))
-          .catch((err: Error) => this.log('warn', `Alert ticket creation failed: ${err.message}`));
+          .catch((err: Error) => {
+            this.log('warn', `Alert ticket creation failed: ${err.message}`);
+            void this.guardrails.pageInfra(`Jira API failure creating alert ticket (${err.message}) — agent failover engaged`);
+          });
       }
     }
   }
@@ -476,7 +482,10 @@ export class SupportVoiceAgent {
           issueType: 'Incident',
         })
         .then((issue) => this.recordJira('created', issue.key, `Incident created from ${severity} declaration`))
-        .catch((err: Error) => this.log('warn', `Incident ticket creation failed: ${err.message}`));
+        .catch((err: Error) => {
+          this.log('warn', `Incident ticket creation failed: ${err.message}`);
+          void this.guardrails.pageInfra(`Jira API incident creation failed (${err.message}) — agent failover engaged`);
+        });
     }
   }
 
@@ -497,7 +506,10 @@ export class SupportVoiceAgent {
             this.recordJira('created', issue.key, 'Feedback filed (silent)');
             this.feedbackItems.push({ at: ts, speakerId, original: text, paraphrase, jiraKey: issue.key });
           })
-          .catch((err: Error) => this.log('warn', `Silent feedback filing failed: ${err.message}`));
+          .catch((err: Error) => {
+          this.log('warn', `Silent feedback filing failed: ${err.message}`);
+          void this.guardrails.pageInfra(`Jira API filing silent feedback failed (${err.message}) — agent failover engaged`);
+        });
         return;
       }
       this.feedbackItems.push({ at: ts, speakerId, original: text, paraphrase });
@@ -533,9 +545,10 @@ export class SupportVoiceAgent {
       void this.jiraClient
         .getIssue(ticket)
         .then((issue) => this.speak(`${ticket} is currently '${issue.status}'.`))
-        .catch((err: Error) =>
-          this.speak(`I couldn't pull ${ticket}: ${err.message}`, {}),
-        );
+        .catch((err: Error) => {
+          this.log('warn', `Jira getIssue failed: ${err.message}`);
+          this.jiraFailover(`pull ${ticket}`);
+        });
       return;
     }
 
@@ -545,7 +558,11 @@ export class SupportVoiceAgent {
       void this.logProvider
         .query(h.buildLogQuery(text, this.cfg.now()))
         .then((result) => this.speak(`Here's what I'm seeing: ${this.summarizeLogs(result)}`, { forceFull: true }))
-        .catch((err: Error) => this.speak(`I hit an error pulling logs: ${err.message}`, {}));
+        .catch((err: Error) => {
+          this.log('warn', `Log query failed: ${err.message}`);
+          this.queueSpeech(`The log service is inaccessible — I couldn't run that query. I will retry shortly. I have also alerted the infrastructure team via Slack.`, { forceFull: true });
+          void this.guardrails.pageInfra(`Log provider failure (${err.message}) — agent failover engaged`);
+        });
       return;
     }
 
@@ -576,7 +593,7 @@ export class SupportVoiceAgent {
       this.speak(formatJiraCreated({ issueKey: issue.key, priority: severity, comment: pending.paraphrase }), {});
     } catch (err) {
       this.log('warn', `Bug filing failed: ${(err as Error).message}`);
-      this.queueSpeech("I hit an error filing that in Jira. I've noted it down for the summary.");
+      this.jiraFailover('file that bug');
     }
   }
 
@@ -657,9 +674,15 @@ export class SupportVoiceAgent {
     }
   }
 
-  private queueSpeech(text: string): void {
+  /** Spec failover: name the failed backend, promise re-sync, alert infra. */
+  private jiraFailover(action: string): void {
+    this.queueSpeech(`Jira is inaccessible — I couldn't ${action}. I will update it when I reconnect. I have also alerted the infrastructure team via Slack.`, { forceFull: true });
+    void this.guardrails.pageInfra(`Jira API failure during '${action}' — agent failover engaged`);
+  }
+
+  private queueSpeech(text: string, opts: { forceFull?: boolean } = {}): void {
     if (this.mutedUntil > this.cfg.now()) return;
-    this.pendingSpeech.push(text);
+    this.pendingSpeech.push({ text, forceFull: opts.forceFull });
   }
 
   private summarizeLogs(result: LogQueryResult & { rows: Array<{ message: string }> }): string {

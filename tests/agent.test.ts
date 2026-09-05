@@ -645,3 +645,29 @@ describe('SupportVoiceAgent LLM routing (Layer 2 glue)', () => {
   });
 });
 
+describe('Jira failover wording (spec: alert infra on API failure)', () => {
+  it('speaks the failover line and pages infra when a ticket pull fails', async () => {
+    const posted: Array<{ channel: string; text: string }> = [];
+    const failingJira: JiraConfig = {
+      baseUrl: 'https://jira.test',
+      auth: { type: 'bearer', token: 'test-key' },
+      projectKey: 'SUPPORT',
+      request: (() => Promise.resolve(new Response(JSON.stringify({ errorMessages: ['boom'] }), { status: 503 }))) as unknown as typeof fetch,
+    };
+    const agent = makeAgent({
+      mode: 'response',
+      jira: failingJira,
+      slack: { postMessage: async (channel, text) => { posted.push({ channel, text }); } },
+      guardrails: { infraChannel: '#infra' },
+    });
+    const speech: SpeechEvent[] = [];
+    agent.on('speech', (e: SpeechEvent) => speech.push(e));
+
+    agent.processUtterance('U1', "what's the status of SUPPORT-9?");
+    await flush();
+    agent.onPause(2000);
+    await flush();
+    expect(speech.some((e) => e.text.includes('Jira is inaccessible') && e.text.includes('alerted the infrastructure team'))).toBe(true);
+    expect(posted.some((m) => m.channel === '#infra' && m.text.includes('failover'))).toBe(true);
+  });
+});
