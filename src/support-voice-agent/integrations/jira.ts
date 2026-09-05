@@ -82,7 +82,9 @@ export class JiraClient {
   constructor(private readonly cfg: JiraConfig) {
     this.baseUrl = cfg.baseUrl.replace(/\/+$/, '');
     this.apiVersion = cfg.apiVersion ?? '3';
-    this.http = cfg.request ?? fetch;
+    // Lazy resolution keeps late global-fetch patches (tests, offline demo)
+    // working for clients constructed before those patches are installed.
+    this.http = cfg.request ?? ((input, init) => fetch(input, init));
   }
 
   private url(path: string): string {

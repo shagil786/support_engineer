@@ -37,6 +37,12 @@ Integrations are dependency-free ports you wire in:
 - `InMemoryRunbookProvider` — in-memory runbook registry + executor (default for local dev and tests).
 - `SlackWebhookNotifier` — incoming-webhook summaries.
 
+**Layer 3 — Voice bridge ports** (`src/support-voice-agent/bridge/`):
+- `MeetingBridge` / `SpeechToText` / `TextToSpeech` / `MeetingTarget` vendor-neutral ports.
+- `createVoiceSession(bridge, agent)` — the exact glue a host performs: transcript→agent, speech→TTS, pause events both ways, echo suppression (agent never transcribes its own voice).
+- `ScriptedBridge` — deterministic in-process fake; real Meet/Teams/Zoom/Slack-huddle adapters implement the same port.
+- Offline demo: `npm run demo` (interactive) / `npm run demo -- --script` (scripted war-room scene over fake Jira/Slack — zero network, zero credentials).
+
 **Layer 1 — Memory** (`src/support-voice-agent/memory/`):
 - `KeyValueStore` port (+ in-memory impl with TTL) — meeting summaries persist across sessions; swap in Redis by satisfying the same port.
 - `VectorMemory` port (+ in-memory impl) — RAG over feedback, alerts, and runbook runs using a deterministic keyless embedder (hashed words + char trigrams). Relevant notes answer questions as "From my notes: …"; swap in a real embedding API or Pinecone behind the same `Embedder`/`VectorMemory` types later.
