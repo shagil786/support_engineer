@@ -28,6 +28,8 @@ import type { SlackNotifier } from './integrations/slack';
 import type { LogProvider, LogQueryResult } from './integrations/logs';
 import { renderMeetingSummary } from './summary';
 import type { JiraConfig } from './integrations/jira';
+import { LlmOrchestrator, DEFAULT_SYSTEM_PROMPT } from './tools/orchestrator';
+import type { LlmClient } from './tools/llm';
 
 export interface SupportVoiceAgentConfig {
   mode?: AgentMode;
@@ -48,6 +50,10 @@ export interface SupportVoiceAgentConfig {
   logs?: LogProvider;
   runbooks?: RunbookProvider;
   slack?: SlackNotifier;
+  /** Optional real LLM (Layer 2). When wired, direct status/data/help questions
+   *  route through the LLM + tool orchestrator; everything else (wake word,
+   *  mute, barge-in, confirmations) stays deterministic. */
+  llm?: LlmClient;
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -110,6 +116,7 @@ export class SupportVoiceAgent {
 
   private pendingSpeech: string[] = [];
   private mutedUntil = 0;
+  private orchestrator?: LlmOrchestrator;
   private pendingRunbook: { actionId: string; at: number } | null = null;
   private pendingBug: PendingBug | null = null;
   private spokenCount = 0;
@@ -138,6 +145,24 @@ export class SupportVoiceAgent {
     this.logProvider = this.cfg.logs;
     this.runbookProvider = this.cfg.runbooks;
     this.slackNotifier = this.cfg.slack;
+    if (config.llm) {
+      this.orchestrator = new LlmOrchestrator({
+        llm: config.llm,
+        deps: {
+          jiraClient: this.jiraClient,
+          logProvider: this.logProvider,
+          runbookProvider: this.runbookProvider,
+          slackNotifier: this.slackNotifier,
+          speak: (text) => this.queueSpeech(text),
+        },
+        systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      });
+    }
+  }
+
+  /** True when an LLM is wired and the orchestrator can answer questions. */
+  get hasLlm(): boolean {
+    return this.orchestrator?.isWired() ?? false;
   }
 
   /* ------------------------------------------------------------- */
@@ -268,7 +293,11 @@ export class SupportVoiceAgent {
 
     // 9. Direct question about status/data/help.
     if (h.isDirectQuestion(trimmed)) {
-      this.handleDirectQuestion(trimmed);
+      if (this.hasLlm) {
+        void this.routeToLlm(trimmed);
+      } else {
+        this.handleDirectQuestion(trimmed);
+      }
       return;
     }
 
@@ -570,6 +599,32 @@ export class SupportVoiceAgent {
     const limited = opts.forceFull || opts.urgent ? text : h.enforceMaxWords(text, this.cfg.maxResponseWords);
     this.spokenCount++;
     this.emitter.emit('speech', { text: limited, urgent: opts.urgent ?? false, timestamp: now });
+  }
+
+  /** Route a direct question through the LLM + tool loop. Speech goes
+   *  through the normal queue so the pause gate and word cap still apply.
+   *  On any LLM failure or unwired result, degrade to the deterministic
+   *  handler — the meeting never hangs on the model. */
+  private async routeToLlm(text: string): Promise<void> {
+    const orch = this.orchestrator;
+    if (!orch) {
+      this.handleDirectQuestion(text);
+      return;
+    }
+    const history = this.conversation
+      .slice(-8, -1)
+      .map((u) => ({ role: 'user' as const, content: `${u.speakerId}: ${u.text}` }));
+    const before = this.spokenCount;
+    const result = await orch.process(text, history);
+    if (result.fallbackToDeterministic) {
+      this.log('warn', `LLM fallback to deterministic answer: ${result.error ?? 'unwired'}`);
+      this.handleDirectQuestion(text);
+      return;
+    }
+    if (result.speech) this.queueSpeech(result.speech);
+    else if (this.spokenCount === before && result.toolResults.length === 0) {
+      this.handleDirectQuestion(text);
+    }
   }
 
   private queueSpeech(text: string): void {

@@ -567,3 +567,81 @@ function makeRunbooks(overrides?: Record<string, Omit<RunbookResult, 'actionId'>
     },
   } as unknown as RunbookProvider;
 }
+
+describe('SupportVoiceAgent LLM routing (Layer 2 glue)', () => {
+  const scriptedLlm = (script: Array<{ content?: string; tool_calls?: unknown[]; error?: string }>) => {
+    let n = 0;
+    return {
+      isWired: () => true,
+      complete: async () => {
+        const step = script[n++];
+        if (!step) throw new Error('script exhausted');
+        if (step.error) throw Object.assign(new Error(step.error), { code: 'http_error' });
+        return {
+          id: 'r',
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: step.content, tool_calls: step.tool_calls },
+            finish_reason: step.tool_calls ? 'tool_calls' : 'stop',
+          }],
+        };
+      },
+    };
+  };
+
+  it('routes a direct question through the orchestrator and speaks after the pause', async () => {
+    const agent = makeAgent({
+      mode: 'response',
+      llm: scriptedLlm([{ content: 'Checkout is healthy at 99.9 percent uptime.' }]) as never,
+    });
+    const speech: SpeechEvent[] = [];
+    agent.on('speech', (e: SpeechEvent) => speech.push(e));
+
+    agent.processUtterance('U1', 'what is the status of checkout?');
+    await flush();
+    expect(speech).toHaveLength(0); // still pause-gated
+    agent.onPause(2000);
+    await flush();
+    expect(speech.some((e) => e.text.includes('99.9'))).toBe(true);
+  });
+
+  it('degrades to the deterministic answer when the LLM errors mid-flight', async () => {
+    const agent = makeAgent({
+      mode: 'response',
+      llm: scriptedLlm([{ error: 'gateway 500' }]) as never,
+    });
+    const speech: SpeechEvent[] = [];
+    agent.on('speech', (e: SpeechEvent) => speech.push(e));
+
+    agent.processUtterance('U1', "what's the status of SUPPORT-9?");
+    await flush();
+    agent.onPause(2000);
+    await flush();
+    // Deterministic unwired-Jira fallback per spec
+    expect(speech.some((e) => e.text.includes("pull it from Jira"))).toBe(true);
+  });
+
+  it('wake word, mute and barge-in stay deterministic with an LLM wired', async () => {
+    const agent = makeAgent({
+      mode: 'response',
+      llm: scriptedLlm([{ content: 'should not be used' }]) as never,
+    });
+    const speech: SpeechEvent[] = [];
+    agent.on('speech', (e: SpeechEvent) => speech.push(e));
+
+    agent.processUtterance('U1', 'this is a P1');
+    await flush();
+    expect(speech.some((e) => e.urgent)).toBe(true); // barge-in without any LLM call
+
+    agent.processUtterance('U1', 'hey agent, what is the status?');
+    await flush();
+    // wake-word + question with LLM wired routed once; not a greeting
+    expect(speech.some((e) => e.text.includes("I'm here"))).toBe(false);
+  });
+
+  it('hasLlm reflects the injected client', () => {
+    expect(makeAgent({}).hasLlm).toBe(false);
+    expect(makeAgent({ llm: scriptedLlm([]) as never }).hasLlm).toBe(true);
+  });
+});
+
