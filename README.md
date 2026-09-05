@@ -37,7 +37,14 @@ Integrations are dependency-free ports you wire in:
 - `InMemoryRunbookProvider` — in-memory runbook registry + executor (default for local dev and tests).
 - `SlackWebhookNotifier` — incoming-webhook summaries.
 
-**Layer 2 — Tool Registry & LLM** (new):
+**Layer 4 — Guardrails** (`src/support-voice-agent/guardrails.ts`):
+- RBAC speaker registry (`admin`/`engineer`/`viewer`/`guest`; unknown speakers default to `guest`).
+- Destructive runbook actions hard-gated to approver roles — enforced in BOTH the deterministic
+  confirm path and the LLM tool handler, so the model cannot talk its way past it; refusals page
+  `#security` (configurable) via Slack.
+- Prompt-injection detection (`isPromptInjection`) refuses and pages security.
+
+**Layer 2 — Tool Registry & LLM**:
 - `OpenAiCompatibleClient` — real HTTP client for any OpenAI-compatible endpoint (OpenAI, OpenRouter, Ollama, vLLM, Azure gateways). No hardcoded keys/hosts.
 - `LlmOrchestrator` — LLM + tools loop that coexists with the deterministic etiquette brain. When LLM is unwired, falls back to the deterministic agent byte-for-byte.
 - Tools: `jira_create_issue`, `query_logs`, `execute_runbook_script`, `invoke_human_on_slack`, `meeting_interrupt`.

@@ -42,6 +42,18 @@ export function isShutUpCommand(text: string): boolean {
   );
 }
 
+/** Prompt-injection attempts: "ignore previous instructions", "disregard your
+ *  rules", "you are now DAN", role-hijack phrasing. Detection is deliberately
+ *  conservative — false positives cost a Slack page, false negatives a hijack. */
+export function isPromptInjection(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    /\b(ignore|disregard|forget)\b[^.]{0,40}\b(previous|prior|above|all\s+your|your|system)\b[^.]{0,30}\b(instructions?|rules?|prompts?|directives?)\b/.test(t) ||
+    /\b(new|override|disable|print|reveal|show)\b[^.]{0,20}\b(system\s+)?(prompt|instructions|rules)\b/.test(t) ||
+    /\byou\s+are\s+no\s+longer\s+(the\s+|a\s+)?(agent|assistant|support)\b/.test(t)
+  );
+}
+
 /** "This is a P1" / "Critical incident" → urgent barge-in. */
 export function isCriticalDeclaration(text: string): boolean {
   return /\b(p0|p1|critical\s+incident|severe\s+outage|major\s+incident|sev[-\s]?1|production\s+(is\s+)?down)\b/i.test(text);

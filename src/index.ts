@@ -51,6 +51,8 @@ export type {
   SplunkConfig,
 } from './support-voice-agent/integrations/logs';
 export { renderMeetingSummary } from './support-voice-agent/summary';
+export { Guardrails } from './support-voice-agent/guardrails';
+export type { SpeakerRole, SpeakerRegistry, GuardrailsConfig, ApprovalDecision } from './support-voice-agent/guardrails';
 export {
   JiraClient,
   JiraError,

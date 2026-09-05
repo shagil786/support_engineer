@@ -91,4 +91,8 @@ export interface ToolDependencies {
   /** Emits a spoken line through the deterministic etiquette brain
    *  (which enforces mode, pause gating, and the word cap). */
   speak?: (text: string) => void;
+  /** Layer 4 guardrails — hard approval gate for destructive actions. */
+  guardrails?: import('../guardrails.js').Guardrails;
+  /** The speaker whose last utterance triggered this tool round. */
+  currentSpeaker?: () => string | undefined;
 }

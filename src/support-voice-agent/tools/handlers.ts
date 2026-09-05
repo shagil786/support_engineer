@@ -67,6 +67,23 @@ export const handlers: Record<ToolName, (args: unknown, deps: ToolDependencies) 
     const a = (args ?? {}) as Record<string, unknown>;
     const scriptName = str(a, 'script_name');
     if (!scriptName) return { ok: false, error: 'execute_runbook_script requires script_name' };
+    // Layer 4 hard gate: destructive actions require an approver-role speaker.
+    const actions = await deps.runbookProvider.list();
+    const action = actions.find((x) => x.id === scriptName || x.name === scriptName);
+    if (action?.destructive && deps.guardrails) {
+      const speaker = deps.currentSpeaker?.() ?? 'unknown';
+      const decision = deps.guardrails.checkDestructive(speaker);
+      if (!decision.allowed) {
+        const paged = await deps.guardrails.pageSecurity(
+          `Blocked destructive action '${scriptName}' requested by ${speaker}: ${decision.reason}`,
+        );
+        return {
+          ok: false,
+          error: `Destructive action requires admin approval — ${decision.reason}`,
+          detail: { paged_security: paged },
+        };
+      }
+    }
     try {
       const result = await deps.runbookProvider.run(scriptName);
       if (!result.ok) return { ok: false, error: 'Runbook action failed', detail: result.error ?? result.output };

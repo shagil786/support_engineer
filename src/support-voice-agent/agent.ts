@@ -30,6 +30,8 @@ import { renderMeetingSummary } from './summary';
 import type { JiraConfig } from './integrations/jira';
 import { LlmOrchestrator, DEFAULT_SYSTEM_PROMPT } from './tools/orchestrator';
 import type { LlmClient } from './tools/llm';
+import { Guardrails } from './guardrails';
+import type { GuardrailsConfig } from './guardrails';
 
 export interface SupportVoiceAgentConfig {
   mode?: AgentMode;
@@ -54,6 +56,8 @@ export interface SupportVoiceAgentConfig {
    *  route through the LLM + tool orchestrator; everything else (wake word,
    *  mute, barge-in, confirmations) stays deterministic. */
   llm?: LlmClient;
+  /** Layer 4 guardrails: RBAC + destructive-action approval + escalation. */
+  guardrails?: GuardrailsConfig;
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -117,6 +121,8 @@ export class SupportVoiceAgent {
   private pendingSpeech: string[] = [];
   private mutedUntil = 0;
   private orchestrator?: LlmOrchestrator;
+  readonly guardrails: Guardrails;
+  private lastSpeaker?: string;
   private pendingRunbook: { actionId: string; at: number } | null = null;
   private pendingBug: PendingBug | null = null;
   private spokenCount = 0;
@@ -145,6 +151,7 @@ export class SupportVoiceAgent {
     this.logProvider = this.cfg.logs;
     this.runbookProvider = this.cfg.runbooks;
     this.slackNotifier = this.cfg.slack;
+    this.guardrails = new Guardrails({ notifier: this.slackNotifier, ...config.guardrails });
     if (config.llm) {
       this.orchestrator = new LlmOrchestrator({
         llm: config.llm,
@@ -154,6 +161,8 @@ export class SupportVoiceAgent {
           runbookProvider: this.runbookProvider,
           slackNotifier: this.slackNotifier,
           speak: (text) => this.queueSpeech(text),
+          guardrails: this.guardrails,
+          currentSpeaker: () => this.lastSpeaker,
         },
         systemPrompt: DEFAULT_SYSTEM_PROMPT,
       });
@@ -191,6 +200,15 @@ export class SupportVoiceAgent {
     const trimmed = text.trim();
     if (!trimmed) return;
     this.conversation.push({ speakerId, text: trimmed, ts });
+    this.lastSpeaker = speakerId;
+
+    // 0. Prompt-injection guard (Layer 4): log, refuse, page security once.
+    if (h.isPromptInjection(trimmed)) {
+      this.log('warn', `Prompt-injection attempt from ${speakerId} refused: "${trimmed.slice(0, 80)}"`);
+      void this.guardrails.pageSecurity(`Prompt-injection attempt in meeting by ${speakerId}: "${trimmed.slice(0, 200)}"`);
+      this.queueSpeech("Sorry, I can't do that.");
+      return;
+    }
 
     // 1. "Agent, shut up" / "Stop talking" → mute until wake word (max 5 min).
     if (h.isShutUpCommand(trimmed)) {
@@ -234,7 +252,7 @@ export class SupportVoiceAgent {
       } else if (h.isAffirmation(trimmed)) {
         const { actionId } = this.pendingRunbook;
         this.pendingRunbook = null;
-        void this.executeRunbook(actionId);
+        void this.confirmRunbook(actionId, speakerId);
         return;
       } else if (h.isNegation(trimmed)) {
         this.pendingRunbook = null;
@@ -560,6 +578,18 @@ export class SupportVoiceAgent {
       this.log('warn', `Bug filing failed: ${(err as Error).message}`);
       this.queueSpeech("I hit an error filing that in Jira. I've noted it down for the summary.");
     }
+  }
+
+  /** Human said yes to a runbook offer. Destructive actions additionally
+   *  require the confirming speaker to hold an approver role (Layer 4 RBAC). */
+  private async confirmRunbook(actionId: string, speakerId: string): Promise<void> {
+    const action = await this.findRunbook(actionId);
+    if (action?.destructive && !this.guardrails.isApprover(speakerId)) {
+      this.queueSpeech("I need an admin to approve that — it's destructive. Paging one now.");
+      void this.guardrails.pageSecurity(`Destructive action '${actionId}' awaiting admin approval (requested by ${speakerId})`);
+      return;
+    }
+    void this.executeRunbook(actionId);
   }
 
   private async executeRunbook(actionId: string): Promise<void> {
