@@ -1,588 +1,454 @@
 # Support Engineer — Agentic Orchestration Design
 
-**Status:** Draft for user review
-**Date:** 2026-09-06
+**Status:** Implemented (v1) — this document describes the system **as built**
+**Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Scope:** Replace the deterministic etiquette brain with a four-layer agentic orchestration; port the good parts forward.
+**Suite at time of writing:** typecheck clean, **323/323 tests green** across 42 files (the original 150 remain as the regression floor)
+
+---
+
+## 0. Implementation status & deviation audit
+
+All five phases are implemented and wired into the live agent. Where the original
+draft diverged from what was built, **reality won** — usually because a phase
+plan's own tests contradicted its prose, or because the draft described tool
+names and file moves that don't exist in this repo. The material deviations:
+
+### 0.1 Global
+
+| Draft said | Built instead | Why |
+|---|---|---|
+| Dotted tool names (`jira.getIssue`, `runbook.execute`) throughout | The repo's real `ToolName` union (`jira_create_issue`, `query_logs`, `execute_runbook_script`, `invoke_human_on_slack`, `meeting_interrupt`) everywhere — event types, policy DSL, eval scenarios, registry | The dotted names never existed in this codebase; binding to a fiction would have made governance untestable against the real tools |
+| Replace the deterministic brain | **Compose around it** (see §15) | The etiquette cascade is battle-tested and deterministic; the platform wraps it instead of rewriting it |
+| `src/llm/`, top-level `src/integrations/`, `src/surface/meeting/` moves | LLM client stays at `support-voice-agent/tools/llm.ts`; integrations stay under `support-voice-agent/`; meeting bridge untouched under `support-voice-agent/bridge/` | Moving working code adds churn with no behavioral payoff; new layers got their own top-level dirs |
+
+### 0.2 Per-phase deltas
+
+- **Phase 1 (Event spine)** — built as drafted. 11-kind `DecisionEvent` union, JSONL daily segments, serialized writes, streaming filtered queries.
+- **Phase 2 (Understanding)** — `LegacyClassifierAdapter` checks runbook offers *before* direct questions (the draft's order misclassified "can you restart X?"). `EpisodicMemory` has **real** TTL expiry and a real `purgeMeeting` (draft's version was a stub that couldn't pass its own test). `ContextBundle` = envelope + episodes + recent decisions — **no policy summary component** (draft §4.1 item 4 dropped). No `embedders/openai.ts` — the `Embedder` port stays swappable but only the hash embedder ships.
+- **Phase 3 (Governance)** — policy DSL is a strict Zod-validated key set (`intent_kind`, `intent_subKind`, `tools_in`, `severity_in`, `runbook_destructive`, `output_matches_regex`), not dotted-path conditions; unknown keys fail at load. Default-deny on no match. `GovernanceDecision` extends `Decision` with `approverRole/approverCount/timeoutSeconds/onTimeout` so the ApprovalGate has something to consume. `PolicyStore` is SQLite (`policy_versions`, `policy_current`) with content-addressed YAML on disk; promotion metadata lives on the version row (no separate `policy_promotions` table). `ApprovalGate` posts plain-text Slack messages (no Block Kit buttons, no slash fallback in v1) and exposes pull-based `checkTimeouts()`. `LoopDetector` is **stateful per correlationId** (a stateless counter can't see pending calls). `SafetyNet.runAll` takes `args`; RBAC gates `execute_runbook_script`. No `security.yaml`/`meeting.yaml` bundles — one `default.yaml`, parity-tested.
+- **Phase 4 (Execution)** — `ToolRunner` pipeline: governed-check → SafetyNet re-check → registry lookup → Zod validate → idempotency → retry/timeout → one `tool_call` event. **No per-tool rate limiting and no `Retry-After` support in v1.** The error boundary moved: tools **throw** transport errors (so retries can fire) and return `ToolResult` for handled failures; the runner catches/retries/reports and never throws across its own boundary. Sub-agents are `LlmAgent`s with Zod JSON outputs and honest `source: 'llm' | 'fallback'` marking; tool "whitelists" are enforced in each agent's output schema, not by the runner. **No reviewer-feedback retry loop** — a `fail` verdict ends the request `ok=false` (retry-with-feedback is future work). **No cancellation/abort** (§6.3 of the draft dropped); plans execute sequentially.
+- **Phase 5 (Learning + surfaces)** — `OutcomeRecord` is lean: `correlationId`, `toolCalls`, `finalResult?`, `approvals[]`, `ts` (no intent/feedback/token fields in v1). `SuggestionQueue` v1 = one threshold heuristic (destructive approvals → propose relaxing `approver_count`, **risk: high**). `PromotionGate` evaluates the **candidate** bundle (better than the draft's "current + proposed": a regression-causing patch is refused before it lands) and refuses `tighten_safety_net`/`add_procedure` suggestions outright. `ProcedureSpec.trigger` is the tool-sequence string, not an `IntentMatch`; **procedures are stored but not yet short-circuited on** (§7.1's "skip the multi-agent dance" is future work). `LEARNING_ENABLED` env flag, default off, absent = unwired. Suggestion review is API-only — no CLI/Slack UI yet.
+
+### 0.3 Promised but not built in v1
+
+Eval-in-CI wiring; the "no hardcoded values" grep test; `PolicyEngine` hot-reload
+on promotion (the store promotes; a new engine instance is constructed per
+deployment); Slash-command approvals; per-tool rate limits; cancellation;
+multi-tenant policy (still a non-goal).
 
 ---
 
 ## 1. Context and motivation
 
-The current repo (`src/support-voice-agent/`) is a *meeting etiquette state machine with optional LLM co-pilot*. It is well-architected — strict port-based layering, no hardcoded config, honest degradation, hard-gated guardrails — but it is not a **fully agentic system**.
-
-The user has approved a four-layer model:
+The repo (`src/support-voice-agent/`) is a *meeting etiquette state machine with
+optional LLM co-pilot* — strict port-based layering, no hardcoded config, honest
+degradation, hard-gated guardrails. On top of it now sits a four-layer agentic
+orchestration:
 
 1. **Understanding** (learned, memory-driven)
 2. **Governance** (declared, policy-driven)
 3. **Execution** (adaptive, tool-driven)
-4. **Learning** (self-improving, outcome-driven, **online with human gates, bounded by guardrails**)
+4. **Learning** (self-improving, outcome-driven, online with human gates, bounded by guardrails)
 
-The new system is a **full support engineer platform**: live meeting participation, async/on-call work (ticket triage, runbook execution without a meeting, on-call rotations, incident response), and proactive discovery.
+The result is a **full support engineer platform**: live meeting participation,
+async/on-call work (webhook triage), and proactive discovery. The Learning layer
+is online, human-gated, and SafetyNet-bounded; SafetyNet checks live in code, not
+policy. The multi-agent shape lives inside Execution (Triage / Investigator /
+Executor / Reviewer under one SupervisorAgent).
 
-The Learning layer is **online, with human-gated promotion, and bounded by the SafetyNet**. SafetyNet checks live in code, not policy; code changes go through normal PR review, never through the Learning promotion gate.
-
-The multi-agent shape lives **inside the Execution layer** (Triage / Investigator / Executor / Reviewer), supervised by a single SupervisorAgent.
-
----
+**The legacy agent is not deleted.** It remains the etiquette engine (mute/wake/
+barge-in/confirmations), the deterministic fallback when the platform fails, and
+the host of the meeting surface. See §15.
 
 ## 2. Non-goals
 
-- This is **not** an LLM framework. We do not build a generic agent SDK. The agent's domain is support engineering.
-- We do **not** add a new vector DB or a new policy language. We use existing primitives (Zod for schema, JSON Schema for tool definitions, YAML for policies, JSONL for the event log).
-- We do **not** rewrite integrations. Jira/Logs/Runbook/Slack clients move forward unchanged.
-- We do **not** make the SafetyNet overridable from policy. SafetyNet is code, not data.
-- We do **not** ship v1 with multi-tenant policy isolation. Single-tenant is fine.
-
----
+- Not an LLM framework; no generic agent SDK. The domain is support engineering.
+- No new vector DB, no new policy language: Zod at boundaries, YAML policies, JSONL events.
+- Integrations are not rewritten: Jira/Logs/Runbook/Slack clients unchanged.
+- SafetyNet is not overridable from policy. It is code.
+- No multi-tenant policy isolation in v1.
 
 ## 3. Top-level architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  UNDERSTANDING  (intent + memory, learned)                   │
-│  • IntentClassifier (LLM-backed; Zod-validated envelope)     │
-│  • EpisodicMemory (vector + KV, per-meeting + cross-meeting) │
-│  • ContextAssembler (envelope + episodes + recent decisions) │
+│  UNDERSTANDING  (src/understanding/)                         │
+│  • IntentClassifier (LLM-backed; Zod-validated envelope;     │
+│    honest degradation, optional correlationId join)          │
+│  • LegacyClassifierAdapter (today's heuristics as floor)     │
+│  • EpisodicMemory (per-meeting TTL + cross-meeting)          │
+│  • ContextAssembler → ContextBundle                          │
 └──────────────────────────────────────────────────────────────┘
                               │ IntentEnvelope + ContextBundle
                               ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  GOVERNANCE  (policy-as-data, declared)                      │
-│  • PolicyEngine (loads YAML rules; allow/deny/require/       │
-│    approval/transform)                                       │
-│  • ApprovalGate (human-in-the-loop via Slack; M-of-N)        │
-│  • SafetyNet (RBAC, injection, loop detect, cost cap,        │
-│    output PII/secrets filters; always-on, code-only)         │
-│  • PolicyStore (versioned, signed, diffable; PromotionGate   │
-│    is the only writer)                                       │
+│  GOVERNANCE  (src/governance/)                               │
+│  • PolicyEngine (YAML rules, strict DSL, default-deny)       │
+│  • ApprovalGate (Slack text + M-of-N signatures + timeouts)  │
+│  • SafetyNet (RBAC, injection, loop, cost, PII — code only)  │
+│  • PolicyStore (SQLite versions + content-addressed YAML;    │
+│    PromotionGate is the only writer)                         │
 └──────────────────────────────────────────────────────────────┘
                               │ GovernedAction
                               ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  EXECUTION  (multi-agent, adaptive)                          │
-│  • SupervisorAgent (loop, retry, verify, escalate)           │
-│  • TriageAgent      (classify, decide urgency)               │
-│  • InvestigatorAgent (pull logs, query Jira, gather data)    │
-│  • ExecutorAgent    (create tickets, run runbooks, Slack)    │
-│  • ReviewerAgent    (verifies outcome; pure critic)          │
-│  • ToolRunner (schema-validate → RBAC → rate-limit →         │
-│    idempotency → retry → exec → log)                         │
+│  EXECUTION  (src/execution/)                                 │
+│  • SupervisorAgent (caps: hops/tokens/wall-clock/loop)       │
+│  • Triage / Investigator / Executor / Reviewer (LlmAgents)   │
+│  • ToolRunner (governed-only → SafetyNet → Zod → idempotency │
+│    → retry/timeout → tool_call event)                        │
+│  • verifier (deterministic checks, reuses OutputFilters)     │
 └──────────────────────────────────────────────────────────────┘
                               │ Outcome
                               ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  LEARNING  (online, human-gated, SafetyNet-bounded)          │
-│  • OutcomeRecorder (joins events per correlationId)          │
-│  • SuggestionQueue (clusters outcomes → PolicySuggestion)    │
-│  • PromotionGate (human + eval suite + SafetyNet regression; │
-│    only writer to PolicyStore)                               │
-│  • KnowledgeExtractor (extracts reusable ProcedureSpecs)     │
+│  LEARNING  (src/learning/, off unless LEARNING_ENABLED)      │
+│  • OutcomeRecorder (var/outcomes/<cid>.json)                 │
+│  • SuggestionQueue (v1 heuristic → PolicySuggestion)         │
+│  • EvalRunner (+ policies/eval/*.yaml)                       │
+│  • PromotionGate (candidate eval + SafetyNet regression +    │
+│    M-of-N; only PolicyStore writer; policy_promoted event)   │
+│  • KnowledgeExtractor (successful tool sequences →           │
+│    ProcedureSpecs in cross-meeting memory)                   │
 └──────────────────────────────────────────────────────────────┘
 
-Event spine (shared): DecisionEventLog (append-only JSONL v1)
-Surface modes: meeting | async (webhooks/cron) | proactive (anomaly tick)
+Wiring (src/pipeline/): OrchestratedPipeline owns the legacy agent and routes
+per §15. Event spine (src/event-log/): append-only JSONL under var/events/.
+Surfaces (src/surface/): async (jira/slack/cron parsers) + proactive (anomaly).
 ```
 
 ### 3.1 Surface modes
 
-| Mode | Trigger | Latency budget |
-|------|---------|----------------|
-| **Live meeting** | STT line from a meeting bridge | Barge-in budget: 1.5s for direct, 3s for tool calls |
-| **Async ticket** | Jira webhook, Slack mention, scheduled cron | 5 min default; configurable |
-| **Proactive** | Anomaly detector tick (logs, metrics) | 30s default; suppressed unless severity ≥ threshold |
-
-A single trigger always flows: `SourceAdapter → Understanding → Governance → Execution → Learning`.
+| Mode | Entry point | Status |
+|------|-------------|--------|
+| **Live meeting** | `OrchestratedPipeline.processUtterance` → classifier → route (§15); bridge/STT unchanged | Implemented |
+| **Async ticket** | `parseJiraWebhook` / `parseSlackMention` / `buildCronEnvelope` → `processEnvelope` | Parsers implemented; HTTP listeners are host responsibility |
+| **Proactive** | `anomalyToEnvelope` (`isIncidentWorthy`: P0/P1 = incident, else anomaly) → `processEnvelope` | Implemented |
 
 ### 3.2 Event spine
 
-A single append-only `DecisionEvent` log carries every cross-layer event. Every layer emits; only Learning, the Supervisor's "recent decisions" window, and the SafetyNet audit replay read from it. v1 stores JSONL files segmented daily under `./var/events/`. Same `EventLog` interface; pluggable to Postgres/Kafka later.
-
----
+Append-only `DecisionEvent` log; every layer emits; Learning, the pipeline's
+recent-events window, and audits read. v1 stores JSONL segmented daily under
+`var/events/` (gitignored), serialized per-process writes, streaming filtered
+queries (`kind/layer/source/correlationId/from/to`). Same `EventLog` interface;
+pluggable to Postgres/Kafka later.
 
 ## 4. Layer 1 — Understanding (intent + memory)
 
 ### 4.1 Components
 
-**`IntentClassifier`** — LLM-backed classifier producing a structured `IntentEnvelope`:
+**`IntentClassifier`** (`understanding/intent-classifier.ts`) — LLM-backed,
+Zod-validated `IntentEnvelope` (union as drafted, plus the additive
+`entities.runbookDestructive?: boolean` flag — see §5.1). Degradation is honest:
+unwired LLM / unparseable output / schema-invalid output → deterministic
+fallback (each fallback reason recorded in the emitted event's
+`contextBundleRef: via:<reason>`); transport failures **propagate**.
+`classify(input, { correlationId })` lets a caller stamp the emitted
+`understanding` event with the request's correlation id so the trail joins.
 
-```ts
-type IntentEnvelope = {
-  intent:
-    | { kind: 'meeting_response';  subKind: 'question' | 'feedback' | 'runbook_offer' | 'complaint' | 'critical' | 'mute' | 'wake' }
-    | { kind: 'async_triage';      subKind: 'incident' | 'service_request' | 'question' | 'fyi' }
-    | { kind: 'proactive_alert';   subKind: 'incident' | 'anomaly' | 'slo_breach' }
-    | { kind: 'human_action';      subKind: 'approval' | 'rejection' | 'edit' | 'answer' }
-    | { kind: 'unknown' };
-  confidence: number;             // 0..1
-  entities: {
-    ticketKeys?: string[];
-    runbookIds?: string[];
-    services?: string[];
-    severity?: Severity;
-    speakerId?: string;
-  };
-  rawContext: { source: 'meeting' | 'jira' | 'slack' | 'cloudwatch' | 'splunk' | 'cron'; ts: number; payload: unknown };
-};
-```
+**`LegacyClassifierAdapter`** — ports today's heuristics; order: mute → critical
+→ feedback → complaint → **runbook offer** → direct question → wake → unknown.
+(Offers before questions: "can you restart X?" is both; the offer is more
+specific.)
 
-- Output is JSON mode + Zod-validated at the LLM boundary. Failed parse → `LegacyClassifierAdapter` (today's regex heuristics) as fallback.
-- This is **two-path by design**: LLM is the ceiling, deterministic heuristics is the floor. With zero LLM config, the system still works.
+**`EpisodicMemory`** — per-meeting (TTL 30d default, `{ meetingId, recordedAt }`
+stamps, real `purgeMeeting`) + cross-meeting (persistent, holds procedures).
+Local `hashEmbedder` default; `Embedder` port for swaps.
 
-**`EpisodicMemory`** — two stores behind one interface:
-
-- **Per-meeting** episodes: vector-indexed, TTL-bounded (default 30 days), keyed by meetingId. Holds utterances, alerts, decisions, outcomes.
-- **Cross-meeting** knowledge: persistent vector store, no TTL. Holds `ProcedureSpec`s extracted by `KnowledgeExtractor`.
-
-Embeddings: today's `hashEmbedder` is the local default; real cloud embedder is a swappable `Embedder` (same port).
-
-**`ContextAssembler`** — builds the LLM prompt from:
-
-1. `IntentEnvelope`
-2. Retrieved episodes (`episodic.search(intent, topK=5, minScore=0.3)`)
-3. Recent decisions (sliding window from `DecisionEvent` log)
-4. Policy summary
-
-Output: `ContextBundle`, the single thing Execution's sub-agents consume.
+**`ContextAssembler`** → `ContextBundle { envelope, episodes, recent }` from the
+envelope, top-K recall (`topK=5, minScore=0.3` default), and a recent-decision
+window. *No policy summary component in v1.*
 
 ### 4.2 Boundary discipline
 
-Understanding produces `IntentEnvelope` + `ContextBundle`. **It does not call tools and does not decide policy** — only describes what was understood. A bug in the classifier can never directly cause a Jira write.
-
-### 4.3 Boundary with the current repo
-
-- Today's `heuristics.ts` → `src/understanding/legacy/classifier-adapter.ts`.
-- Today's `InMemoryVectorMemory` / `InMemoryKeyValueStore` → `src/understanding/memory/`.
-
----
+Understanding describes; it never calls tools or decides policy. A classifier
+bug cannot directly cause a Jira write.
 
 ## 5. Layer 2 — Governance (policy-as-data)
 
 ### 5.1 Components
 
-**`PolicyEngine`** — loads rules from a **versioned policy bundle** (default path: `./policies/*.yaml`, overridable via `POLICY_PATH`). Rules are *data*, not code.
-
-Rule shape (YAML):
+**`PolicyEngine`** — loads one YAML bundle; rules are Zod-validated with
+**strict objects** (unknown keys throw at load). Supported predicate keys:
 
 ```yaml
-- id: destructive_runbook_requires_admin_approval
-  when:
-    intent.kind: meeting_response
-    intent.subKind: runbook_offer
-    entities.runbookIds.exists: true
-    runbook.destructive: true
-  effect: require_approval
-  approver_role: admin
-  approver_count: 2
-  timeout_seconds: 300
-  on_timeout: deny
+rules:
+  - id: destructive_runbook_requires_admin_approval
+    when:
+      intent_subKind: runbook_offer       # + optional intent_kind
+      runbook_destructive: true           # provider flag first, id heuristic fallback
+      tools_in: [execute_runbook_script]
+    effect: require_approval              # allow | deny | require_approval | transform
+    approver_role: admin
+    approver_count: 2
+    timeout_seconds: 300
+    on_timeout: deny
 
-- id: p1_alert_auto_incident_in_jira
-  when:
-    intent.kind: proactive_alert
-    entities.severity: [P0, P1]
-  effect: allow
-  tools: [jira.createIssue, slack.postMessage]
-  constraints:
-    jira.issueType: Incident
-    jira.priority_max: P1
+  - id: p01_alert_auto_incident
+    when:
+      intent_kind: proactive_alert
+      severity_in: [P0, P1]
+      tools_in: [jira_create_issue, meeting_interrupt]
+    effect: allow
 
-- id: never_emit_credit_card_data
-  when: { any_output.matches_regex: '\b(?:\d[ -]*?){13,19}\b' }
-  effect: deny
-  reason: 'PII guard'
+  - id: never_emit_credit_card
+    when:
+      output_matches_regex: '\b(?:\d[ -]*?){13,19}\b'
+    effect: deny
 ```
 
-Engine exposes one method:
+Semantics: **first matching rule wins; no match = default-deny.** Matching is
+against `(IntentEnvelope, ProposedAction)`; `output_matches_regex` tests the
+serialized action args. Approval constraints ride on the returned
+`GovernanceDecision` (`approverRole/approverCount/timeoutSeconds/onTimeout`).
 
-```ts
-evaluate(envelope: IntentEnvelope, proposedAction: ProposedAction): Decision;
-```
+**Destructiveness resolution:** `runbook_destructive: true` matches when
+`entities.runbookDestructive === true` (provider-confirmed — set by the pipeline
+from the runbook catalog); if the flag is `false` the rule cannot match; if
+absent, the fallback heuristic checks ids for `all|prod` scope markers.
 
-Effects: `allow | deny | require_approval | transform`. Every evaluation emits a `DecisionEvent`.
+**`ApprovalGate`** — stages approvals: posts a plain-text Slack message (tool,
+args, M-of-N count), tracks signatures (`sign(id, role, signerId?)` — dedupes by
+signer when `signerId` is given), `deny` is terminal (signing cannot resurrect),
+`checkTimeouts()` expires pending approvals (default 5 min) and emits
+`approval_timeout`. Emits `approval_request` / `approval_granted` events.
+*Block Kit buttons and slash commands are not in v1.*
 
-**`ApprovalGate`** — for `require_approval` decisions:
+**`SafetyNet`** — always-on code (constructor options only, never policy):
+`Rbac` (destructive tools need approver roles; unknown speakers = guest — ports
+`Guardrails`), `Injection` (delegates to `isPromptInjection`), `LoopDetector`
+(**stateful per correlationId**; veto when a call would exceed 3 identical
+`(tool, args)` executions), `CostCap` (50k tokens default), `OutputFilters`
+(credit cards, AWS keys, JWTs — veto, not redact). `runAll()` runs every check;
+any veto wins over any policy allow; the result carries
+`unconditionalSafetyNetCheck: true`.
 
-- Posts a Slack message to the configured approver channel with Block Kit `✅ Approve` / `❌ Deny` buttons.
-- Slash fallback: `/approve <policyId>` / `/deny <policyId>`.
-- Tracks approvals as signatures against the policy's `approver_count`. M-of-N required.
-- On timeout: `deny`, emits `ApprovalTimeoutEvent`.
-
-Approvers are RBAC-resolved through the SafetyNet speaker registry (today's `Guardrails.roleOf` — moves to `governance/safety-net/rbac.ts`).
-
-**`SafetyNet`** — always-on, cannot be disabled by policy. This is the floor below which the agent will not go, no matter what Learning promotes.
-
-Owns:
-- RBAC (port from today's `Guardrails`).
-- Prompt-injection detection (port from today's `isPromptInjection`).
-- **Loop detector** — per-request tool-call graph; flags repeated identical calls (`> 3` identical `(tool, args)` tuples) → `deny`.
-- **Cost cap** — per-request LLM token ceiling (configurable, default 50k tokens) → `deny`.
-- **Output filters** — regex-based PII/secret redaction (credit cards, AWS keys, JWTs, etc.) → `deny` or `transform`.
-
-SafetyNet vetoes **always win** over Policy `allow`. This is enforced in two layers:
-
-- **Type system**: tool handlers take `GovernedAction` (not raw `ProposedAction`) as their first argument, so `ToolRunner` cannot be invoked without a prior Governance evaluation.
-- **Runtime**: `ToolRunner` re-invokes `SafetyNet.check()` on every call as a defense-in-depth pass; the check returns an `unconditionalSafetyNetCheck: true` flag in the resulting `Decision` that downstream code is required to honor.
-
-**`PolicyStore`** — local v1: YAML files + SQLite index (`policy_versions`, `policy_promotions`, `audit_trail`). Every bundle has `version`, `sha256`, `authored_by`, `signed_by`, `promoted_at`, `eval_run_id`. PromotionGate is the only writer.
+**`PolicyStore`** — SQLite (better-sqlite3, WAL): `policy_versions` (sha256,
+content-addressed YAML path, author, signer, parent lineage, promotion metadata)
++ `policy_current` (single-row pointer, FK-enforced). `save`/`promote` are
+async; `promote` requires ≥1 signer, an evalRunId, and `safetyNetPassed: true`
+(Zod-enforced) in one transaction. PromotionGate is the only production writer.
 
 ### 5.2 Boundary with Execution
 
-Governance produces:
+`GovernedAction = execute | request_approval | deny` exactly as drafted;
+`ToolRunner.run(governed, ctx)` accepts nothing else — an unresolved
+`request_approval` throws.
 
-```ts
-type GovernedAction =
-  | { kind: 'execute';         action: ProposedAction; decision: Decision }
-  | { kind: 'request_approval'; action: ProposedAction; decision: Decision; approvalId: string }
-  | { kind: 'deny';             decision: Decision };
-```
+### 5.3 Boundary with the legacy repo
 
-Execution **cannot** call a tool without `GovernedAction` of kind `execute` or a resolved `request_approval`. Type system enforces this: tool handlers take `GovernedAction` as their first argument.
-
-### 5.3 Boundary with the current repo
-
-- Today's `guardrails.ts` becomes the *minimum* SafetyNet (RBAC + injection + escalation). New SafetyNet adds loop detection, cost caps, output filters.
-- Today's `pageSecurity` / `pageInfra` → `SafetyNet` + `ApprovalGate` (same `SlackNotifier` port).
-- The hardcoded "destructive requires admin" rule (in old `Guardrails.checkDestructive`) becomes the **default policy** in `policies/default.yaml`. Old repo's behavior is the shipped default bundle.
-
----
+`guardrails.ts` RBAC → `safety-net/rbac.ts` (the original Guardrails class
+remains for the legacy path). "Destructive requires admin" is data in
+`policies/default.yaml`, parity-tested: read-only allow; destructive runbook →
+2-admin/300s/deny-on-timeout; non-destructive stays allowed; PII hard-denied;
+P0/P1 alerts auto-allowed; unknown tools default-deny.
 
 ## 6. Layer 3 — Execution (multi-agent)
 
 ### 6.1 Components
 
-**`SupervisorAgent`** — entry point for every `GovernedAction` of kind `execute`. Owns the *agent loop*:
+**`SupervisorAgent`** — pipeline per request: Triage → Investigator plan
+(read-only) → Reviewer → **the governed action** → Executor plan (side-effects)
+→ final Review. Every step runs through the ToolRunner and `verifyResult`;
+any failed verification ends the request `ok=false` with the root cause in
+`reason`. Caps (fail-closed): `maxHops=8`, `maxTokens=50k`, `maxWallClockMs=60s`,
+`maxIdenticalToolCalls=3` (reuses the SafetyNet's LoopDetector per
+correlationId). Emits `agent_outcome` (summary + hops + toolCalls). Deny and
+unresolved-approval inputs fail closed without executing. *Reviewer-fail →
+retry-with-feedback is not in v1; a `fail` verdict ends the request.*
 
-- Pick a sub-agent, hand it the action, watch for `verify` signals, decide continue / retry / escalate / hand off.
-- **Hard caps at supervisor level:**
-  - `maxSubAgentHopsPerRequest` (default 8)
-  - `maxTotalTokensPerRequest` (SafetyNet also enforces)
-  - `maxWallClockMsPerRequest` (default 60s for live meeting, 5min for async)
-  - **Loop detection at supervisor level**: same `(tool, args)` tuple called >3 times → SafetyNet veto, hard stop.
-- Supervisor never calls tools directly. Only orchestrates sub-agents. This is the architectural fix for the "the brain knows too much" smell in the current `agent.ts`.
+**Sub-agents** — `LlmAgent` base: focused system prompt, Zod-validated JSON
+output, `source: 'llm' | 'fallback'` on every result; unwired/invalid →
+deterministic fallback; transport errors propagate. Tool constraints live in
+each schema (Triage suggests from the real `ToolName` enum; Investigator plans
+only `query_logs`/`invoke_human_on_slack`; Executor plans only mutating tools;
+Reviewer has none).
 
-**Sub-agents** (each is a focused `LlmAgent` with its own system prompt, tool whitelist, verifier):
+**`ToolRunner`** — the single path to integrations:
 
-| Agent | Purpose | Tools | Verifier |
-|-------|---------|-------|----------|
-| **TriageAgent** | First hop. Classify, decide urgency, decide if investigation needed. | `intent.refine`, `memory.search` | ReviewerAgent checks "is this an incident or noise?" |
-| **InvestigatorAgent** | Gather data. Read-only. | `jira.getIssue`, `logs.query`, `memory.search`, `runbook.describe` | ReviewerAgent checks "did we actually get data?" |
-| **ExecutorAgent** | Side-effects. | `jira.createIssue`, `jira.transition`, `jira.addComment`, `runbook.execute`, `slack.postMessage` | ReviewerAgent checks "did the side-effect land?" |
-| **ReviewerAgent** | Reads the sub-agent's tool-call trace + outputs, returns `pass` / `fail` / `reask`. No tools. Pure critic. | (none) | n/a |
+1. GovernedAction check (`deny` → failure; `request_approval` → throw).
+2. SafetyNet re-check (defense in depth).
+3. Registry lookup (typed `satisfies Record<ToolName, ToolEntry>`).
+4. Zod arg validation.
+5. Idempotency dedupe (optional key, 5-min TTL, injectable clock).
+6. Execute with **per-attempt timeout (30s default)** and **retry with
+   exponential backoff on thrown errors** (3 attempts default).
 
-Why these four: Triage/Investigate/Execute is standard incident response shape; Reviewer-as-critic is the cheapest way to catch hallucinated tool calls before they become wrong Jira tickets.
+Error contract: tools **throw** transport failures (retryable) and return
+`ToolResult` for handled failures (validation, provider-reported errors, unwired
+ports). The runner never throws across its boundary for validation/execution
+failures. Exactly one `tool_call` event per run (final result, attempts, latency).
+*Per-tool rate limiting and `Retry-After` support: not in v1.*
 
-**`ToolRunner`** (shared, single instance) — every tool call goes through this pipeline:
+**`verifier`** — deterministic checks (Jira key shape, per-tool ok, PII output
+filter via SafetyNet `OutputFilters`) and surfaces the underlying error string
+(e.g. a SafetyNet veto) in the failure reason.
 
-1. **Schema validate args** against `ToolSchema.parameters` (Zod) — fixes today's `JSON.parse` with no validation.
-2. **RBAC check** (SafetyNet) — speakerId/role against tool's required role.
-3. **Rate-limit check** — per-tool QPS (default 5/s destructive, 20/s read-only).
-4. **Idempotency** — every mutating tool takes `idempotencyKey`; dedupes against 5-min TTL store.
-5. **Retry with exponential backoff** — `5xx` / network errors only; max 3 attempts; respects `Retry-After`.
-6. **Timeout** — per-tool configurable; default 30s.
-7. **Execute** through the existing integration port (Jira, Splunk, CloudWatch, Runbook, Slack).
-8. **Emit `ToolCallEvent`** (start + end) with: tool name, args, result, latency, attempt count, correlationId.
+### 6.2 Boundary with the legacy repo
 
-Returns `ToolResult` — never throws across the boundary.
-
-**`Verifier`** — `ReviewerAgent` (LLM critic) + lightweight non-LLM checks:
-
-- `jira.createIssue` must return a key matching `^[A-Z][A-Z0-9_]+-\d+$`.
-- `slack.postMessage` must return `ok: true`.
-- `runbook.execute` must report `ok: true`.
-
-On `fail` → Supervisor retries with Reviewer's feedback appended to next prompt. After `maxRetries` (default 2) → escalate to human via `ApprovalGate` with reason `"executor failed verification N times"`.
-
-### 6.2 Boundary with the current repo
-
-- Today's `tools/handlers.ts` → `ToolRunner`.
-- Today's `tools/orchestrator.ts` → `SupervisorAgent`. `maxRounds` and `fallbackToDeterministic` semantics carry over (now means "fall back to deterministic Triage heuristic").
-- Today's `processUtterance` is **deleted**; the bridge hands a `TranscriptLine` to `SourceAdapter.meeting()`, which flows through Understanding → Governance → Execution.
-
-### 6.3 Cross-cutting in Execution
-
-- **Cancellation**: every agent's `abort()` cancels in-flight tool calls and LLM streams. Required for live-meeting barge-in.
-- **Concurrency**: tool calls inside one sub-agent are parallel (`Promise.all`); sub-agents run sequentially.
-- **Determinism in tests**: every LLM call goes through injectable `request: typeof fetch`; optional `LlmStub` for fixture-based tests.
-
----
+`tools/handlers.ts` behavior is preserved inside `execution/tools/*` (same
+result shaping and wording); the original handlers remain for the legacy path.
+The LLM `LlmOrchestrator` and `maxRounds` remain only inside the legacy agent.
+**`processUtterance` is NOT deleted** — see §15.
 
 ## 7. Layer 4 — Learning (online, human-gated, SafetyNet-bounded)
 
 ### 7.1 Components
 
-**`OutcomeRecorder`** — subscribes to `agent_outcome` + `approval_*` + `tool_call` events. Joins them by `correlationId` into `OutcomeRecord`:
+**`OutcomeRecorder`** — joins events per correlationId:
 
 ```ts
 type OutcomeRecord = {
   correlationId: string;
-  intent: IntentEnvelope;
-  decisions: Decision[];
   toolCalls: ToolCallEvent[];
-  finalResult: { ok: boolean; summary: string };
-  userFeedback?: 'thumbs_up' | 'thumbs_down' | 'edit';
-  implicitFeedback?: { wasOverridden: boolean; wasApproved: boolean; retries: number };
-  wallClockMs: number;
-  tokens: { prompt: number; completion: number };
+  finalResult?: { ok: boolean; summary: string };
+  approvals: ApprovalGrantedEvent[];
   ts: number;
 };
 ```
 
-Persisted to `./var/outcomes/<correlationId>.json`.
+Persisted to `var/outcomes/<correlationId>.json`. (Leaner than drafted: no
+intent/decisions/feedback/token fields in v1.)
 
-**`SuggestionQueue`** — background job (cron or on-append trigger) that mines `OutcomeRecord`s and emits `PolicySuggestion`s:
+**`SuggestionQueue`** — `scan()` over outcome files; v1 heuristic: ≥ threshold
+(default 5) outcomes with destructive-runbook approvals → one suggestion
+`modify_rule destructive_runbook_requires_admin_approval { approver_count: 1 }`,
+**risk: high**, evidence-carrying, malformed-file tolerant. Suggestions are
+proposals only; they never touch the store.
 
-```ts
-type PolicySuggestion = {
-  id: string;
-  rationale: string;
-  evidence: { outcomeIds: string[]; sampleSize: number; confidence: number };
-  proposedChange:
-    | { type: 'add_rule'; rule: PolicyRule }
-    | { type: 'modify_rule'; ruleId: string; patch: PolicyPatch }
-    | { type: 'tighten_safety_net'; check: SafetyNetCheck }
-    | { type: 'add_procedure'; procedure: ProcedureSpec };
-  risk: 'low' | 'medium' | 'high';
-  estimatedImpact: { outcomeMetric: string; expectedDelta: string };
-};
-```
+**`EvalRunner`** — runs `policies/eval/scenarios.yaml` (8 scenarios) against a
+bundle; scenario files are Zod-validated (fail loud). Ships with
+`policies/eval/safety_net_regression.yaml` (3 must-still-veto scenarios).
 
-Suggestions go into a queue, **not** into the live `PolicyStore`. They are proposals, not changes.
+**`PromotionGate`** — the only PolicyStore writer. Order of operations:
+signature count (default 2) → optional `hasPolicyAdminRole` check → suggestion
+Zod validation (**`tighten_safety_net` and `add_procedure` are refused outright**
+— SafetyNet is code; procedures belong in memory) → build candidate bundle
+(add/modify rules via yaml round-trip; unknown ruleId throws) → **evaluate the
+CANDIDATE** with EvalRunner (a regression-causing patch is refused before
+landing) → run SafetyNet regression (must veto, and veto for the expected
+check) → atomic save+promote with lineage → emit `policy_promoted` (bundleSha,
+promotedBy). *No hot-reload of a long-lived engine in v1; construct engines per
+deployment or after promotion.*
 
-**`PromotionGate`** — the **only** writer to `PolicyStore`. Workflow:
-
-1. Human opens the Suggestion Queue UI (CLI / Slack thread for v1).
-2. For each suggestion: **approve**, **reject**, **edit**, or **defer**.
-3. On approve:
-   - Run **eval suite** (`./tests/eval/scenarios.yaml`) against sandboxed current + proposed policy.
-   - Run **SafetyNet regression suite** (SafetyNet must still veto the same things it vetoed before).
-   - Require `approver_count: 2` from humans with `policy_admin` role.
-   - On pass: write new versioned policy bundle to `PolicyStore`, emit `PolicyPromotedEvent`, hot-reload `PolicyEngine`.
-
-Promotion **cannot be silent**. `PolicyPromotedEvent` is auditable forever.
-
-**`KnowledgeExtractor`** — separate, **offline by default** (nightly). Mines `OutcomeRecord`s for **procedures**:
-
-```ts
-type ProcedureSpec = {
-  id: string;
-  trigger: IntentMatch;
-  steps: Array<{ agent: 'triage' | 'investigator' | 'executor'; tool?: ToolName; args?: unknown }>;
-  successRate: number;
-  sampleSize: number;
-};
-```
-
-Procedures live in cross-meeting episodic memory. The next time a similar intent comes in, the Supervisor can short-circuit by invoking the procedure directly (skipping the multi-agent dance for known-good patterns). This is the **only** form of "online behavior change" Learning does without going through PromotionGate — and it's bounded: procedures only suggest tool sequences that already passed policy once.
+**`KnowledgeExtractor`** — offline/nightly; clusters outcomes by the ordered
+sequence of **successful** tool calls (min cluster 2); failures never inflate a
+procedure's `successRate` (1.0 by construction). Produces `ProcedureSpec
+{ id, trigger (tool sequence), steps, successRate, sampleSize }` into
+cross-meeting episodic memory. *Procedures are stored but not yet used to
+short-circuit execution — future work.*
 
 ### 7.2 SafetyNet-bounded invariants
 
-These are the architectural guarantees that make Learning safe:
-
-- **SafetyNet checks live in code, not policy.** Code changes require a normal PR review (humans, not Learning).
-- `maxRoundsPerRequest`, `maxTokensPerRequest`, `maxWallClockMsPerRequest`, the loop detector, the PII output filter are **all in code**.
-- The PromotionGate itself is in code. Learning **cannot** promote its own promotion rules.
-- The SafetyNet regression suite is required for every promotion.
-- v1 ships the Learning layer with the SuggestionQueue + PromotionGate **disabled by default** behind `LEARNING_ENABLED=false`. Operators opt in.
-
----
+As drafted, all holds: SafetyNet in code; caps in code; PromotionGate in code;
+regression suite required per promotion; **`LEARNING_ENABLED` defaults to false**
+(absent = unwired, consistent with the config module's empty-env contract);
+PromotionGate cannot be promoted around.
 
 ## 8. Event spine — `DecisionEventLog`
 
-```ts
-interface EventLog {
-  append(event: DecisionEvent): Promise<void>;
-  query(filter: EventFilter): AsyncIterable<DecisionEvent>;
-}
+As drafted (§8 union), with these as-built notes: all events carry
+`correlationId/ts/layer/source`; `tool: ToolName` binds the **real** union;
+`approval_granted.signerRole` is `string` (roles are gate-level, not the legacy
+`SpeakerRole` type); helpers `isDecisionEvent()` and
+`DecisionEventOf<K>` exist for narrowing. The `understanding` event's
+`contextBundleRef` doubles as the classification-path marker (`via:llm`,
+`via:unwired`, `via:parse_error`, `via:schema_invalid`).
 
-type DecisionEvent = DiscriminatedUnion<{
-  understanding:  { envelope: IntentEnvelope; contextBundleRef: string };
-  governance:     { intent: IntentEnvelope; decision: Decision };
-  safety_net:     { vetoed: boolean; check: string; reason: string };
-  approval_request:  { approvalId: string; policyId: string; approver_count: number };
-  approval_granted:  { approvalId: string; signerRole: SpeakerRole };
-  approval_timeout:  { approvalId: string };
-  tool_call:      { tool: ToolName; args: unknown; result: ToolResult; latencyMs: number; attempts: number; correlationId: string };
-  agent_outcome:  { correlationId: string; finalResult: { ok: boolean; summary: string } };
-  policy_suggested:  { suggestionId: string };
-  policy_promoted:   { policyId: string; bundleSha: string; promotedBy: SpeakerRole[] };
-  knowledge_extracted: { procedureId: string };
-}>;
-```
-
-v1: JSONL files segmented daily under `./var/events/`. Pluggable to Postgres/Kafka later via same interface.
-
----
-
-## 9. Repo file layout
+## 9. Repo file layout (as built)
 
 ```
-support-engineer/
-├── policies/                              # policy bundles (data, versioned)
-│   ├── default.yaml                       # shipped defaults; preserves today's behavior
-│   ├── security.yaml
-│   ├── meeting.yaml
-│   └── eval/                              # eval scenarios for PromotionGate
-│       ├── scenarios.yaml
-│       └── safety_net_regression.yaml
-├── src/
-│   ├── understanding/                     # Layer 1
-│   │   ├── intent-classifier.ts
-│   │   ├── context-assembler.ts
-│   │   ├── legacy/
-│   │   │   └── classifier-adapter.ts      # ports today's heuristics.ts
-│   │   └── memory/
-│   │       ├── episodic.ts                # cross-meeting + per-meeting
-│   │       ├── kv.ts                      # ports today's KeyValueStore
-│   │       ├── vector.ts                  # ports today's VectorMemory
-│   │       └── embedders/
-│   │           ├── hash.ts                # ports today's hashEmbedder
-│   │           └── openai.ts              # cloud-backed (optional)
-│   ├── governance/                        # Layer 2
-│   │   ├── policy-engine.ts
-│   │   ├── policy-store.ts
-│   │   ├── approval-gate.ts
-│   │   ├── safety-net/
-│   │   │   ├── rbac.ts                    # ports today's Guardrails
-│   │   │   ├── injection.ts
-│   │   │   ├── loop-detector.ts
-│   │   │   ├── cost-cap.ts
-│   │   │   └── output-filters.ts          # PII, secrets
-│   │   └── decision.ts                    # Decision, GovernedAction types
-│   ├── execution/                         # Layer 3
-│   │   ├── supervisor.ts
-│   │   ├── agents/
-│   │   │   ├── triage.ts
-│   │   │   ├── investigator.ts
-│   │   │   ├── executor.ts
-│   │   │   └── reviewer.ts
-│   │   ├── tool-runner.ts
-│   │   ├── tools/
-│   │   │   ├── registry.ts                # tool schemas + handlers
-│   │   │   ├── jira.ts
-│   │   │   ├── logs.ts
-│   │   │   ├── runbook.ts
-│   │   │   ├── slack.ts
-│   │   │   └── memory.ts                  # tools for EpisodicMemory
-│   │   └── verifier.ts
-│   ├── learning/                          # Layer 4
-│   │   ├── outcome-recorder.ts
-│   │   ├── suggestion-queue.ts
-│   │   ├── promotion-gate.ts
-│   │   ├── knowledge-extractor.ts
-│   │   └── eval-runner.ts
-│   ├── event-log/                         # shared substrate
-│   │   ├── log.ts                         # EventLog interface + JSONL impl
-│   │   ├── types.ts                       # DecisionEvent discriminated union
-│   │   └── correlation.ts                 # correlationId generator
-│   ├── surface/                           # how inputs enter the system
-│   │   ├── meeting/
-│   │   │   ├── bridge.ts
-│   │   │   ├── ports.ts                   # ports today's MeetingBridge
-│   │   │   ├── session.ts                 # ports today's createVoiceSession
-│   │   │   └── fakes.ts
-│   │   ├── async/
-│   │   │   ├── jira-webhook.ts
-│   │   │   ├── slack-mention.ts
-│   │   │   └── cron.ts
-│   │   └── proactive/
-│   │       └── anomaly-detector.ts
-│   ├── llm/                               # the one LLM client, shared
-│   │   ├── client.ts                      # ports today's OpenAiCompatibleClient
-│   │   ├── error.ts                       # ports today's LlmError
-│   │   └── schemas.ts                     # Zod schemas + JSON schema export
-│   ├── integrations/                      # ported from today, unchanged
-│   │   ├── jira.ts
-│   │   ├── logs.ts
-│   │   ├── runbook.ts
-│   │   └── slack.ts
-│   ├── config.ts                          # ported from today, expanded
-│   ├── env.ts                             # ported from today
-│   └── index.ts                           # public surface
-├── tests/
-│   ├── unit/
-│   ├── eval/
-│   └── e2e/
-├── demo/
-│   ├── cli.ts
-│   └── scripted/
-│       ├── meeting.ts
-│       ├── async-ticket.ts
-│       └── proactive-anomaly.ts
-├── var/                                   # runtime data (gitignored)
-│   ├── events/
-│   ├── outcomes/
-│   └── policies/                          # promotion candidates live here
-├── docs/
-│   └── superpowers/
-│       └── specs/
-│           └── 2026-09-06-support-engineer-agentic-design.md
-├── package.json
-├── tsconfig.json
-└── vitest.config.ts
+policies/
+├── default.yaml                     # shipped defaults; parity-tested
+└── eval/
+    ├── scenarios.yaml               # 8 eval scenarios
+    └── safety_net_regression.yaml   # 3 must-veto scenarios
+
+src/
+├── event-log/        # log.ts (JSONL impl), types.ts (union), correlation.ts
+├── understanding/    # intent-classifier, context-assembler,
+│   ├── legacy/classifier-adapter.ts
+│   └── memory/       # episodic, kv, vector, embedders/hash
+├── governance/       # decision, policy-engine, policy-store, approval-gate,
+│   └── safety-net/   # rbac, injection, loop-detector, cost-cap, output-filters
+├── execution/        # supervisor, tool-runner, verifier,
+│   ├── agents/       # base, triage, investigator, executor, reviewer
+│   └── tools/        # schemas, registry, jira, logs, runbook, slack, memory
+├── learning/         # outcome-recorder, suggestion-queue, eval-runner,
+│                     # promotion-gate, knowledge-extractor
+├── surface/          # async/{jira-webhook, slack-mention, cron},
+│                     # proactive/anomaly-detector
+├── pipeline/         # agent-pipeline.ts (OrchestratedPipeline)
+├── support-voice-agent/   # UNCHANGED legacy agent + bridge + integrations
+├── fixtures/         # pre-existing test fixtures (legacy)
+├── index.ts          # pre-existing legacy export surface
+├── config.ts         # + learningEnabledFromEnv (LEARNING_ENABLED, default off)
+└── env.ts
+
+tests/                # 42 files, 323 tests (original 150 = regression floor)
+var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
-### 9.1 What survives verbatim
-
-`env.ts`, `integrations/{jira,logs,runbook,slack}.ts`, `JiraClient` / `SplunkProvider` / `CloudWatchProvider` / `InMemoryRunbookProvider` / `SlackWebhookNotifier`, the typed emitter, the demo CLI shape, `tsconfig.json`, `vitest.config.ts`. The 150 existing tests remain as a **regression floor**.
-
-### 9.2 What's deleted
-
-- `processUtterance` (replaced by Understanding + Governance + Execution).
-- `tools/handlers.ts` switch (replaced by `ToolRunner` + per-tool files).
-- LLM `maxRounds` as the only iteration cap (replaced by supervisor-level caps + loop detector).
-- Hardcoded destructive-action check in `Guardrails` (replaced by `policies/default.yaml`).
-- Bare regex classifier as the *primary* path (now `LegacyClassifierAdapter`, only on LLM failure).
-
----
+Not built from the drafted layout: `src/llm/`, top-level `src/integrations/`,
+`src/surface/meeting/*` (bridge stays put), `policies/{security,meeting}.yaml`,
+`embedders/openai.ts`, `demo/scripted/*`.
 
 ## 10. Cross-cutting concerns
 
-- **TypeScript**: strict, `noUncheckedIndexedAccess`, `noImplicitOverride`, `isolatedModules`. Banned-types lint: `any`, `unknown` only with documented reason.
-- **Telemetry**: every LLM call logs prompt/response/tokens/model/latency/correlationId. `DecisionEvent` log is the single audit substrate.
-- **Schema validation at the boundary**: Zod-validated `IntentEnvelope`, Zod-validated tool args, Zod-validated policy rules on load.
-- **No hardcoded values**: every host, token, project key, channel, threshold, policy path, eval path comes from config. Default policy bundle is data, not code.
-- **Eval as a first-class artifact**: `policies/eval/scenarios.yaml` required before any policy promotion. PromotionGate runs them; CI runs them on every PR.
-- **Backward compatibility**: v1 ships with the **deterministic legacy path as the default** (no LLM required to start). The agentic layers activate as integrations and config land.
+As drafted, plus: Zod at every boundary (envelope, tool args, policy rules,
+scenarios, suggestions, promotion inputs); honest-degradation doctrine
+everywhere (unwired = configured condition; invalid output = fallback;
+transport failure = propagate, except at pipeline edges where legacy takes
+over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 
----
+## 11. Phasing (completed)
 
-## 11. Phasing and migration
+1. Event spine (14 tests) ✅  2. Understanding (29) ✅  3. Governance (45) ✅
+4. Execution (42) ✅  5. Learning + surfaces (33) ✅  — plus the wiring phase
+(10) ✅. Every phase ended typecheck-clean with the full suite green.
 
-The implementation is broken into five independent plans, each ending in a green test + a working demo:
+## 12. Open questions (unchanged in substance)
 
-1. **Event spine + DecisionEventLog** — substrate, no behavior change.
-2. **Understanding layer** — `IntentClassifier` + `EpisodicMemory` + `LegacyClassifierAdapter` fallback. Replaces `processUtterance`'s classification step.
-3. **Governance layer** — `PolicyEngine` + `SafetyNet` + `ApprovalGate` + `policies/default.yaml`. Every existing deterministic action now passes through policy.
-4. **Execution layer (multi-agent)** — `SupervisorAgent` + 4 sub-agents + `ToolRunner`. Replaces `tools/orchestrator.ts` + `tools/handlers.ts`.
-5. **Learning layer + Surface modes** — `OutcomeRecorder` + `SuggestionQueue` + `PromotionGate` + `KnowledgeExtractor`. New async + proactive surfaces.
+1. Eval-suite size before enabling online promotion (8 shipped; 50+ recommended pre-enable).
+2. Cross-meeting memory persistence beyond in-memory + JSONL outcomes.
+3. Multi-tenant policy: deferred (non-goal).
+4. Non-OpenAI-compatible LLM adapters: `LlmClient` port ready; none shipped.
 
-Each plan is gated by the existing 150-test regression floor + a new eval scenario suite.
+## 13. Success criteria — verified
 
----
+- Typecheck clean; **323/323 tests** (150-test regression floor intact). ✅
+- Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
+- Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
+- Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅
+- `policies/default.yaml` reproduces today's guard behavior (parity suite). ✅
+- Learning off by default (tested). ✅
+- Full-trail correlation: one utterance → `understanding` → `governance` → `tool_call` → `agent_outcome` under one correlationId, outcome persisted (tested). ✅
+- Legacy fallback under pipeline failure (tested). ✅
 
-## 12. Open questions
+## 14. Appendix — event reference
 
-1. **Eval suite scope for v1**: how many scenarios in `policies/eval/scenarios.yaml` before Learning can ship? (Recommend: 50+ before any online promotion, 200+ before `LEARNING_ENABLED=true` default.)
-2. **Cross-meeting memory persistence**: local JSONL v1, Postgres when? (Recommend: when `var/outcomes/` exceeds 10k records or 1GB, whichever comes first.)
-3. **Multi-tenant policy**: deferred per non-goal. Reopen when first enterprise customer asks.
-4. **LLM provider beyond OpenAI-compatible**: pluggable via `LlmClient` interface. Anthropic, Bedrock adapters are follow-up work.
+See `src/event-log/types.ts` for the authoritative union; §8 for notes.
 
----
+## 15. The wiring: composition over replacement (the big one)
 
-## 13. Success criteria
+The draft said `processUtterance` would be **deleted**. Built instead:
+`OrchestratedPipeline` (`src/pipeline/agent-pipeline.ts`) **owns** an untouched
+`SupportVoiceAgent` and routes by classified intent:
 
-- **Typecheck clean**: `npm run typecheck` exits 0 on every plan's PR.
-- **All 150 existing tests still pass** at every plan boundary (regression floor).
-- **Zero hardcoded hosts/tokens/keys** anywhere in `src/` — enforced by a unit test that greps for common patterns.
-- **Every consequential action passes through Governance** — enforced by a test that intercepts the tool-call stream and asserts no tool runs without a `GovernedAction`.
-- **Every LLM call logged** with prompt/response/tokens/latency — enforced by a test that fails any LLM call without a logged event.
-- **SafetyNet cannot be disabled by policy** — enforced by a test that loads `policies/disable-safety-net.yaml` and asserts the SafetyNet still vetoes.
-- **Promotion requires M-of-N human approval + eval + SafetyNet regression** — enforced by tests against `PromotionGate`.
-- **Default bundle (`policies/default.yaml`) reproduces today's behavior byte-for-byte** for the 150 existing test scenarios.
+- **Etiquette intents** (`mute`, `wake`, `critical`, `complaint`, `feedback`) and
+  **unknown chatter** → straight into the legacy cascade. The pipeline never
+  duplicates mute/wake/confirmation state machines; it asks the agent.
+- **Content intents** (`question`, `runbook_offer`) → Understanding → Governance
+  → Execution under one correlationId. Runbook offers resolve against the real
+  provider catalog; the provider's `destructive` flag (additively carried as
+  `entities.runbookDestructive`) — not text guessing — drives the approval
+  policy. Granted approvals execute via `executeApproved` after M-of-N.
+- **Any pipeline failure** (LLM transport, store, gate) → the utterance is
+  re-dispatched into the legacy cascade. The meeting never hangs on the platform.
+- **Webhook/proactive envelopes** enter via `processEnvelope` with the same
+  governance; P0/P1 anomalies speak through the agent's urgent barge-in.
 
----
-
-## 14. Appendix — DecisionEvent type reference
-
-See section 8 for the full discriminated union. All events carry `correlationId` (string), `ts` (epoch ms), `layer` (one of `understanding | governance | execution | learning | surface`), and `source` (`meeting | jira | slack | cloudwatch | splunk | cron | internal`).
+The legacy agent therefore remains: the etiquette engine, the deterministic
+floor, and the blast radius limiter. This is the system's most important
+property and the draft's biggest miss.
