@@ -191,7 +191,10 @@ export class ApprovalGate {
 
   deny(approvalId: string): ApprovalSnapshot {
     const p = this.require(approvalId);
-    if (p.status === 'pending') p.status = 'denied';
+    if (p.status === 'pending') {
+      p.status = 'denied';
+      this.postFollowUp(p, `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`);
+    }
     return this.snapshot(p);
   }
 
@@ -242,6 +245,7 @@ export class ApprovalGate {
       if (p.status === 'pending' && now > p.createdAt + p.timeoutMs) {
         p.status = 'timeout';
         expired.push(p.id);
+        this.postFollowUp(p, `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`);
         void this.eventLog?.append({
           correlationId: p.id,
           ts: now,
@@ -264,6 +268,12 @@ export class ApprovalGate {
     const p = this.pending.get(approvalId);
     if (!p) throw new Error(`ApprovalGate: unknown approvalId: ${approvalId}`);
     return p;
+  }
+
+  /** Fire-and-forget follow-up (deny/timeout): sync callers must never block
+   *  on Slack, and a delivery failure must never break the governance path. */
+  private postFollowUp(p: PendingApproval, text: string): void {
+    void this.slack.postMessage(this.channel, text).catch(() => {});
   }
 
   private snapshot(p: PendingApproval): ApprovalSnapshot {

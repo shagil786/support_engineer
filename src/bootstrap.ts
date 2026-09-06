@@ -76,6 +76,9 @@ export interface PlatformOptions {
    *  gate posts via chat.postMessage (resolving message refs so reactions
    *  correlate to the right approval) instead of the fire-and-forget webhook. */
   slackBotToken?: string;
+  /** Approval pending window (default: the gate's 5 minutes); overrides via
+   *  APPROVAL_TIMEOUT_MS (>= 1000) in env-wired hosts. */
+  approvalTimeoutMs?: number;
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
   /** Where pipeline speech is delivered (TTS bridge / console). */
@@ -161,6 +164,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     slack: approvalSlack,
     securityChannel: opts.approvalChannel ?? '#support-agent-approvals',
     approverCount: 2,
+    ...(opts.approvalTimeoutMs !== undefined ? { defaultTimeoutMs: opts.approvalTimeoutMs } : {}),
     eventLog,
     ...(now ? { now } : {}),
   });

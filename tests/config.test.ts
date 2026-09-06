@@ -65,6 +65,13 @@ describe('configFromEnv', () => {
     expect(configFromEnv({ SPLUNK_URL: 'https://splunk.test.example' }).logs).toBeUndefined();
     expect(configFromEnv({ SPLUNK_URL: 'https://splunk.test.example', SPLUNK_TOKEN: 't' }).logs).toBeDefined();
   });
+
+  it('parses APPROVAL_TIMEOUT_MS only when it is a valid interval (>= 1000)', () => {
+    expect(configFromEnv({}).approvalTimeoutMs).toBeUndefined();
+    expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '500' }).approvalTimeoutMs).toBeUndefined();
+    expect(configFromEnv({ APPROVAL_TIMEOUT_MS: 'nope' }).approvalTimeoutMs).toBeUndefined();
+    expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '30000' }).approvalTimeoutMs).toBe(30_000);
+  });
 });
 
 describe('requireJira', () => {

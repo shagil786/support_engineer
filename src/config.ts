@@ -52,6 +52,9 @@ export interface IntegrationsFromEnv {
   /** Learning layer opt-in. Off by default — the operator must enable it.
    *  Interval configures the LearningLoop schedule (default 15 min). */
   learning?: { enabled: boolean; intervalMs?: number };
+  /** APPROVAL_TIMEOUT_MS (>= 1000): how long a staged approval stays
+   *  pending before it times out. Absent = the gate's built-in default. */
+  approvalTimeoutMs?: number;
 }
 
 /** Learning layer opt-in: LEARNING_ENABLED=true|1 enables it. Defaults to
@@ -162,6 +165,9 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
   // integrations: an empty environment still yields an empty wiring set.
   const learning = learningEnabledFromEnv(env);
   if (learning.enabled) out.learning = learning;
+
+  const approvalRawMs = Number(envVar(env, 'APPROVAL_TIMEOUT_MS') ?? 0);
+  if (Number.isFinite(approvalRawMs) && approvalRawMs >= 1000) out.approvalTimeoutMs = approvalRawMs;
 
   return out;
 }

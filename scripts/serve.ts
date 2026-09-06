@@ -23,6 +23,8 @@
  *                              INCLUDING reaction_added events, which drive emoji sign-off
  *                              on approval messages (set SLACK_BOT_TOKEN so the gate posts
  *                              messages that reactions can be correlated to)
+ *   APPROVAL_TIMEOUT_MS        pending window for staged approvals (default: gate's 5 min;
+ *                              timed-out and denied approvals post a follow-up to the channel)
  */
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -64,6 +66,8 @@ async function main(): Promise<void> {
   const intervalRaw = Number(env['LEARNING_INTERVAL_MS'] ?? 0);
   const intervalMs = Number.isFinite(intervalRaw) && intervalRaw >= 1000 ? intervalRaw : 15 * 60_000;
   const speaker = env['SPEAKER'] ?? 'console-user';
+  const approvalRawMs = Number(env['APPROVAL_TIMEOUT_MS'] ?? 0);
+  const approvalTimeoutMs = Number.isFinite(approvalRawMs) && approvalRawMs >= 1000 ? approvalRawMs : undefined;
 
   const rt = createServeRuntime({
     dataDir: resolve('var'),
@@ -74,6 +78,7 @@ async function main(): Promise<void> {
     // Bot token upgrades the approval channel: messages become reaction-
     // correlated, enabling M-of-N sign-off by emoji on the security channel.
     ...(env['SLACK_BOT_TOKEN'] ? { slackBotToken: env['SLACK_BOT_TOKEN'] } : {}),
+    ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
     learning: learningEnv ? { enabled: true, intervalMs } : undefined,
     // Only the console operator is admin. Slack identities stay least-
     // privilege: with reactions driving sign-off, a blanket-admin resolver
