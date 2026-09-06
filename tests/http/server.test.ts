@@ -230,6 +230,14 @@ describe('createHttpServer: POST /slack/events', () => {
     return p;
   };
 
+  it('signed() helper sanity: fresh timestamp + valid signature pass verification', async () => {
+    const h = await startAt({ slackSigningSecret: secret });
+    const body = slackBody({ type: 'url_verification', challenge: 'helper-check' });
+    const res = await post(h.url, '/slack/events', signed(body));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ challenge: 'helper-check' });
+  });
+
   it('fails closed with 503 when no signing secret is configured', async () => {
     const h = await startAt();
     const res = await post(h.url, '/slack/events', { method: 'POST', body: '{}' });
@@ -273,7 +281,41 @@ describe('createHttpServer: POST /slack/events', () => {
     const second = await post(h.url, '/slack/events', signed(fresh));
     expect(second.status).toBe(200);
     expect(counter.calls).toBe(2);
-  });  it('ignores bot-authored events and non-message event types without processing', async () => {
+  });  it('grants a staged approval by Slack emoji reaction, end to end', async () => {
+    const p = createPlatform({
+      dataDir: dir,
+      runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true }],
+      speakerRole: (id) => (id === 'U-admin' ? 'admin' : undefined),
+    });
+    const h = await createHttpServer(p, { authTokens: ['tok-1'], slackSigningSecret: secret, now: () => slackNow });
+    handles.push(h);
+    const staged = await p.pipeline.processUtterance('U-admin', 'agent, can you restart the checkout pod?', 500);
+    expect(staged.approvalId).toBeDefined();
+
+    // Slack delivers the reaction; the console channel posted no ref, so the
+    // gate correlates via the single-pending fallback. Role is resolved
+    // server-side via the platform's speakerRole resolver.
+    const body = slackBody({
+      type: 'event_callback',
+      event_id: 'Ev-r1',
+      event: { type: 'reaction_added', reaction: 'shield', user: 'U-admin', item: { type: 'message', channel: 'C1', ts: '1' } },
+    });
+    const reaction = await post(h.url, '/slack/events', signed(body));
+    expect(reaction.status).toBe(200);
+    expect(await reaction.json()).toMatchObject({ ok: true, matched: true, accepted: true, status: 'pending', signatures: 1 });
+
+    // Second signature grants; then the staged action executes over HTTP.
+    await p.pipeline.signApproval(staged.approvalId!, 'admin', 'human-2');
+    const exec = await post(h.url, '/approvals/' + staged.approvalId + '/execute', {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ correlationId: staged.correlationId }),
+    });
+    expect(exec.status).toBe(200);
+    expect(((await exec.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('ignores bot-authored events and non-message event types without processing', async () => {
     const counter = { calls: 0 };
     const h = await createHttpServer(wrapped(counter), { authTokens: ['tok-1'], slackSigningSecret: secret, now: () => slackNow });
     handles.push(h);

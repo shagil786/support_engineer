@@ -176,7 +176,17 @@ export async function createHttpServer(
       type?: string;
       challenge?: string;
       event_id?: string;
-      event?: { type?: string; bot_id?: unknown; user?: string; text?: unknown; ts?: string; event_ts?: string; channel?: string };
+      event?: {
+        type?: string;
+        bot_id?: unknown;
+        user?: string;
+        text?: unknown;
+        ts?: string;
+        event_ts?: string;
+        channel?: string;
+        reaction?: string;
+        item?: { type?: string; channel?: string; ts?: string };
+      };
     };
 
     if (payload.type === 'url_verification') {
@@ -185,7 +195,25 @@ export async function createHttpServer(
     if (payload.type !== 'event_callback') return reply(res, 200, { ok: true, ignored: 'unknown payload type' });
 
     const event = payload.event;
-    if (!event || event.type !== 'app_mention' && event.type !== 'message') {
+    if (!event) return reply(res, 200, { ok: true, ignored: 'no event' });
+
+    // Emoji sign-off: reaction events route to the ApprovalGate. The role is
+    // resolved SERVER-SIDE from the Slack user id via the platform resolver
+    // (unknown users are guests — a reaction is a claim, not a credential).
+    if (event.type === 'reaction_added' || event.type === 'reaction_removed') {
+      const reaction = typeof event.reaction === 'string' ? event.reaction : '';
+      const result = await platform.approvals.handleReaction({
+        type: event.type,
+        reaction,
+        userId: event.user ?? 'unknown',
+        userRole: event.user ? platform.speakerRole(event.user) : undefined,
+        ...(event.item?.channel ? { channel: event.item.channel } : {}),
+        ...(event.item?.ts ? { ts: event.item.ts } : {}),
+      });
+      return reply(res, 200, { ok: true, ...result });
+    }
+
+    if (event.type !== 'app_mention' && event.type !== 'message') {
       return reply(res, 200, { ok: true, ignored: 'event type not handled' });
     }
     // Never respond to bots (including ourselves) — classic loop hazard.

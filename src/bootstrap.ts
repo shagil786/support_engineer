@@ -23,6 +23,7 @@ import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
 import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
+import type { SpeakerRole } from './governance/safety-net/index.js';
 import { ApprovalGate, type SlackLike } from './governance/approval-gate.js';
 import { SupervisorAgent } from './execution/supervisor.js';
 import { ToolRunner } from './execution/tool-runner.js';
@@ -35,6 +36,7 @@ import { LearningLoop } from './learning/learning-loop.js';
 import { ProcedureLibrary } from './execution/procedure-library.js';
 import { OrchestratedPipeline } from './pipeline/agent-pipeline.js';
 import { SupportVoiceAgent } from './support-voice-agent/agent.js';
+import { SlackBotClient } from './support-voice-agent/integrations/slack-bot.js';
 import { InMemoryRunbookProvider } from './support-voice-agent/integrations/runbook.js';
 import { JiraClient } from './support-voice-agent/integrations/jira.js';
 import type { JiraConfig } from './support-voice-agent/integrations/jira.js';
@@ -70,6 +72,10 @@ export interface PlatformOptions {
   policyPath?: string;
   /** Approval Slack channel; defaults to #support-agent-approvals. */
   approvalChannel?: string;
+  /** Bot user token (xoxb-…) enabling the emoji-reaction approval UX: the
+   *  gate posts via chat.postMessage (resolving message refs so reactions
+   *  correlate to the right approval) instead of the fire-and-forget webhook. */
+  slackBotToken?: string;
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
   /** Where pipeline speech is delivered (TTS bridge / console). */
@@ -88,6 +94,12 @@ export interface Platform {
   library: ProcedureLibrary;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
+  /** The ApprovalGate: hosts with a Slack Events endpoint route
+   *  reaction_added events here (gate.handleReaction) for emoji sign-off. */
+  approvals: ApprovalGate;
+  /** Resolves a Slack user id to a platform role for reaction sign-off.
+   *  Falls back to the SafetyNet speaker resolver (unknown = guest). */
+  speakerRole(id: string): SpeakerRole | undefined;
 }
 
 export function createPlatform(opts: PlatformOptions): Platform {
@@ -139,8 +151,14 @@ export function createPlatform(opts: PlatformOptions): Platform {
   // mapping would make every approved execution fail the SafetyNet re-check.
   const speakerRole = (id: string) => (id === 'approver' ? ('admin' as const) : opts.speakerRole?.(id));
   const safetyNet = new SafetyNet({ speakers: speakerRole });
+  // With a bot token, approvals post via chat.postMessage (message refs let
+  // reactions correlate to the right approval); otherwise the fire-and-forget
+  // webhook / console fallback posts as before.
+  const approvalSlack = opts.slackBotToken
+    ? new SlackBotClient({ botToken: opts.slackBotToken })
+    : (opts.slack ?? consoleSlack);
   const approvals = new ApprovalGate({
-    slack: opts.slack ?? consoleSlack,
+    slack: approvalSlack,
     securityChannel: opts.approvalChannel ?? '#support-agent-approvals',
     approverCount: 2,
     eventLog,
@@ -199,6 +217,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
     eventLog,
     learningLoop,
     library,
+    approvals,
+    speakerRole,
     stopLearning() {
       learningLoop?.stop();
     },

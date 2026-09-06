@@ -99,4 +99,26 @@ describe('createPlatform', () => {
     expect(admin.approvalId).toBeDefined();
     expect(admin.approvalStatus).toBe('pending');
   });
+
+  it('exposes the ApprovalGate and the server-side role resolver (reaction UX surface)', async () => {
+    const p = createPlatform({
+      dataDir: dir,
+      speakerRole: (id) => (id === 'U-alice' ? 'admin' : undefined),
+    });
+    expect(p.approvals).toBeDefined();
+    // The resolver is server-side: guests by default, host mappings apply,
+    // and the gate-minted approver identity is always admin.
+    expect(p.speakerRole('U-alice')).toBe('admin');
+    expect(p.speakerRole('U-stranger')).toBeUndefined();
+    expect(p.speakerRole('approver')).toBe('admin');
+
+    // Emoji sign-off through the exposed gate (single-pending fallback).
+    const { approvalId } = await p.approvals.request({
+      policyId: 'p1',
+      decision: { effect: 'require_approval', reason: 'destructive', policyIds: ['p1'] },
+      action: { tool: 'execute_runbook_script', args: { script_name: 'restart-all' } },
+    });
+    const r = await p.approvals.handleReaction({ type: 'reaction_added', reaction: 'shield', userId: 'U-alice', userRole: p.speakerRole('U-alice') });
+    expect(r).toMatchObject({ matched: true, approvalId, accepted: true });
+  });
 });

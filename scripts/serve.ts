@@ -20,6 +20,9 @@
  *   HTTP_TOKEN / HTTP_TOKENS   bearer tokens (comma-separated); presence starts the server
  *   HTTP_PORT                  default 8787; HTTP_HOST default 127.0.0.1
  *   SLACK_SIGNING_SECRET       when set, /slack/events accepts verified Events API deliveries
+ *                              INCLUDING reaction_added events, which drive emoji sign-off
+ *                              on approval messages (set SLACK_BOT_TOKEN so the gate posts
+ *                              messages that reactions can be correlated to)
  */
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -68,9 +71,14 @@ async function main(): Promise<void> {
     ...(wired.logs ? { logProvider: wired.logs } : {}),
     ...(wired.slack ? { slack: wired.slack } : {}),
     ...(wired.llm ? { llm: wired.llm } : {}),
+    // Bot token upgrades the approval channel: messages become reaction-
+    // correlated, enabling M-of-N sign-off by emoji on the security channel.
+    ...(env['SLACK_BOT_TOKEN'] ? { slackBotToken: env['SLACK_BOT_TOKEN'] } : {}),
     learning: learningEnv ? { enabled: true, intervalMs } : undefined,
-    // The console is an operator surface: the operator speaks as admin.
-    speakerRole: () => 'admin',
+    // Only the console operator is admin. Slack identities stay least-
+    // privilege: with reactions driving sign-off, a blanket-admin resolver
+    // would make every reactor an admin.
+    speakerRole: (id) => (id === speaker ? 'admin' : undefined),
     deliverSpeech: (text) => console.log(`[agent] ${text}`),
   });
 
@@ -87,7 +95,7 @@ async function main(): Promise<void> {
       port: Number(env['HTTP_PORT'] ?? 8787),
       ...(env['SLACK_SIGNING_SECRET'] ? { slackSigningSecret: env['SLACK_SIGNING_SECRET'] } : {}),
     });
-    console.log(`http up at ${http.url} (POST /utterance; slack events ${env['SLACK_SIGNING_SECRET'] ? 'on' : 'off'})`);
+    console.log(`http up at ${http.url} (POST /utterance; slack events ${env['SLACK_SIGNING_SECRET'] ? 'on (reactions route to the approval gate)' : 'off'})`);
   } else {
     console.log('http off (set HTTP_TOKEN to enable; the surface never opens unauthenticated)');
   }
