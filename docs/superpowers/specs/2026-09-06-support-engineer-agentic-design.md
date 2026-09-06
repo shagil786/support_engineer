@@ -190,10 +190,35 @@ metadata})` or `scripts/knowledge-cli.ts` (seed/ingest/search/list). Hits
 flow into the bundle as `knowledge?: KnowledgeHit[]` with full provenance
 (`docId, index, heading, metadata`) — the citation layer's substrate.
 `evaluateRetrieval` + `assertQualityGate` (`retrieval-eval.ts`) grade
-golden sets on **hit rate / MRR**; the shipped seed corpus + 9-case golden
-set (`fixtures/retrieval-golden-set.ts`) runs in the suite and fails loudly
-on retrieval regressions. Not yet built on top: grounded generation,
-citation rendering, refusal detection (they consume this provenance next).
+golden sets on **hit rate / MRR**; `scripts/retrieval-eval.ts` (`npm run
+eval:retrieval`) is a CI **gate step** next to the policy eval — it seeds a
+fresh KB when the snapshot is absent, or grades a real snapshot via `--kb`,
+with tunable thresholds; the shipped seed corpus + 9-case golden set
+(`fixtures/retrieval-golden-set.ts`) runs in the suite and fails loudly on
+retrieval regressions.
+
+**Embeddings** — the `EmbedderLike` port accepts sync (hash) and async
+(cloud) backends. `OpenAiCompatibleEmbedder` (`memory/embedders/openai.ts`)
+batches, caches per (model, text), L2-normalizes, and deterministically
+folds oversized vectors to `EMBEDDINGS_DIM`; `EMBEDDINGS_BASE_URL/_API_KEY/
+_MODEL` are all-or-nothing (partial config throws). Swapping backends is a
+one-time migration: `FileBackedVectorMemory.reindex()` / the KB's
+`reindex()` re-embed every record in place (docs and BM25 untouched), also
+exposed as `knowledge-cli reindex`.
+
+**`GroundedAnswerer`** (`understanding/grounded-answerer.ts`) — the
+hallucination-reduction layer over the KB: empty/near-zero retrieval →
+**refuse without calling the LLM** (guessing from nothing is structurally
+impossible); otherwise a numbered-context prompt ("answer ONLY from the
+context, cite the numbers"), a Zod-validated `{answer, citations[]}` reply
+with citations filtered to numbers that actually exist, and an honest
+extractive floor (top-chunk sentences, still cited) when the LLM is
+unwired, invalid, or uncited. Exposed as `platform.answerer` and
+**`POST /ask`** on the HTTP surface (`{question, topK?, where?}`, bearer
+auth + rate limit + idempotent replay like every dispatch route; refusals
+are 200 — an honest answer, not an error). Still not built: citation
+rendering in voice responses, and routing ungrounded *utterances*
+(originally speech) through the answerer automatically.
 
 ### 4.2 Boundary discipline
 
@@ -455,7 +480,7 @@ src/
 scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console + optional HTTP host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 62 files, 486 tests (original 150 = regression floor)
+tests/                # 65 files, 510 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -493,7 +518,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **486/486 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **510/510 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

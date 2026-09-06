@@ -4,6 +4,7 @@
  *
  *   POST /healthz                        liveness, no auth
  *   POST /utterance   {speakerId, text}  → PipelineRouting JSON
+ *   POST /ask         {question}         → grounded answer with citations
  *   POST /approvals/:id/sign             → ApprovalSnapshot
  *   POST /approvals/:id/execute          → PipelineRouting
  *   POST /slack/events                   Slack Events API (signed)
@@ -164,6 +165,9 @@ export async function createHttpServer(
     if (method === 'POST' && path === '/envelope') {
       return dispatchIdempotent(req, res, 'envelope', () => handleEnvelope(req, res));
     }
+    if (method === 'POST' && path === '/ask') {
+      return dispatchIdempotent(req, res, 'ask', () => handleAsk(req, res));
+    }
 
     const approval = /^\/approvals\/([^/]+)\/(sign|execute)$/.exec(path);
     if (method === 'POST' && approval && approval[1] && approval[2]) {
@@ -181,7 +185,7 @@ export async function createHttpServer(
       return dispatchIdempotent(req, res, `sign:${approvalId}`, () => handleApproval(req, res, approvalId, op));
     }
 
-    const knownPath = path === '/utterance' || path === '/envelope' || approval !== null;
+    const knownPath = path === '/utterance' || path === '/envelope' || path === '/ask' || approval !== null;
     if (method !== 'POST') {
       return reply(res, knownPath ? 405 : 404, knownPath ? { error: 'method not allowed' } : { error: 'not found' });
     }
@@ -216,6 +220,32 @@ export async function createHttpServer(
    *  ACTION is chosen here by policy, never by the client: a caller-supplied
    *  `proposed` field is rejected outright. Untrusted payloads that fail
    *  their parser are dropped with `accepted: false`, not guessed. */
+  /** POST /ask — grounded Q&A over the knowledge base. Read-only by
+   *  construction: retrieval + the GroundedAnswerer never call tools or
+   *  governance. Refusals are 200 (an honest answer, not an error). */
+  async function handleAsk(req: IncomingMessage, res: ServerResponse): Promise<CachedResponse> {
+    void res;
+    const body = await readBody(req, maxBody, peekedBodies.get(req));
+    if (body.error === 'too-large') return { status: 413, body: { error: 'body too large' }, createdAt: now() };
+    const parsed = parseJson(body);
+    if (!parsed.ok) return { status: 400, body: { error: parsed.error }, createdAt: now() };
+    const b = parsed.value as { question?: unknown; topK?: unknown; where?: unknown };
+    if (typeof b.question !== 'string' || b.question.trim().length === 0) {
+      return { status: 400, body: { error: 'question is required' }, createdAt: now() };
+    }
+    if (b.topK !== undefined && (typeof b.topK !== 'number' || !Number.isInteger(b.topK) || b.topK < 1 || b.topK > 10)) {
+      return { status: 400, body: { error: 'topK must be an integer in [1, 10]' }, createdAt: now() };
+    }
+    if (b.where !== undefined && (typeof b.where !== 'object' || b.where === null || Array.isArray(b.where))) {
+      return { status: 400, body: { error: 'where must be an object of metadata filters' }, createdAt: now() };
+    }
+    const answer = await platform.answerer.answer(b.question.trim(), {
+      ...(typeof b.topK === 'number' ? { topK: b.topK } : {}),
+      ...(b.where !== undefined ? { where: b.where as { source?: string; tags?: string[] } } : {}),
+    });
+    return { status: 200, body: answer, createdAt: now() };
+  }
+
   async function handleEnvelope(req: IncomingMessage, res: ServerResponse): Promise<CachedResponse> {
     const body = await readBody(req, maxBody, peekedBodies.get(req));
     if (body.error === 'too-large') return { status: 413, body: { error: 'body too large' }, createdAt: now() };

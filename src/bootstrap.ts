@@ -23,6 +23,7 @@ import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
 import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
 import { OpenAiCompatibleEmbedder } from './understanding/memory/embedders/openai.js';
+import { GroundedAnswerer } from './understanding/grounded-answerer.js';
 import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
 import type { SpeakerRole } from './governance/safety-net/index.js';
@@ -103,6 +104,9 @@ export interface Platform {
   /** Hybrid knowledge base (BM25+vector, durable snapshot). Ingest docs via
    *  `ingestDoc()`; retrieval is wired into the ContextAssembler. */
   knowledge: FileBackedKnowledgeBase;
+  /** Grounded answering over the knowledge base: refuses when retrieval is
+   *  empty, cites [n] sources otherwise, extractive fallback without an LLM. */
+  answerer: GroundedAnswerer;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
   /** The ApprovalGate: hosts with a Slack Events endpoint route
@@ -239,6 +243,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
     ...(now ? { now } : {}),
   });
 
+  const answerer = new GroundedAnswerer({ knowledge, llm });
+
   return {
     legacy,
     pipeline,
@@ -246,6 +252,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     learningLoop,
     library,
     knowledge,
+    answerer,
     approvals,
     speakerRole,
     stopLearning() {
