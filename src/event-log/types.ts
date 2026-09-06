@@ -56,6 +56,15 @@ interface BaseEvent {
 
 export type DecisionEvent =
   | (BaseEvent & { kind: 'understanding'; envelope: IntentEnvelope; contextBundleRef: string })
+  | (BaseEvent & {
+      kind: 'grounded_answer';
+      question: string;
+      answer: string;
+      citations: number[];
+      sources: Array<{ docId: string; index: number; heading: string; source?: string; score: number }>;
+      refused: boolean;
+      usedLlm: boolean;
+    })
   | (BaseEvent & { kind: 'governance'; intent: IntentEnvelope; decision: Decision })
   | (BaseEvent & { kind: 'safety_net'; vetoed: boolean; check: string; reason: string })
   | (BaseEvent & { kind: 'approval_request'; approvalId: string; policyId: string; approver_count: number })
@@ -83,7 +92,7 @@ export type DecisionEvent =
   | (BaseEvent & { kind: 'knowledge_extracted'; procedureId: string });
 
 const KINDS: readonly DecisionEvent['kind'][] = [
-  'understanding', 'governance', 'safety_net',
+  'understanding', 'grounded_answer', 'governance', 'safety_net',
   'approval_request', 'approval_granted', 'approval_timeout',
   'tool_call', 'agent_outcome',
   'policy_suggested', 'policy_promoted', 'knowledge_extracted',

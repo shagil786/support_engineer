@@ -227,6 +227,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     ...(opts.slack ? { slack: opts.slack } : {}),
   });
 
+  const answerer = new GroundedAnswerer({ knowledge, llm });
   const pipeline = new OrchestratedPipeline({
     legacy,
     classifier,
@@ -240,10 +241,9 @@ export function createPlatform(opts: PlatformOptions): Platform {
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir, ...(now ? { now } : {}) }),
     runbookProvider,
     ...(opts.deliverSpeech ? { deliverSpeech: opts.deliverSpeech } : {}),
+    answerer,
     ...(now ? { now } : {}),
   });
-
-  const answerer = new GroundedAnswerer({ knowledge, llm });
 
   return {
     legacy,

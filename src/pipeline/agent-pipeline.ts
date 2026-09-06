@@ -23,6 +23,7 @@ import type { EventLog } from '../event-log/log.js';
 import type { ToolName, ToolResult } from '../support-voice-agent/tools/types.js';
 import type { SupportVoiceAgent } from '../support-voice-agent/agent.js';
 import type { RunbookProvider } from '../support-voice-agent/integrations/runbook.js';
+import { GroundedAnswerer } from '../understanding/grounded-answerer.js';
 import type { IntentClassifier } from '../understanding/intent-classifier.js';
 import type { ContextAssembler } from '../understanding/context-assembler.js';
 import type { PolicyEngine } from '../governance/policy-engine.js';
@@ -41,6 +42,12 @@ export interface PipelineRouting {
   approvalStatus?: ApprovalSnapshot['status'];
   /** Present on legacy fallback: the wrapper re-dispatched into the cascade. */
   legacyFallback?: boolean;
+  /** Grounded-answer fields: present when a question was answered from the
+   *  knowledge base ('knowledge') or, on KB refusal, from governed log
+   *  query results ('logs'). Absent for legacy/etiquette routes and when no
+   *  answerer is wired. */
+  answer?: string;
+  answerSource?: 'knowledge' | 'logs';
 }
 
 export interface ApprovedAction {
@@ -64,6 +71,11 @@ export interface OrchestratedPipelineOptions {
   runbookProvider?: RunbookProvider;
   /** Where pipeline-generated speech is delivered (TTS bridge). */
   deliverSpeech?: (text: string) => void;
+  /** Grounded answerer over the knowledge base. When wired, question intents
+   *  are answered KB-first (cited speech, no tools); KB refusals fall through
+   *  to the governed log-query path. Unwired → questions go straight to the
+   *  governed path (previous behavior). */
+  answerer?: GroundedAnswerer;
   now?: () => number;
 }
 
@@ -82,6 +94,7 @@ export class OrchestratedPipeline {
   private readonly outcomeRecorder?: OutcomeRecorder;
   private readonly runbookProvider?: RunbookProvider;
   private readonly deliverSpeech: (text: string) => void;
+  private readonly answerer?: GroundedAnswerer;
   private readonly now: () => number;
   /** approvalId → staged action awaiting (or holding) a grant. */
   private readonly staged = new Map<string, ApprovedAction>();
@@ -99,6 +112,7 @@ export class OrchestratedPipeline {
     this.outcomeRecorder = opts.outcomeRecorder;
     this.runbookProvider = opts.runbookProvider;
     this.deliverSpeech = opts.deliverSpeech ?? ((t) => void t);
+    this.answerer = opts.answerer;
     this.now = opts.now ?? Date.now;
   }
 
@@ -190,6 +204,40 @@ export class OrchestratedPipeline {
       return this.handleRunbookOffer(cid, envelope, ctx);
     }
 
+    // KB-first for questions: when the knowledge base can ground an answer
+    // (stricter 0.4 floor — spoken answers must be genuinely about the
+    // corpus, not trigram-adjacent), speak it with citations — no tool call,
+    // no LLM dance. A refusal falls through to the governed log-query path
+    // below, so live-data questions still work exactly as before.
+    let kbRefused = false;
+    if (subKind === 'question' && this.answerer) {
+      const grounded = await this.answerer.answer(ctx.text, { topK: 4, minScore: 0.4 });
+      if (!grounded.refused) {
+        this.deliverSpeech(grounded.answer);
+        await this.eventLog.append({
+          correlationId: cid,
+          ts: this.now(),
+          layer: 'understanding',
+          source: 'internal',
+          kind: 'grounded_answer',
+          question: ctx.text,
+          answer: grounded.answer,
+          citations: grounded.citations,
+          sources: grounded.sources,
+          refused: false,
+          usedLlm: grounded.usedLlm,
+        });
+        return {
+          routed: 'pipeline',
+          correlationId: cid,
+          ok: true,
+          answer: grounded.answer,
+          answerSource: 'knowledge',
+        };
+      }
+      kbRefused = true;
+    }
+
     // Questions propose a read-only log query (the only registry tool that
     // answers a status question directly).
     const proposal: { tool: ToolName; args: Record<string, unknown> } =
@@ -233,7 +281,13 @@ export class OrchestratedPipeline {
       bundle,
     });
     await this.outcomeRecorder?.record(cid);
-    return { routed: 'pipeline', correlationId: cid, ok: r.ok, reason: r.reason };
+    return {
+      routed: 'pipeline',
+      correlationId: cid,
+      ok: r.ok,
+      reason: r.reason,
+      ...(kbRefused ? { answerSource: 'logs' as const } : {}),
+    };
   }
 
   private async handleRunbookOffer(
