@@ -1,0 +1,70 @@
+# CI — typecheck, full test suite, and policy eval scenarios on every push
+# and PR. The eval step is the policy behavior gate: a regressed
+# policies/default.yaml fails here exactly as the PromotionGate would refuse
+# it at promotion time.
+#
+# better-sqlite3 is a native module; its prebuilt binaries can lag brand-new
+# Node releases. CI therefore pins the matrix to LTS lines (22, 24), probes
+# the binary right after install, and rebuilds from source if the prebuild is
+# missing or ABI-incompatible. Ubuntu runners carry the python3 + make + g++
+# toolchain that the source build needs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: node ${{ matrix.node }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # LTS lines. better-sqlite3 prebuilds exist for both; if a future
+        # Node drops out from under them, the probe step fails and rebuilds
+        # from source instead of silently passing.
+        node: [22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` (not install) for reproducible builds from the lockfile. If
+      # the postinstall prebuild step failed for this Node ABI, the probe
+      # below catches it and rebuilds from source rather than failing CI.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify native better-sqlite3 loads on this Node ABI
+        id: sqlite-probe
+        # Non-fatal: a failed probe hands off to the source-rebuild fallback
+        # below, which fails the job only if it cannot fix the binary.
+        continue-on-error: true
+        run: npx tsx scripts/check-sqlite.ts
+
+      - name: Rebuild better-sqlite3 from source (fallback when prebuild is missing)
+        if: steps.sqlite-probe.outcome == 'failure'
+        run: |
+          echo "Prebuilt binary failed for node ${{ matrix.node }}; rebuilding from source"
+          npm rebuild better-sqlite3 --build-from-source
+          npx tsx scripts/check-sqlite.ts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Policy eval scenarios
+        run: npm run eval
