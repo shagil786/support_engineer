@@ -8,6 +8,7 @@
  */
 import type { MemoryRecord, SearchHit, Embedder } from './vector.js';
 import { InMemoryVectorMemory } from './vector.js';
+import { FileBackedVectorMemory } from './file-backed.js';
 
 export type EpisodicScope = 'perMeeting' | 'cross';
 
@@ -18,6 +19,10 @@ export interface RecordOptions {
 export interface EpisodicMemoryOptions {
   perMeeting?: import('./vector.js').VectorMemory;
   cross?: import('./vector.js').VectorMemory;
+  /** File path for durable cross-scope storage (learned procedures survive
+   *  restarts). Ignored when an explicit `cross` store is provided. When
+   *  absent, cross scope is in-memory (per-process). */
+  crossPath?: string;
   perMeetingTtlMs?: number;
   embedder?: Embedder;
   now?: () => number;
@@ -38,7 +43,11 @@ export class EpisodicMemory {
 
   constructor(opts: EpisodicMemoryOptions = {}) {
     this.perMeeting = opts.perMeeting ?? new InMemoryVectorMemory({ embedder: opts.embedder });
-    this.cross = opts.cross ?? new InMemoryVectorMemory({ embedder: opts.embedder });
+    this.cross =
+      opts.cross ??
+      (opts.crossPath
+        ? new FileBackedVectorMemory({ path: opts.crossPath, embedder: opts.embedder })
+        : new InMemoryVectorMemory({ embedder: opts.embedder }));
     this.ttlMs = opts.perMeetingTtlMs ?? 30 * 24 * 60 * 60 * 1000;
     this.now = opts.now ?? Date.now;
   }

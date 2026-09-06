@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **353/353 tests green** across 46 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **364/364 tests green** across 47 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -156,7 +156,11 @@ specific.)
 
 **`EpisodicMemory`** — per-meeting (TTL 30d default, `{ meetingId, recordedAt }`
 stamps, real `purgeMeeting`) + cross-meeting (persistent, holds procedures).
-Local `hashEmbedder` default; `Embedder` port for swaps.
+Local `hashEmbedder` default; `Embedder` port for swaps. The cross scope is
+durable when constructed with `crossPath`: `FileBackedVectorMemory` persists a
+JSON snapshot (atomic tmp+rename, corrupt-file fail-open) so learned
+procedures survive restarts; the embedder must be stable across restarts
+(persisted vectors). `perMeeting` stays intentionally ephemeral.
 
 **`ContextAssembler`** → `ContextBundle { envelope, episodes, recent }` from the
 envelope, top-K recall (`topK=5, minScore=0.3` default), and a recent-decision
@@ -388,7 +392,7 @@ src/
 ├── event-log/        # log.ts (JSONL impl), types.ts (union), correlation.ts
 ├── understanding/    # intent-classifier, context-assembler,
 │   ├── legacy/classifier-adapter.ts
-│   └── memory/       # episodic, kv, vector, embedders/hash
+│   └── memory/       # episodic, kv, vector, file-backed, embedders/hash
 ├── governance/       # decision, policy-engine, policy-store, approval-gate,
 │   └── safety-net/   # rbac, injection, loop-detector, cost-cap, output-filters
 ├── execution/        # supervisor, tool-runner, verifier, procedure-library,
@@ -408,7 +412,7 @@ src/
 scripts/              # eval.ts (policy eval CLI), check-sqlite.ts (native ABI probe)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 46 files, 353 tests (original 150 = regression floor)
+tests/                # 47 files, 364 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -435,13 +439,16 @@ phase ended typecheck-clean with the full suite green.
 ## 12. Open questions (unchanged in substance)
 
 1. Eval-suite size before enabling online promotion (8 shipped; 50+ recommended pre-enable).
-2. Cross-meeting memory persistence beyond in-memory + JSONL outcomes.
+2. Cross-meeting memory persistence: **resolved for procedures** —
+   `EpisodicMemory({ crossPath })` persists via `FileBackedVectorMemory`
+   (JSON snapshot under the deployment's data dir). Larger-scale vector
+   stores (Postgres/pgvector) remain future work behind the same port.
 3. Multi-tenant policy: deferred (non-goal).
 4. Non-OpenAI-compatible LLM adapters: `LlmClient` port ready; none shipped.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **353/353 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **364/364 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅
