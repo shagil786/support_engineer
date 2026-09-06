@@ -1,0 +1,56 @@
+# policies/default.yaml — shipped defaults; preserves today's deterministic
+# behavior as data. PromotionGate (Phase 5) is the only writer to PolicyStore.
+#
+# Evaluation order = rule order; the first matching rule wins, and anything
+# unmatched is default-deny. Tool names bind to the real ToolName union
+# ('jira_create_issue'-style), not dotted names.
+rules:
+  # Hard PII stop — serialized args of ANY tool are candidate output, so this
+  # rule must come first: a card number in any payload is denied outright.
+  - id: never_emit_credit_card
+    when:
+      output_matches_regex: '\b(?:\d[ -]*?){13,19}\b'
+    effect: deny
+    reason: PII guard
+
+  # Today's Guardrails.checkDestructive behavior as data: a destructive
+  # runbook offered in a meeting needs 2 admin signatures within 5 minutes.
+  # Must precede the generic runbook allow below (first match wins).
+  - id: destructive_runbook_requires_admin_approval
+    when:
+      intent_subKind: runbook_offer
+      runbook_destructive: true
+      tools_in: [execute_runbook_script]
+    effect: require_approval
+    approver_role: admin
+    approver_count: 2
+    timeout_seconds: 300
+    on_timeout: deny
+    reason: destructive runbooks require 2 admin signatures
+
+  # Read-only ops are always allowed.
+  - id: read_only_default_allow
+    when:
+      tools_in: [query_logs]
+    effect: allow
+    reason: read-only ops are default-allowed
+
+  # Everything else is allowed — matches handlers.ts, which gates only
+  # destructive runbooks behind approval. Non-destructive runbooks
+  # (no all/prod scope marker) fall through to this rule.
+  - id: non_destructive_default_allow
+    when:
+      tools_in: [jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt]
+    effect: allow
+    reason: non-destructive ops are default-allowed
+
+  # P0/P1 proactive alerts skip ceremony entirely (also covered by the rule
+  # above, but stated explicitly so tightening the default later cannot
+  # silently un-file incidents).
+  - id: p01_alert_auto_incident
+    when:
+      intent_kind: proactive_alert
+      severity_in: [P0, P1]
+      tools_in: [jira_create_issue, meeting_interrupt]
+    effect: allow
+    reason: P0/P1 alerts are auto-filed
