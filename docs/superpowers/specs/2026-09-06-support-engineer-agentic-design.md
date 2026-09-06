@@ -216,9 +216,33 @@ extractive floor (top-chunk sentences, still cited) when the LLM is
 unwired, invalid, or uncited. Exposed as `platform.answerer` and
 **`POST /ask`** on the HTTP surface (`{question, topK?, where?}`, bearer
 auth + rate limit + idempotent replay like every dispatch route; refusals
-are 200 — an honest answer, not an error). Still not built: citation
-rendering in voice responses, and routing ungrounded *utterances*
-(originally speech) through the answerer automatically.
+are 200 — an honest answer, not an error).
+
+**Voice grounding (live path)** — the pipeline tries the answerer FIRST for
+`question` intents, at a stricter **0.4 floor** (spoken answers must be
+genuinely about the corpus; measured separation: on-topic ≈ 1.45, off-topic
+≈ 0.29). A grounded hit is delivered via `deliverSpeech` with citations,
+emits a **`grounded_answer`** DecisionEvent (added to the event log's
+runtime `KINDS` allowlist — `append()` rejects unknown kinds at runtime
+even when the TS union compiles), and returns
+`answer`/`answerSource: 'knowledge'` with no tool calls. A KB refusal
+falls through to the governed `query_logs` path unchanged, marked
+`answerSource: 'logs'`; without an answerer wired, behavior is unchanged
+(no new fields). Trade-off, by design: a question with real lexical
+overlap gets the corpus answer instead of a live log fetch.
+
+**Faithfulness eval** (`understanding/faithfulness-eval.ts`) — the
+generation-quality complement to hit-rate/MRR: answers are split into
+claims and each claim is judged against its cited context text.
+`LexicalClaimJudge` (content-word overlap, conservative — a floor, never
+a ceiling) is deterministic and LLM-free; `LlmClaimJudge` upgrades
+verdicts via LLM-as-judge (Zod-validated `{verdict}`, per-claim fallback
+to the lexical floor). Refusals are graded: correct when `expectRefusal`,
+zero when over-refusal. `GroundedAnswer.sources` carry the chunk text so
+judges and `/ask` clients can verify claims without re-reading the KB.
+The eval grades at the production 0.4 floor; `npm run eval:faithfulness`
+(`scripts/faithfulness-eval.ts`) prints per-case OK/FAIL lines and exits
+below threshold like the retrieval gate.
 
 ### 4.2 Boundary discipline
 
@@ -480,7 +504,7 @@ src/
 scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console + optional HTTP host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 65 files, 510 tests (original 150 = regression floor)
+tests/                # 67 files, 519 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
