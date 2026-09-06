@@ -14,6 +14,9 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base.js';
+import { embedderFromConfig } from '../src/understanding/memory/embedders/factory.js';
+import { embeddingsFromEnv } from '../src/config.js';
+import { loadDotEnv } from '../src/env.js';
 import { evaluateRetrieval, assertQualityGate } from '../src/understanding/knowledge/retrieval-eval.js';
 import { RETRIEVAL_SEED_DOCS, RETRIEVAL_GOLDEN_SET } from '../src/fixtures/retrieval-golden-set.js';
 
@@ -50,8 +53,17 @@ if (!Number.isFinite(minMrr) || minMrr < 0 || minMrr > 1) {
 }
 
 // --- run ------------------------------------------------------------------
+// Load .env first so a locally-configured EMBEDDINGS_* backend is honored
+// (CI sets env directly; local runs get parity with `serve`).
+loadDotEnv({ env: process.env });
 const seededHere = !existsSync(kbPath);
-const kb = new FileBackedKnowledgeBase({ path: kbPath });
+// Same embedder contract as production: EMBEDDINGS_* env decides the
+// backend, so this gate always grades the KB under its real vectors.
+const kbEmbedder = embedderFromConfig(embeddingsFromEnv(process.env));
+const kb = new FileBackedKnowledgeBase({
+  path: kbPath,
+  ...(kbEmbedder ? { embedder: kbEmbedder } : {}),
+});
 if (seededHere) {
   for (const doc of RETRIEVAL_SEED_DOCS) await kb.ingest(doc);
   console.log(`Seeded empty KB (${kbPath}) with the shipped corpus for grading.`);

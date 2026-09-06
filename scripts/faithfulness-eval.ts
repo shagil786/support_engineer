@@ -14,6 +14,7 @@
  */
 import { join } from 'node:path';
 import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base.js';
+import { embedderFromConfig } from '../src/understanding/memory/embedders/factory.js';
 import { GroundedAnswerer } from '../src/understanding/grounded-answerer.js';
 import {
   evaluateFaithfulness,
@@ -24,6 +25,7 @@ import {
 import { RETRIEVAL_SEED_DOCS } from '../src/fixtures/retrieval-golden-set.js';
 import { OpenAiCompatibleClient } from '../src/support-voice-agent/tools/llm.js';
 import { loadDotEnv } from '../src/env.js';
+import { embeddingsFromEnv } from '../src/config.js';
 import { existsSync } from 'node:fs';
 
 let minScore = 0.9;
@@ -70,7 +72,13 @@ loadDotEnv({ env: process.env });
 
 const kbPath = join(process.cwd(), 'var/knowledge/kb.json');
 const seededHere = !existsSync(kbPath);
-const kb = new FileBackedKnowledgeBase({ path: kbPath });
+// Same embedder contract as production: EMBEDDINGS_* env decides the
+// backend, so this eval always grades the KB under its real vectors.
+const kbEmbedder = embedderFromConfig(embeddingsFromEnv(process.env));
+const kb = new FileBackedKnowledgeBase({
+  path: kbPath,
+  ...(kbEmbedder ? { embedder: kbEmbedder } : {}),
+});
 if (seededHere) {
   for (const doc of RETRIEVAL_SEED_DOCS) await kb.ingest(doc);
   console.log('Seeded empty KB with the shipped corpus for grading.');

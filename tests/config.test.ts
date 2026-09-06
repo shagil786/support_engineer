@@ -79,7 +79,7 @@ describe('configFromEnv', () => {
     expect(() => configFromEnv({ EMBEDDINGS_BASE_URL: 'https://e.test' })).toThrow(/required together/);
     expect(
       configFromEnv({ EMBEDDINGS_BASE_URL: 'https://e.test', EMBEDDINGS_API_KEY: 'k', EMBEDDINGS_MODEL: 'm' }).embeddings,
-    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
+    ).toEqual({ provider: 'remote', baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
     expect(
       configFromEnv({
         EMBEDDINGS_BASE_URL: 'https://e.test',
@@ -87,7 +87,7 @@ describe('configFromEnv', () => {
         EMBEDDINGS_MODEL: 'm',
         EMBEDDINGS_DIM: '128',
       }).embeddings,
-    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm', dim: 128 });
+    ).toEqual({ provider: 'remote', baseUrl: 'https://e.test', apiKey: 'k', model: 'm', dim: 128 });
     // Below the dim floor → absent dim.
     expect(
       configFromEnv({
@@ -96,7 +96,27 @@ describe('configFromEnv', () => {
         EMBEDDINGS_MODEL: 'm',
         EMBEDDINGS_DIM: '4',
       }).embeddings,
-    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
+    ).toEqual({ provider: 'remote', baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
+  });
+
+  it('parses EMBEDDINGS_PROVIDER=local as a keyless embedder with optional model/dim', () => {
+    expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local' }).embeddings).toEqual({ provider: 'local' });
+    expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_MODEL: 'Xenova/foo' }).embeddings).toEqual({
+      provider: 'local',
+      model: 'Xenova/foo',
+    });
+    expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_DIM: '128' }).embeddings).toEqual({
+      provider: 'local',
+      dim: 128,
+    });
+  });
+
+  it('rejects contradictory and unknown embeddings config', () => {
+    // local provider with remote-only vars is a contradiction, not a default.
+    expect(() => configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_BASE_URL: 'https://e.test' })).toThrow(/contradict|BASE_URL/);
+    expect(() => configFromEnv({ EMBEDDINGS_PROVIDER: 'brain' })).toThrow(/unknown .*provider|EMBEDDINGS_PROVIDER/i);
+    // Explicit remote still requires the trio.
+    expect(() => configFromEnv({ EMBEDDINGS_PROVIDER: 'remote', EMBEDDINGS_API_KEY: 'k' })).toThrow(/required together/);
   });
 });
 

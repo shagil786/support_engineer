@@ -13,11 +13,16 @@
 import { readFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base.js';
-import { OpenAiCompatibleEmbedder } from '../src/understanding/memory/embedders/openai.js';
+import { embedderFromConfig } from '../src/understanding/memory/embedders/factory.js';
 import { embeddingsFromEnv } from '../src/config.js';
+import { loadDotEnv } from '../src/env.js';
 import { RETRIEVAL_SEED_DOCS } from '../src/fixtures/retrieval-golden-set.js';
 
 const [cmd, arg, source] = process.argv.slice(2);
+
+// .env parity with serve: the embedder contract (EMBEDDINGS_PROVIDER=local|remote)
+// must be visible to CLI runs too, or a configured backend is silently ignored.
+loadDotEnv({ env: process.env });
 
 if (cmd === 'seed') {
   const kbase = openKb();
@@ -56,15 +61,9 @@ if (cmd === 'seed') {
 }
 
 function openKb(): FileBackedKnowledgeBase {
-  const embeddings = embeddingsFromEnv(process.env);
-  const embedder = embeddings
-    ? new OpenAiCompatibleEmbedder({
-        baseUrl: embeddings.baseUrl,
-        apiKey: embeddings.apiKey,
-        model: embeddings.model,
-        ...(embeddings.dim !== undefined ? { dim: embeddings.dim } : {}),
-      }).embed
-    : undefined;
+  // The factory honors EMBEDDINGS_PROVIDER=local|remote; undefined → the
+  // KB's built-in hash embedder. Same contract as bootstrap and the evals.
+  const embedder = embedderFromConfig(embeddingsFromEnv(process.env));
   return new FileBackedKnowledgeBase({
     path: resolve(process.cwd(), 'var', 'knowledge', 'kb.json'),
     ...(embedder ? { embedder } : {}),

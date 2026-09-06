@@ -22,7 +22,7 @@ import { IntentClassifier } from './understanding/intent-classifier.js';
 import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
 import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
-import { OpenAiCompatibleEmbedder } from './understanding/memory/embedders/openai.js';
+import { embedderFromConfig, type EmbeddingsConfig } from './understanding/memory/embedders/factory.js';
 import { GroundedAnswerer } from './understanding/grounded-answerer.js';
 import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
@@ -84,7 +84,7 @@ export interface PlatformOptions {
   approvalTimeoutMs?: number;
   /** Embedding backend for the knowledge base (absent = built-in hash
    *  embedder). Provided by configFromEnv as `embeddings` in env-wired hosts. */
-  embeddings?: { baseUrl: string; apiKey: string; model: string; dim?: number };
+  embeddings?: EmbeddingsConfig;
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
   /** Where pipeline speech is delivered (TTS bridge / console). */
@@ -158,19 +158,13 @@ export function createPlatform(opts: PlatformOptions): Platform {
   });
   // Durable hybrid knowledge base: runbooks/incidents/postmortems ingested by
   // the host (or the demo seed) become retrievable context with provenance.
-  // A configured cloud embedder replaces the hash backend; vectors already
+  // The configured embedder (remote OpenAI-compatible OR local in-process,
+  // via the shared factory) replaces the hash backend; vectors already
   // persisted under the old backend need a one-time `knowledge.reindex()`.
-  const embeddings = opts.embeddings
-    ? new OpenAiCompatibleEmbedder({
-        baseUrl: opts.embeddings.baseUrl,
-        apiKey: opts.embeddings.apiKey,
-        model: opts.embeddings.model,
-        ...(opts.embeddings.dim !== undefined ? { dim: opts.embeddings.dim } : {}),
-      })
-    : undefined;
+  const embedder = embedderFromConfig(opts.embeddings);
   const knowledge = new FileBackedKnowledgeBase({
     path: join(dataDir, 'knowledge', 'kb.json'),
-    ...(embeddings ? { embedder: embeddings.embed } : {}),
+    ...(embedder ? { embedder } : {}),
   });
   const assembler = new ContextAssembler({ episodic, knowledge });
 

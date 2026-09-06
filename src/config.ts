@@ -56,27 +56,48 @@ export interface IntegrationsFromEnv {
    *  pending before it times out. Absent = the gate's built-in default. */
   approvalTimeoutMs?: number;
   /** Embedding backend for the knowledge base (absent = built-in hash
-   *  embedder). All three vars are required together. */
-  embeddings?: { baseUrl: string; apiKey: string; model: string; dim?: number };
+   *  embedder). Remote: OpenAI-compatible /embeddings (baseUrl/apiKey/model
+   *  required together). Local: an in-process transformers.js model — no
+   *  key, EMBEDDINGS_MODEL selects the HF model id (default MiniLM). */
+  embeddings?:
+    | { provider: 'remote'; baseUrl: string; apiKey: string; model: string; dim?: number }
+    | { provider: 'local'; model?: string; dim?: number };
 }
 
-/** Embeddings config from the environment. EMBEDDINGS_BASE_URL,
- *  EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together (partial
- *  config is an error, never a silent half-wired embedder);
+/** Embeddings config from the environment. Two providers:
+ *
+ *  - EMBEDDINGS_PROVIDER=local → in-process transformers.js model; no key,
+ *    no URL; optional EMBEDDINGS_MODEL (HF id) and EMBEDDINGS_DIM.
+ *  - EMBEDDINGS_PROVIDER=remote (or omitted — the legacy default) → an
+ *    OpenAI-compatible /embeddings endpoint; EMBEDDINGS_BASE_URL,
+ *    EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together (partial
+ *    config is an error, never a silent half-wired embedder).
+ *
  *  EMBEDDINGS_DIM (>= 8) folds longer vectors to a fixed dimension. */
 export function embeddingsFromEnv(env: Env): IntegrationsFromEnv['embeddings'] {
+  const provider = envVar(env, 'EMBEDDINGS_PROVIDER')?.toLowerCase();
   const baseUrl = envVar(env, 'EMBEDDINGS_BASE_URL');
   const apiKey = envVar(env, 'EMBEDDINGS_API_KEY');
   const model = envVar(env, 'EMBEDDINGS_MODEL');
   const dimRaw = Number(envVar(env, 'EMBEDDINGS_DIM') ?? 0);
   const dim = Number.isFinite(dimRaw) && dimRaw >= 8 ? dimRaw : undefined;
+
+  if (provider === 'local') {
+    if (baseUrl || apiKey) {
+      throw new Error('embeddings config contradiction: EMBEDDINGS_PROVIDER=local runs in-process and takes no EMBEDDINGS_BASE_URL/EMBEDDINGS_API_KEY');
+    }
+    return { provider: 'local', ...(model ? { model } : {}), ...(dim !== undefined ? { dim } : {}) };
+  }
+  if (provider && provider !== 'remote') {
+    throw new Error(`unknown EMBEDDINGS_PROVIDER '${provider}' (known: local, remote)`);
+  }
   if (!baseUrl || !apiKey || !model) {
     if (baseUrl || apiKey || model) {
       throw new Error('embeddings config incomplete: EMBEDDINGS_BASE_URL, EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together');
     }
     return undefined;
   }
-  return { baseUrl, apiKey, model, ...(dim !== undefined ? { dim } : {}) };
+  return { provider: 'remote', baseUrl, apiKey, model, ...(dim !== undefined ? { dim } : {}) };
 }
 
 /** Learning layer opt-in: LEARNING_ENABLED=true|1 enables it. Defaults to

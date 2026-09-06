@@ -20,7 +20,7 @@ export type AsyncEmbedder = (text: string) => Promise<number[]>;
 
 export class EmbeddingError extends Error {
   constructor(
-    public readonly code: 'unwired' | 'network' | 'http_error' | 'malformed',
+    public readonly code: 'unwired' | 'network' | 'http_error' | 'malformed' | 'model_load' | 'inference',
     message: string,
     public readonly detail?: unknown,
   ) {
