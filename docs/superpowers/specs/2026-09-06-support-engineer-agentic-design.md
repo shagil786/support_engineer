@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **443/443 tests green** across 56 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **449/449 tests green** across 57 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -132,7 +132,7 @@ append-only JSONL under var/events/. Surfaces (src/surface/): async
 | Mode | Entry point | Status |
 |------|-------------|--------|
 | **Live meeting** | `OrchestratedPipeline.processUtterance` → classifier → route (§15); bridge/STT unchanged | Implemented |
-| **Async ticket** | `parseJiraWebhook` / `parseSlackMention` / `buildCronEnvelope` → `processEnvelope`; `POST /slack/events` accepts verified Slack Events deliveries (v0 HMAC + `event_id` dedupe); `POST /envelope` (bearer auth) dispatches Jira-webhook and anomaly deliveries through `buildEnvelope` (`src/surface/dispatch.ts`) — parser-rejected payloads are dropped (`accepted: false`), unknown sources 400, and caller-supplied `proposed` actions are refused: policy picks the action | Implemented — parsers + `/slack/events` + `/envelope`; Slack-mention/cron remain programmatic |
+| **Async ticket** | `parseJiraWebhook` / `parseSlackMention` / `buildCronEnvelope` → `processEnvelope`; `POST /slack/events` accepts verified Slack Events deliveries (v0 HMAC + `event_id` dedupe); `POST /envelope` (bearer auth) dispatches structured deliveries through `buildEnvelope` (`src/surface/dispatch.ts`): sources `jira`, `anomaly`, `slack-mention`, `cron` — every §3.1 parser now has an HTTP ingress. Parser-rejected payloads are dropped (`accepted: false`), unknown sources 400, and caller-supplied `proposed` actions are refused: policy picks the action | Implemented — parsers + `/slack/events` + `/envelope` (all sources) |
 | **HTTP API** | `createHttpServer` (`src/http/server.ts`): `POST /utterance` → `processUtterance`, `POST /approvals/:id/{sign,execute}`, `GET /healthz`, `POST /slack/events` (routes `reaction_added` to the ApprovalGate for emoji sign-off) | Implemented — bearer-token auth (fail-closed: no tokens configured → 503, never an open surface), body-size cap, roles always resolve server-side from the speakerId (never client-asserted) |
 | **Approval UX** | ApprovalGate posts via bot-token `chat.postMessage` (`slack-bot.ts`, message refs → per-approval correlation; webhook posters fall back to single-pending correlation). Emoji reactions on the security channel count as signatures: 🛡️ admin, 🔧 engineer, 👀 / ✅ viewer, ❌ deny (names or glyphs; `reactionRoleMap` overridable). A reaction is a *claim* — it counts only if the reactor's server-resolved role is at least the mapped role; dedupe by user id; removals never change state. Lifecycle changes land on the ORIGINAL message via a capability ladder: `updateMessage` (chat.update — grant, per-signature progress like `1/2`, deny, timeout) → `postReply` (in-thread) → standalone channel post (deny/timeout only; grant/progress are threaded-only and stay silent for webhook-era posters, who keep the plain-post behavior). Fire-and-forget throughout so Slack outages never block governance; the pending window is `APPROVAL_TIMEOUT_MS` (≥ 1000, default 5 min). **Block Kit cards**: rich-capable clients (`postRichMessage`/`updateRichMessage` on the port) post state-colored attachments — ⚠️ warning pending (with Approve/Deny buttons whose `action_id` embeds the approval id), 🟢 good granted, 🔴 danger denied, 🟠 warning timeout; resolved states drop the buttons. Button clicks arrive at `POST /slack/interactive` (form-encoded, HMAC over the raw body) and flow through `ApprovalGate.handleAction`, sharing the reaction role-gate (approve = admin) and per-user dedupe; the embedded id correlates clicks even with several pending. Text-only clients keep the exact pre-card behavior | Implemented (`handleReaction` + `handleAction` + `SlackLike.postMessageWithRef?`/`updateMessage?`/`postReply?`/`postRichMessage?`/`updateRichMessage?` + threaded lifecycle + Block Kit cards) |
 | **Proactive** | `anomalyToEnvelope` (`isIncidentWorthy`: P0/P1 = incident, else anomaly) → `processEnvelope` | Implemented |
@@ -434,7 +434,7 @@ src/
 scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console + optional HTTP host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 56 files, 443 tests (original 150 = regression floor)
+tests/                # 57 files, 449 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -472,7 +472,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **443/443 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **449/449 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

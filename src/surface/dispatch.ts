@@ -8,7 +8,16 @@
  */
 import type { IntentEnvelope } from '../event-log/types.js';
 import { parseJiraWebhook } from './async/jira-webhook.js';
+import { parseSlackMention } from './async/slack-mention.js';
+import { buildCronEnvelope } from './async/cron.js';
 import { anomalyToEnvelope, type AnomalySignal } from './proactive/anomaly-detector.js';
+
+/** Detect a cron delivery by shape: a named scheduled job. */
+function asCronJob(body: unknown): string | undefined {
+  if (typeof body !== 'object' || body === null) return undefined;
+  const job = (body as { scheduledJob?: unknown }).scheduledJob;
+  return typeof job === 'string' && job.trim() !== '' ? job : undefined;
+}
 
 /** Detect a monitoring signal by shape (tolerates the Severity union only). */
 function asAnomalySignal(body: unknown): AnomalySignal | undefined {
@@ -26,10 +35,15 @@ function asAnomalySignal(body: unknown): AnomalySignal | undefined {
  *  undefined (the endpoint reports `accepted: false`). */
 export function buildEnvelope(source: string, body: unknown): IntentEnvelope | undefined {
   if (source === 'jira') return parseJiraWebhook(body);
+  if (source === 'slack-mention') return parseSlackMention(body);
+  if (source === 'cron') {
+    const job = asCronJob(body);
+    return job ? buildCronEnvelope(job) : undefined;
+  }
   const signal = asAnomalySignal(body);
   if (source === 'anomaly' && signal) return anomalyToEnvelope(signal);
   return undefined;
 }
 
 /** The sources /envelope accepts. Anything else is a client error. */
-export const ENVELOPE_SOURCES: readonly string[] = ['jira', 'anomaly'];
+export const ENVELOPE_SOURCES: readonly string[] = ['jira', 'anomaly', 'slack-mention', 'cron'];
