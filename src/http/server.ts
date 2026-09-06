@@ -18,7 +18,7 @@
  * envelope. Utterance responses carry the full PipelineRouting so callers
  * see vetoes, denials, staged approvals, and legacy fallbacks honestly.
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Platform } from '../bootstrap.js';
@@ -36,6 +36,16 @@ export interface HttpServerOptions {
   slackSigningSecret?: string;
   /** Body size cap in bytes (default 1 MiB). */
   maxBodyBytes?: number;
+  /** Per-credential rate limit (requests/minute, token bucket). Default 120.
+   *  Bearer routes key on the token, Slack routes on the source IP; /healthz
+   *  and 401s are exempt. 429 responses carry Retry-After. */
+  rateLimitPerMinute?: number;
+  /** TTL for stored Idempotency-Key responses (default 24 h). */
+  idempotencyTtlMs?: number;
+  /** Replay window for auto-coalesced POST /approvals/:id/execute calls
+   *  (default 5 min): inside it, a repeat execute gets the cached result
+   *  instead of re-running the governed action. */
+  executeReplayTtlMs?: number;
   host?: string;
   port?: number;
   now?: () => number;
@@ -45,6 +55,19 @@ export interface HttpServerHandle {
   url: string;
   port: number;
   close(): Promise<void>;
+}
+
+/** A stored idempotent response: status, JSON body, and header markers. */
+interface CachedResponse {
+  status: number;
+  body: unknown;
+  createdAt: number;
+}
+
+/** In-flight request still executing for an idempotency key. */
+interface InFlight {
+  promise: Promise<CachedResponse>;
+  createdAt: number;
 }
 
 interface Body {
@@ -61,6 +84,11 @@ interface InteractivePayload {
 }
 
 const MAX_DEFAULT = 1024 * 1024;
+const DEFAULT_RATE_LIMIT_PER_MIN = 120;
+const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
+const DEFAULT_EXECUTE_REPLAY_TTL_MS = 5 * 60_000;
+/** Idempotency caches never grow unbounded: TTL sweep + hard cap. */
+const IDEMPOTENCY_MAX_ENTRIES = 10_000;
 /** Slack retry dedupe window: TTL-first, then a hard cap (a burst of
  *  unique events must not grow the map unbounded). */
 const SLACK_DEDUPE_TTL_MS = 5 * 60_000;
@@ -76,6 +104,24 @@ export async function createHttpServer(
   const signingSecret = opts.slackSigningSecret;
 
   const seenSlackEvents = new Map<string, number>();
+
+  // ---- Rate limiting: per-credential token buckets. Bearer routes key on
+  // the VALIDATED token (invalid tokens never mint a bucket); Slack routes
+  // key on the source IP; /healthz is exempt. Refill is continuous.
+  const rateLimit = opts.rateLimitPerMinute ?? DEFAULT_RATE_LIMIT_PER_MIN;
+  const idemTtl = opts.idempotencyTtlMs ?? DEFAULT_IDEMPOTENCY_TTL_MS;
+  const execReplayTtl = opts.executeReplayTtlMs ?? DEFAULT_EXECUTE_REPLAY_TTL_MS;
+  const buckets = new Map<string, { tokens: number; updatedAt: number }>();
+  // ---- Idempotency: replay for client keys on dispatch routes + auto
+  // coalescing on approval execute (two rapid button/API clicks must not
+  // run the governed action twice).
+  const idemResponses = new Map<string, CachedResponse>();
+  const idemInFlight = new Map<string, InFlight>();
+  /** Route context: which credential a request authenticated as (for
+   *  rate-limit keying and idempotency scoping), set after auth passes. */
+  const routeContexts = new WeakMap<ServerResponse, { credential: string }>();
+  /** Bodies peeked during auto-keying, handed to the handler's readBody. */
+  const peekedBodies = new WeakMap<IncomingMessage, string>();
 
   const server: Server = createServer((req, res) => {
     void handle(req, res).catch((e: unknown) => {
@@ -94,21 +140,45 @@ export async function createHttpServer(
       return reply(res, 200, { ok: true });
     }
 
-    if (method === 'POST' && path === '/slack/events') return handleSlack(req, res);
-    if (method === 'POST' && path === '/slack/interactive') return handleSlackInteractive(req, res);
+    // Slack routes: rate-limited by source IP (the credential IS the HMAC).
+    if (method === 'POST' && path === '/slack/events') {
+      if (limitClient(`ip:${clientKey(req)}`)) return tooMany(res);
+      return handleSlack(req, res);
+    }
+    if (method === 'POST' && path === '/slack/interactive') {
+      if (limitClient(`ip:${clientKey(req)}`)) return tooMany(res);
+      return handleSlackInteractive(req, res);
+    }
 
     // Everything below requires a bearer token — fail closed when unconfigured.
     const token = bearer(req);
     if (tokens.size === 0) return reply(res, 503, { error: 'http auth not configured (set authTokens); refusing to serve unauthenticated' });
     if (!token || !hasToken(tokens, token)) return reply(res, 401, { error: 'invalid bearer token' });
+    // Only VALID tokens consume budget — a 401 flood cannot mint buckets.
+    routeContexts.set(res, { credential: token });
+    if (limitClient('token:' + token)) return tooMany(res);
 
-    if (method === 'POST' && path === '/utterance') return handleUtterance(req, res);
-    if (method === 'POST' && path === '/envelope') return handleEnvelope(req, res);
+    if (method === 'POST' && path === '/utterance') {
+      return dispatchIdempotent(req, res, 'utterance', () => handleUtterance(req, res));
+    }
+    if (method === 'POST' && path === '/envelope') {
+      return dispatchIdempotent(req, res, 'envelope', () => handleEnvelope(req, res));
+    }
 
     const approval = /^\/approvals\/([^/]+)\/(sign|execute)$/.exec(path);
     if (method === 'POST' && approval && approval[1] && approval[2]) {
       // The regex's second group only matches 'sign' | 'execute'.
-      return handleApproval(req, res, decodeURIComponent(approval[1]), approval[2] as 'sign' | 'execute');
+      const op = approval[2] as 'sign' | 'execute';
+      const approvalId = decodeURIComponent(approval[1]);
+      if (op === 'execute') {
+        // Auto-coalescing: concurrent/rapid re-executes share one governed
+        // run inside the replay window — with or without a client key.
+        return dispatchIdempotent(req, res, `execute:${approvalId}`, () => handleApproval(req, res, approvalId, op), {
+          autoKey: true,
+          ttl: execReplayTtl,
+        });
+      }
+      return dispatchIdempotent(req, res, `sign:${approvalId}`, () => handleApproval(req, res, approvalId, op));
     }
 
     const knownPath = path === '/utterance' || path === '/envelope' || approval !== null;
@@ -118,15 +188,15 @@ export async function createHttpServer(
     reply(res, 404, { error: 'not found' });
   }
 
-  async function handleUtterance(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleUtterance(req: IncomingMessage, res: ServerResponse): Promise<CachedResponse> {
     const body = await readBody(req, maxBody);
-    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
+    if (body.error === 'too-large') return { status: 413, body: { error: 'body too large' }, createdAt: now() };
     const parsed = parseJson(body);
-    if (!parsed.ok) return reply(res, 400, { error: parsed.error });
+    if (!parsed.ok) return { status: 400, body: { error: parsed.error }, createdAt: now() };
 
     const b = parsed.value as { speakerId?: unknown; text?: unknown; speakerRole?: unknown };
     const text = typeof b.text === 'string' ? b.text.trim() : '';
-    if (text.length === 0) return reply(res, 400, { error: 'text is required' });
+    if (text.length === 0) return { status: 400, body: { error: 'text is required' }, createdAt: now() };
     const speakerId = typeof b.speakerId === 'string' && b.speakerId.trim() !== '' ? b.speakerId : 'http-client';
     // Authorization is NOT a client assertion: roles resolve server-side from
     // the speakerId via the platform's SafetyNet resolver (unknown = guest).
@@ -135,9 +205,9 @@ export async function createHttpServer(
 
     try {
       const route = await platform.pipeline.processUtterance(speakerId, text, now());
-      return reply(res, 200, route);
+      return { status: 200, body: route, createdAt: now() };
     } catch (e) {
-      return reply(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      return { status: 500, body: { error: e instanceof Error ? e.message : String(e) }, createdAt: now() };
     }
   }
 
@@ -146,55 +216,55 @@ export async function createHttpServer(
    *  ACTION is chosen here by policy, never by the client: a caller-supplied
    *  `proposed` field is rejected outright. Untrusted payloads that fail
    *  their parser are dropped with `accepted: false`, not guessed. */
-  async function handleEnvelope(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await readBody(req, maxBody);
-    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
+  async function handleEnvelope(req: IncomingMessage, res: ServerResponse): Promise<CachedResponse> {
+    const body = await readBody(req, maxBody, peekedBodies.get(req));
+    if (body.error === 'too-large') return { status: 413, body: { error: 'body too large' }, createdAt: now() };
     const parsed = parseJson(body);
-    if (!parsed.ok) return reply(res, 400, { error: parsed.error });
+    if (!parsed.ok) return { status: 400, body: { error: parsed.error }, createdAt: now() };
     const b = parsed.value as { source?: unknown; body?: unknown; proposed?: unknown };
     if (typeof b.source !== 'string' || !ENVELOPE_SOURCES.includes(b.source)) {
-      return reply(res, 400, { error: `source must be one of: ${ENVELOPE_SOURCES.join(', ')}` });
+      return { status: 400, body: { error: `source must be one of: ${ENVELOPE_SOURCES.join(', ')}` }, createdAt: now() };
     }
-    if (b.body === undefined) return reply(res, 400, { error: 'body is required' });
+    if (b.body === undefined) return { status: 400, body: { error: 'body is required' }, createdAt: now() };
     if (b.proposed !== undefined) {
-      return reply(res, 400, { error: 'proposed actions are chosen by policy, not by the client' });
+      return { status: 400, body: { error: 'proposed actions are chosen by policy, not by the client' }, createdAt: now() };
     }
     const envelope = buildEnvelope(b.source, b.body);
-    if (!envelope) return reply(res, 200, { accepted: false, reason: 'payload rejected by the source parser' });
+    if (!envelope) return { status: 200, body: { accepted: false, reason: 'payload rejected by the source parser' }, createdAt: now() };
     const proposedAction = proposeFor(envelope);
     try {
       const route = await platform.pipeline.processEnvelope(envelope, proposedAction);
-      return reply(res, 200, { accepted: true, ...route });
+      return { status: 200, body: { accepted: true, ...route }, createdAt: now() };
     } catch (e) {
-      return reply(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      return { status: 500, body: { error: e instanceof Error ? e.message : String(e) }, createdAt: now() };
     }
   }
 
-  async function handleApproval(req: IncomingMessage, res: ServerResponse, approvalId: string, op: 'sign' | 'execute'): Promise<void> {
-    const body = await readBody(req, maxBody);
-    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
+  async function handleApproval(req: IncomingMessage, res: ServerResponse, approvalId: string, op: 'sign' | 'execute'): Promise<CachedResponse> {
+    // The execute route may have peeked the body during auto-keying; reuse it.
+    const body = await readBody(req, maxBody, peekedBodies.get(req));
+    if (body.error === 'too-large') return { status: 413, body: { error: 'body too large' }, createdAt: now() };
     const parsed = parseJson(body);
-    if (!parsed.ok) return reply(res, 400, { error: parsed.error });
+    if (!parsed.ok) return { status: 400, body: { error: parsed.error }, createdAt: now() };
 
     try {
       if (op === 'sign') {
         const b = parsed.value as { role?: unknown; signerId?: unknown };
         if (typeof b.role !== 'string' || b.role.trim() === '') {
-          return reply(res, 400, { error: 'role is required (admin | engineer | viewer | guest)' });
+          return { status: 400, body: { error: 'role is required (admin | engineer | viewer | guest)' }, createdAt: now() };
         }
         const snap: ApprovalSnapshot = platform.pipeline.signApproval(approvalId, b.role, typeof b.signerId === 'string' ? b.signerId : undefined);
-        return reply(res, 200, snap);
+        return { status: 200, body: snap, createdAt: now() };
       }
       const b = parsed.value as { correlationId?: unknown };
       if (typeof b.correlationId !== 'string' || b.correlationId.trim() === '') {
-        return reply(res, 400, { error: 'correlationId is required (from the staged utterance response)' });
+        return { status: 400, body: { error: 'correlationId is required (from the staged utterance response)' }, createdAt: now() };
       }
       const route: PipelineRouting = await platform.pipeline.executeApproved(approvalId, b.correlationId);
-      return reply(res, 200, route);
+      return { status: 200, body: route, createdAt: now() };
     } catch (e) {
-      // Unknown approval ids and gate errors surface as 404/400-shaped 500s
-      // with the reason — clients can distinguish by message.
-      return reply(res, 404, { error: e instanceof Error ? e.message : String(e) });
+      // Unknown approval ids and gate errors surface as 404s with the reason.
+      return { status: 404, body: { error: e instanceof Error ? e.message : String(e) }, createdAt: now() };
     }
   }
 
@@ -321,6 +391,120 @@ export async function createHttpServer(
     return reply(res, 200, { ok: true });
   }
 
+/* ------------------- rate limiting + idempotency ------------------- */
+
+/** Consume one token from the credential's bucket; false when exhausted. */
+function limitClient(credential: string): boolean {
+  const t = now();
+  const capacity = rateLimit;
+  const refillPerMs = capacity / 60_000;
+  let b = buckets.get(credential);
+  if (!b) {
+    b = { tokens: capacity, updatedAt: t };
+    buckets.set(credential, b);
+  }
+  b.tokens = Math.min(capacity, b.tokens + (t - b.updatedAt) * refillPerMs);
+  b.updatedAt = t;
+  if (b.tokens < 1) return true;
+  b.tokens -= 1;
+  if (buckets.size > IDEMPOTENCY_MAX_ENTRIES) {
+    for (const [k, bb] of buckets) {
+      if (t - bb.updatedAt > 60_000) buckets.delete(k);
+    }
+  }
+  return false;
+}
+
+function tooMany(res: ServerResponse): void {
+  res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
+  res.end(JSON.stringify({ error: 'rate limit exceeded; slow down' }));
+}
+
+function clientKey(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? 'unknown-ip';
+}
+
+/** Idempotent dispatch: replay a stored 2xx for the same (credential, key),
+ *  coalesce concurrent same-key requests into one execution, store the
+ *  result when settled (2xx only — a failed attempt can be retried with the
+ *  same key). Keys are opt-in via the Idempotency-Key header except on
+ *  approval execute, where the route auto-scopes by credential+path+body so
+ *  double-clicks cannot double-execute a governed action. */
+async function dispatchIdempotent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  routeScope: string,
+  run: () => Promise<CachedResponse>,
+  o: { autoKey?: boolean; ttl?: number } = {},
+): Promise<void> {
+  const credential = routeContexts.get(res)?.credential ?? 'unknown';
+  const ttl = o.ttl ?? idemTtl;
+  const clientKeyHeader = header(req, 'idempotency-key');
+  let key: string | undefined = clientKeyHeader?.trim() || undefined;
+  if (!key && o.autoKey) {
+    // Best-effort body signature so the same action executed twice with an
+    // identical body coalesces; differing bodies are distinct operations.
+    const raw = await peekBody(req);
+    key = 'auto:' + createHash('sha256').update(raw).digest('hex').slice(0, 32);
+  }
+  if (!key) {
+    const r = await run();
+    return sendCached(res, r);
+  }
+  const scoped = `${credential}:${routeScope}:${key}`;
+  const stored = idemResponses.get(scoped);
+  if (stored && now() - stored.createdAt <= ttl) {
+    return sendCached(res, stored, true);
+  }
+  if (stored) idemResponses.delete(scoped);
+  const inflight = idemInFlight.get(scoped);
+  if (inflight) {
+    const shared = await inflight.promise;
+    return sendCached(res, shared, true);
+  }
+  const p = run()
+    .then((r) => {
+      if (r.status >= 200 && r.status < 300) {
+        idemResponses.set(scoped, r);
+        if (idemResponses.size > IDEMPOTENCY_MAX_ENTRIES) {
+          for (const [k, v] of idemResponses) {
+            if (now() - v.createdAt > idemTtl) idemResponses.delete(k);
+          }
+        }
+      }
+      return r;
+    })
+    .finally(() => idemInFlight.delete(scoped));
+  idemInFlight.set(scoped, { promise: p, createdAt: now() });
+  const r = await p;
+  sendCached(res, r);
+}
+
+function sendCached(res: ServerResponse, r: CachedResponse, replay = false): void {
+  void res.writeHead(r.status, {
+    'content-type': 'application/json',
+    ...(replay ? { 'idempotent-replay': 'true' } : {}),
+  });
+  res.end(JSON.stringify(r.body));
+}  /** Body peek for auto-keying: reads the stream ONCE and caches the raw
+   *  body on the request, so the handler's readBody finds it already there
+   *  (a consumed stream would hang readBody forever). */
+  async function peekBody(req: IncomingMessage): Promise<string> {
+    const cached = peekedBodies.get(req);
+    if (cached !== undefined) return cached;
+    const raw = await new Promise<string>((resolve) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', () => resolve(''));
+    });
+    peekedBodies.set(req, raw);
+    return raw;
+  }
+
+/** The action policy will evaluate for a parsed envelope — chosen by the
+ *  SERVER from the envelope's intent, never accepted from the client.
+ *  Mirrors the pipeline's own question/meeting-interrupt defaults. */
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(opts.port ?? 0, opts.host ?? '127.0.0.1', () => resolve());
@@ -345,9 +529,6 @@ function reply(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-/** The action policy will evaluate for a parsed envelope — chosen by the
- *  SERVER from the envelope's intent, never accepted from the client.
- *  Mirrors the pipeline's own question/meeting-interrupt defaults. */
 function proposeFor(envelope: IntentEnvelope): { tool: ToolName; args: Record<string, unknown> } {
   if (envelope.intent.kind === 'async_triage') {
     return { tool: 'query_logs', args: { query_string: envelope.entities.ticketKeys?.[0] ?? 'errors' } };
@@ -389,7 +570,10 @@ function verifySlackSignature(secret: string, presented: string, ts: string, raw
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function readBody(req: IncomingMessage, maxBytes: number): Promise<Body> {
+function readBody(req: IncomingMessage, maxBytes: number, preRead?: string): Promise<Body> {
+  if (preRead !== undefined) {
+    return Promise.resolve(preRead.length > maxBytes ? { json: undefined, raw: '', error: 'too-large' } : { json: undefined, raw: preRead });
+  }
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;

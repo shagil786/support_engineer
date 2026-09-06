@@ -26,6 +26,9 @@
  *                              SLACK_BOT_TOKEN so the gate posts cards + refs)
  *   APPROVAL_TIMEOUT_MS        pending window for staged approvals (default: gate's 5 min;
  *                              timed-out and denied approvals post a follow-up to the channel)
+ *   RATE_LIMIT_PER_MINUTE      per-credential HTTP budget (default 120); 429s carry Retry-After.
+ *                              Idempotency: send Idempotency-Key on /utterance and /envelope
+ *                              for safe retries; approval executes are auto-coalesced
  */
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -95,11 +98,13 @@ async function main(): Promise<void> {
     .filter((t) => t !== '');
   let http: HttpServerHandle | undefined;
   if (httpTokens.length > 0) {
+    const rateRaw = Number(env['RATE_LIMIT_PER_MINUTE'] ?? 0);
     http = await createHttpServer(rt.platform, {
       authTokens: httpTokens,
       host: env['HTTP_HOST'] ?? '127.0.0.1',
       port: Number(env['HTTP_PORT'] ?? 8787),
       ...(env['SLACK_SIGNING_SECRET'] ? { slackSigningSecret: env['SLACK_SIGNING_SECRET'] } : {}),
+      ...(Number.isFinite(rateRaw) && rateRaw >= 1 ? { rateLimitPerMinute: rateRaw } : {}),
     });
     console.log(`http up at ${http.url} (POST /utterance; slack events ${env['SLACK_SIGNING_SECRET'] ? 'on (reactions route to the approval gate)' : 'off'})`);
   } else {
