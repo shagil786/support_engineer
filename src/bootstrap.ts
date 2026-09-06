@@ -133,8 +133,11 @@ export function createPlatform(opts: PlatformOptions): Platform {
 
   const policyYaml = readFileSync(opts.policyPath ?? resolve(process.cwd(), 'policies/default.yaml'), 'utf8');
   const policyEngine = new PolicyEngine({ yaml: policyYaml });
-  const speakerRole =
-    opts.speakerRole ?? ((id: string) => (id === 'approver' ? ('admin' as const) : undefined));
+  // The gate-minted 'approver' identity is ALWAYS trusted as admin — it only
+  // exists after M-of-N human approval, so it is not client-assertable. Host
+  // resolvers handle everyone else; replacing (not composing) the approver
+  // mapping would make every approved execution fail the SafetyNet re-check.
+  const speakerRole = (id: string) => (id === 'approver' ? ('admin' as const) : opts.speakerRole?.(id));
   const safetyNet = new SafetyNet({ speakers: speakerRole });
   const approvals = new ApprovalGate({
     slack: opts.slack ?? consoleSlack,

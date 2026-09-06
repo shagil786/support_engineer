@@ -14,11 +14,18 @@
  * Lines starting with ':' are commands:
  *   :learning tick   run one LearningLoop tick and print the result
  *   :quit            exit
+ *
+ * HTTP surface (same process, same platform) — starts ONLY when a bearer
+ * token is configured (fail-closed; the surface never opens unauthenticated):
+ *   HTTP_TOKEN / HTTP_TOKENS   bearer tokens (comma-separated); presence starts the server
+ *   HTTP_PORT                  default 8787; HTTP_HOST default 127.0.0.1
+ *   SLACK_SIGNING_SECRET       when set, /slack/events accepts verified Events API deliveries
  */
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { createPlatform, type Platform, type PlatformOptions } from '../src/bootstrap.js';
+import { createHttpServer, type HttpServerHandle } from '../src/http/server.js';
 import { configFromEnv } from '../src/config.js';
 import type { TickResult } from '../src/learning/learning-loop.js';
 
@@ -67,6 +74,24 @@ async function main(): Promise<void> {
     deliverSpeech: (text) => console.log(`[agent] ${text}`),
   });
 
+  // HTTP surface: fail-closed — only starts when at least one token exists.
+  const httpTokens = (env['HTTP_TOKENS'] ?? env['HTTP_TOKEN'] ?? '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t !== '');
+  let http: HttpServerHandle | undefined;
+  if (httpTokens.length > 0) {
+    http = await createHttpServer(rt.platform, {
+      authTokens: httpTokens,
+      host: env['HTTP_HOST'] ?? '127.0.0.1',
+      port: Number(env['HTTP_PORT'] ?? 8787),
+      ...(env['SLACK_SIGNING_SECRET'] ? { slackSigningSecret: env['SLACK_SIGNING_SECRET'] } : {}),
+    });
+    console.log(`http up at ${http.url} (POST /utterance; slack events ${env['SLACK_SIGNING_SECRET'] ? 'on' : 'off'})`);
+  } else {
+    console.log('http off (set HTTP_TOKEN to enable; the surface never opens unauthenticated)');
+  }
+
   console.log(`platform up (learning: ${learningEnv ? `on, every ${intervalMs}ms` : 'off'}). Speaker: ${speaker}`);
   console.log('Type an utterance; :learning tick | :quit for commands.');
   const rl = createInterface({ input: process.stdin, terminal: false });
@@ -85,6 +110,7 @@ async function main(): Promise<void> {
       console.log('[legacy] handled by the etiquette cascade');
     }
   }
+  await http?.close();
   rt.stopLearning();
   console.log('bye');
 }

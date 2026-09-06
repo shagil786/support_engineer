@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **380/380 tests green** across 50 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **395/395 tests green** across 51 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -121,7 +121,8 @@ Wiring (src/pipeline/): OrchestratedPipeline owns the legacy agent and routes
 per §15. **Composition root (src/bootstrap.ts): `createPlatform` builds the
 whole platform — integrations, policy, SafetyNet (unknown speaker = guest,
 `approver` = admin), durable learning — and `scripts/serve.ts` runs it as a
-console host with a `:learning tick` command.** Event spine (src/event-log/):
+console host with a `:learning tick` command and an optional HTTP surface
+(`HTTP_TOKEN`-gated, fail-closed — see §3.1).** Event spine (src/event-log/):
 append-only JSONL under var/events/. Surfaces (src/surface/): async
 (jira/slack/cron parsers) + proactive (anomaly).
 ```
@@ -131,7 +132,8 @@ append-only JSONL under var/events/. Surfaces (src/surface/): async
 | Mode | Entry point | Status |
 |------|-------------|--------|
 | **Live meeting** | `OrchestratedPipeline.processUtterance` → classifier → route (§15); bridge/STT unchanged | Implemented |
-| **Async ticket** | `parseJiraWebhook` / `parseSlackMention` / `buildCronEnvelope` → `processEnvelope` | Parsers implemented; HTTP listeners are host responsibility |
+| **Async ticket** | `parseJiraWebhook` / `parseSlackMention` / `buildCronEnvelope` → `processEnvelope`; `POST /slack/events` accepts verified Slack Events deliveries (v0 HMAC + `event_id` dedupe) | Parsers implemented; `POST /slack/events` live in `src/http/server.ts`; other listeners are host responsibility |
+| **HTTP API** | `createHttpServer` (`src/http/server.ts`): `POST /utterance` → `processUtterance`, `POST /approvals/:id/{sign,execute}`, `GET /healthz` | Implemented — bearer-token auth (fail-closed: no tokens configured → 503, never an open surface), body-size cap, roles always resolve server-side from the speakerId (never client-asserted) |
 | **Proactive** | `anomalyToEnvelope` (`isIncidentWorthy`: P0/P1 = incident, else anomaly) → `processEnvelope` | Implemented |
 
 ### 3.2 Event spine
@@ -420,6 +422,7 @@ src/
 ├── surface/          # async/{jira-webhook, slack-mention, cron},
 │                     # proactive/anomaly-detector
 ├── pipeline/         # agent-pipeline.ts (OrchestratedPipeline)
+├── http/             # server.ts — HTTP surface (utterances, approvals, Slack events)
 ├── bootstrap.ts      # createPlatform — the production composition root
 ├── support-voice-agent/   # UNCHANGED legacy agent + bridge + integrations
 ├── fixtures/         # pre-existing test fixtures (legacy)
@@ -427,10 +430,10 @@ src/
 ├── config.ts         # + learningEnabledFromEnv (LEARNING_ENABLED, default off)
 └── env.ts
 
-scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console host)
+scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console + optional HTTP host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 50 files, 380 tests (original 150 = regression floor)
+tests/                # 51 files, 395 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -468,7 +471,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **380/380 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **395/395 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅
