@@ -17,7 +17,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { MemoryRecord, SearchHit, Embedder } from './vector.js';
+import type { MemoryRecord, SearchHit, EmbedderLike } from './vector.js';
 import { cosine, hashEmbedder } from './vector.js';
 
 interface PersistedEntry {
@@ -41,19 +41,38 @@ function isPersistedEntry(x: unknown): x is PersistedEntry {
 export interface FileBackedVectorMemoryOptions {
   /** Snapshot file path. Parent directories are created on first write. */
   path: string;
-  /** Must be stable across restarts; defaults to the shared hashEmbedder. */
-  embedder?: Embedder;
+  /** Must be stable across restarts; defaults to the shared hashEmbedder.
+   *  Changing it requires a one-time `reindex()` (re-embeds under the new
+   *  backend and persists). */
+  embedder?: EmbedderLike;
 }
 
 export class FileBackedVectorMemory {
   private readonly path: string;
-  private readonly embed: Embedder;
+  private readonly embed: EmbedderLike;
   private entries: Array<{ record: MemoryRecord; vector: number[] }>;
 
   constructor(opts: FileBackedVectorMemoryOptions) {
     this.path = opts.path;
     this.embed = opts.embedder ?? hashEmbedder;
     this.entries = this.load();
+  }
+
+  /** Dimensionality of the persisted vectors (undefined when empty).
+   *  A mismatch against the new embedder's output is the reindex signal. */
+  dim(): number | undefined {
+    const v = this.entries[0]?.vector;
+    return v?.length;
+  }
+
+  /** Re-embed every record under the current embedder and persist.
+   *  The one-time migration when swapping embedding backends. */
+  async reindex(): Promise<number> {
+    for (const e of this.entries) {
+      e.vector = await this.embed(e.record.text);
+    }
+    this.persist();
+    return this.entries.length;
   }
 
   private load(): Array<{ record: MemoryRecord; vector: number[] }> {
@@ -97,7 +116,7 @@ export class FileBackedVectorMemory {
 
   async add(record: MemoryRecord): Promise<void> {
     const existing = this.entries.findIndex((e) => e.record.id === record.id);
-    const entry = { record, vector: this.embed(record.text) };
+    const entry = { record, vector: await this.embed(record.text) };
     if (existing >= 0) this.entries[existing] = entry;
     else this.entries.push(entry);
     this.persist();
@@ -105,7 +124,7 @@ export class FileBackedVectorMemory {
 
   async search(query: string, topK = 3, minScore = 0.05): Promise<SearchHit[]> {
     if (this.entries.length === 0) return [];
-    const q = this.embed(query);
+    const q = await this.embed(query);
     return this.entries
       .map((e) => ({ ...e.record, score: cosine(q, e.vector) }))
       .filter((hit) => hit.score >= minScore)

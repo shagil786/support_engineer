@@ -11,6 +11,10 @@
 
 export type Embedder = (text: string) => number[];
 
+/** Widened embedder port: sync (hash) or async (cloud API) backends.
+ *  Sync embedders remain valid wherever this is accepted. */
+export type EmbedderLike = (text: string) => number[] | Promise<number[]>;
+
 /** Deterministic 256-dim hashed features: word tokens, bigrams, and
  *  character trigrams (so "payments"≈"payment", "timeout"≈"timeouts").
  *  Deliberately keyless and dependency-free — swap for a real embedding
@@ -76,22 +80,22 @@ export interface VectorMemory {
 
 export class InMemoryVectorMemory implements VectorMemory {
   private readonly entries: Array<{ record: MemoryRecord; vector: number[] }> = [];
-  private readonly embed: Embedder;
+  private readonly embed: EmbedderLike;
 
-  constructor(opts: { embedder?: Embedder } = {}) {
+  constructor(opts: { embedder?: EmbedderLike } = {}) {
     this.embed = opts.embedder ?? hashEmbedder;
   }
 
   async add(record: MemoryRecord): Promise<void> {
     const existing = this.entries.findIndex((e) => e.record.id === record.id);
-    const entry = { record, vector: this.embed(record.text) };
+    const entry = { record, vector: await this.embed(record.text) };
     if (existing >= 0) this.entries[existing] = entry;
     else this.entries.push(entry);
   }
 
   async search(query: string, topK = 3, minScore = 0.05): Promise<SearchHit[]> {
     if (this.entries.length === 0) return [];
-    const q = this.embed(query);
+    const q = await this.embed(query);
     return this.entries
       .map((e) => ({ ...e.record, score: cosine(q, e.vector) }))
       .filter((hit) => hit.score >= minScore)

@@ -55,6 +55,28 @@ export interface IntegrationsFromEnv {
   /** APPROVAL_TIMEOUT_MS (>= 1000): how long a staged approval stays
    *  pending before it times out. Absent = the gate's built-in default. */
   approvalTimeoutMs?: number;
+  /** Embedding backend for the knowledge base (absent = built-in hash
+   *  embedder). All three vars are required together. */
+  embeddings?: { baseUrl: string; apiKey: string; model: string; dim?: number };
+}
+
+/** Embeddings config from the environment. EMBEDDINGS_BASE_URL,
+ *  EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together (partial
+ *  config is an error, never a silent half-wired embedder);
+ *  EMBEDDINGS_DIM (>= 8) folds longer vectors to a fixed dimension. */
+export function embeddingsFromEnv(env: Env): IntegrationsFromEnv['embeddings'] {
+  const baseUrl = envVar(env, 'EMBEDDINGS_BASE_URL');
+  const apiKey = envVar(env, 'EMBEDDINGS_API_KEY');
+  const model = envVar(env, 'EMBEDDINGS_MODEL');
+  const dimRaw = Number(envVar(env, 'EMBEDDINGS_DIM') ?? 0);
+  const dim = Number.isFinite(dimRaw) && dimRaw >= 8 ? dimRaw : undefined;
+  if (!baseUrl || !apiKey || !model) {
+    if (baseUrl || apiKey || model) {
+      throw new Error('embeddings config incomplete: EMBEDDINGS_BASE_URL, EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together');
+    }
+    return undefined;
+  }
+  return { baseUrl, apiKey, model, ...(dim !== undefined ? { dim } : {}) };
 }
 
 /** Learning layer opt-in: LEARNING_ENABLED=true|1 enables it. Defaults to
@@ -168,6 +190,9 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
 
   const approvalRawMs = Number(envVar(env, 'APPROVAL_TIMEOUT_MS') ?? 0);
   if (Number.isFinite(approvalRawMs) && approvalRawMs >= 1000) out.approvalTimeoutMs = approvalRawMs;
+
+  const embeddings = embeddingsFromEnv(env);
+  if (embeddings) out.embeddings = embeddings;
 
   return out;
 }

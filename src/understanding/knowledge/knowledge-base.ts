@@ -18,7 +18,7 @@ import { dirname } from 'node:path';
 import type { Chunk, IngestDoc } from './chunker.js';
 import { chunkDocument } from './chunker.js';
 import { Bm25Index, tokenizeBm25 } from './bm25.js';
-import type { VectorMemory, MemoryRecord } from '../memory/vector.js';
+import type { VectorMemory, MemoryRecord, EmbedderLike } from '../memory/vector.js';
 import { InMemoryVectorMemory } from '../memory/vector.js';
 
 export interface KnowledgeHit extends Chunk {
@@ -46,6 +46,10 @@ export interface FileBackedKnowledgeBaseOptions {
   /** Optional backing store for chunk embeddings; defaults to in-memory
    *  (vectors re-embed on boot — the BM25 index is rebuilt the same way). */
   vectorMemory?: VectorMemory;
+  /** Embedder for the KB's own default vector store (ignored when an
+   *  explicit `vectorMemory` carries its own). Swapping backends requires a
+   *  one-time `reindex()`. */
+  embedder?: EmbedderLike;
   /** Chunking tunables passed through to chunkDocument. */
   maxChars?: number;
   overlapChars?: number;
@@ -77,7 +81,7 @@ export class FileBackedKnowledgeBase {
 
   constructor(opts: FileBackedKnowledgeBaseOptions) {
     this.path = opts.path;
-    this.vectors = opts.vectorMemory ?? new InMemoryVectorMemory();
+    this.vectors = opts.vectorMemory ?? new InMemoryVectorMemory(opts.embedder ? { embedder: opts.embedder } : {});
     this.maxChars = opts.maxChars;
     this.overlapChars = opts.overlapChars;
     this.load();
@@ -183,6 +187,20 @@ export class FileBackedKnowledgeBase {
 
   docIds(): string[] {
     return [...this.docs.keys()].sort();
+  }
+
+  /** Re-embed every chunk under the vector store's current embedder — the
+   *  one-time migration after swapping embedding backends. Documents and the
+   *  BM25 index are untouched; snapshots persist through the store's add(). */
+  async reindex(): Promise<number> {
+    let n = 0;
+    for (const [docId, chunks] of this.docs) {
+      for (const c of chunks) {
+        await this.vectors.add({ id: chunkKey(docId, c.index), text: `${c.heading}\n${c.text}`, metadata: c.metadata });
+        n += 1;
+      }
+    }
+    return n;
   }
 
   /**

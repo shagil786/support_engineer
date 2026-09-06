@@ -5,3 +5,13 @@ export { EpisodicMemory, type EpisodicScope, type EpisodicMemoryOptions, type Re
 export * from './memory/kv.js';
 export * from './memory/vector.js';
 export { resolveEmbedder, EMBEDDERS } from './memory/embedders/index.js';
+export {
+  OpenAiCompatibleEmbedder,
+  EmbeddingError,
+  extractEmbedding,
+  mapToDim,
+  normalize,
+  hashEmbedderCompat,
+  type AsyncEmbedder,
+  type OpenAiCompatibleEmbedderOptions,
+} from './memory/embedders/openai.js';

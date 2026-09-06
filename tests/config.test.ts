@@ -72,6 +72,32 @@ describe('configFromEnv', () => {
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: 'nope' }).approvalTimeoutMs).toBeUndefined();
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '30000' }).approvalTimeoutMs).toBe(30_000);
   });
+
+  it('parses EMBEDDINGS_* all-or-nothing, with optional dim (>= 8)', () => {
+    expect(configFromEnv({}).embeddings).toBeUndefined();
+    // Partial config throws — never a silently half-wired embedder.
+    expect(() => configFromEnv({ EMBEDDINGS_BASE_URL: 'https://e.test' })).toThrow(/required together/);
+    expect(
+      configFromEnv({ EMBEDDINGS_BASE_URL: 'https://e.test', EMBEDDINGS_API_KEY: 'k', EMBEDDINGS_MODEL: 'm' }).embeddings,
+    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
+    expect(
+      configFromEnv({
+        EMBEDDINGS_BASE_URL: 'https://e.test',
+        EMBEDDINGS_API_KEY: 'k',
+        EMBEDDINGS_MODEL: 'm',
+        EMBEDDINGS_DIM: '128',
+      }).embeddings,
+    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm', dim: 128 });
+    // Below the dim floor → absent dim.
+    expect(
+      configFromEnv({
+        EMBEDDINGS_BASE_URL: 'https://e.test',
+        EMBEDDINGS_API_KEY: 'k',
+        EMBEDDINGS_MODEL: 'm',
+        EMBEDDINGS_DIM: '4',
+      }).embeddings,
+    ).toEqual({ baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
+  });
 });
 
 describe('requireJira', () => {
