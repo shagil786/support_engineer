@@ -74,4 +74,37 @@ describe('SlackBotClient', () => {
     expect(calls[0]?.url).toBe('https://slack.com/api/chat.postMessage');
     expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ channel: 'C123', thread_ts: '1700000000.000100', text: 'Signatures: 1/2 — pending.' });
   });
+
+  it('posts rich cards with attachments and resolves the ref (postRichMessage)', async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const client = new SlackBotClient({
+      botToken: 'xoxb-test-token',
+      request: async (url, init) => {
+        calls.push({ url: String(url), body: String(init?.body) });
+        return jsonResponse({ ok: true, channel: 'C123', ts: '1700000000.000100' });
+      },
+    });
+    const ref = await client.postRichMessage('#security', { text: 'fallback', attachments: [{ color: 'warning', blocks: [] }] });
+    expect(ref).toEqual({ channel: 'C123', ts: '1700000000.000100' });
+    expect(calls[0]?.url).toBe('https://slack.com/api/chat.postMessage');
+    const body = JSON.parse(calls[0]?.body ?? '{}') as { attachments: unknown[]; text: string };
+    expect(body.text).toBe('fallback');
+    expect(body.attachments).toHaveLength(1);
+  });
+
+  it('re-renders cards in place via chat.update (updateRichMessage)', async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const client = new SlackBotClient({
+      botToken: 'xoxb-test-token',
+      request: async (url, init) => {
+        calls.push({ url: String(url), body: String(init?.body) });
+        return jsonResponse({ ok: true });
+      },
+    });
+    await client.updateRichMessage('C123', '1700000000.000100', { text: 'granted', attachments: [{ color: 'good', blocks: [] }] });
+    expect(calls[0]?.url).toBe('https://slack.com/api/chat.update');
+    const body = JSON.parse(calls[0]?.body ?? '{}') as { channel: string; ts: string; attachments: unknown[] };
+    expect(body).toMatchObject({ channel: 'C123', ts: '1700000000.000100' });
+    expect(body.attachments).toHaveLength(1);
+  });
 });

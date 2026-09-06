@@ -10,6 +10,8 @@
  * Satisfies SlackLike (and the legacy SlackNotifier) so it drops into
  * ApprovalGate / createPlatform unchanged.
  */
+import type { RichMessage } from '../../governance/approval-gate.js';
+
 export interface SlackBotConfig {
   /** Slack bot user token starting with xoxb-. */
   botToken: string;
@@ -65,6 +67,30 @@ export class SlackBotClient {
     const r = await this.call('chat.postMessage', { channel, text });
     if (!r.channel || !r.ts) throw new Error(`Slack API chat.postMessage did not return a message ref`);
     return { channel: r.channel, ts: r.ts };
+  }
+
+  /** Post a Block Kit card (chat.postMessage with attachments/blocks) and
+   *  resolve the ref — what ApprovalGate cards need for later re-render. */
+  async postRichMessage(channel: string, message: RichMessage): Promise<{ channel: string; ts: string }> {
+    const r = await this.call('chat.postMessage', {
+      channel,
+      text: message.text,
+      ...(message.attachments ? { attachments: message.attachments } : {}),
+      ...(message.blocks ? { blocks: message.blocks } : {}),
+    });
+    if (!r.channel || !r.ts) throw new Error('Slack API chat.postMessage did not return a message ref');
+    return { channel: r.channel, ts: r.ts };
+  }
+
+  /** Re-render a posted card in place (chat.update with attachments/blocks). */
+  async updateRichMessage(channel: string, ts: string, message: RichMessage): Promise<void> {
+    await this.call('chat.update', {
+      channel,
+      ts,
+      text: message.text,
+      ...(message.attachments ? { attachments: message.attachments } : {}),
+      ...(message.blocks ? { blocks: message.blocks } : {}),
+    });
   }
 
   /** Edit a posted message in place (chat.update) — the ApprovalGate uses

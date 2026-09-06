@@ -21,8 +21,9 @@
  *   HTTP_PORT                  default 8787; HTTP_HOST default 127.0.0.1
  *   SLACK_SIGNING_SECRET       when set, /slack/events accepts verified Events API deliveries
  *                              INCLUDING reaction_added events, which drive emoji sign-off
- *                              on approval messages (set SLACK_BOT_TOKEN so the gate posts
- *                              messages that reactions can be correlated to)
+ *                              on approval messages, and /slack/interactive accepts
+ *                              button clicks from the Block Kit approval cards (set
+ *                              SLACK_BOT_TOKEN so the gate posts cards + refs)
  *   APPROVAL_TIMEOUT_MS        pending window for staged approvals (default: gate's 5 min;
  *                              timed-out and denied approvals post a follow-up to the channel)
  */

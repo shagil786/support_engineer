@@ -50,6 +50,13 @@ interface Body {
   error?: 'too-large';
 }
 
+/** The inner JSON of a Slack interactive-component POST's `payload` field. */
+interface InteractivePayload {
+  type?: string;
+  user?: { id?: string };
+  actions?: Array<{ action_id?: string }>;
+}
+
 const MAX_DEFAULT = 1024 * 1024;
 /** Slack retry dedupe window: TTL-first, then a hard cap (a burst of
  *  unique events must not grow the map unbounded). */
@@ -85,6 +92,7 @@ export async function createHttpServer(
     }
 
     if (method === 'POST' && path === '/slack/events') return handleSlack(req, res);
+    if (method === 'POST' && path === '/slack/interactive') return handleSlackInteractive(req, res);
 
     // Everything below requires a bearer token — fail closed when unconfigured.
     const token = bearer(req);
@@ -155,6 +163,46 @@ export async function createHttpServer(
       // with the reason — clients can distinguish by message.
       return reply(res, 404, { error: e instanceof Error ? e.message : String(e) });
     }
+  }
+
+  /** Slack interactive components (button clicks) arrive here as
+   *  application/x-www-form-urlencoded with a `payload` field containing
+   *  JSON. Signature is computed over the RAW body (the urlencoding must not
+   *  be decoded before verification). */
+  async function handleSlackInteractive(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!signingSecret) {
+      return reply(res, 503, { error: 'slack signing secret not configured; refusing to serve unverified interactions' });
+    }
+    const body = await readBody(req, maxBody);
+    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
+    const sig = header(req, 'x-slack-signature');
+    const ts = header(req, 'x-slack-timestamp');
+    if (!sig || !ts || !verifySlackSignature(signingSecret, sig, ts, body.raw, now)) {
+      return reply(res, 401, { error: 'invalid slack signature' });
+    }
+    let payload: InteractivePayload | null = null;
+    try {
+      const params = new URLSearchParams(body.raw);
+      payload = JSON.parse(params.get('payload') ?? 'null') as InteractivePayload | null;
+    } catch {
+      return reply(res, 400, { error: 'malformed interactive payload' });
+    }
+    if (!payload || payload.type !== 'block_actions') {
+      return reply(res, 200, { ok: true, ignored: 'interaction type not handled' });
+    }
+    const userId = payload.user?.id ?? 'unknown';
+    const results = [];
+    for (const action of payload.actions ?? []) {
+      if (!action.action_id) continue;
+      results.push(
+        await platform.approvals.handleAction({
+          actionId: action.action_id,
+          userId,
+          userRole: userId !== 'unknown' ? platform.speakerRole(userId) : undefined,
+        }),
+      );
+    }
+    return reply(res, 200, { ok: true, results });
   }
 
   async function handleSlack(req: IncomingMessage, res: ServerResponse): Promise<void> {

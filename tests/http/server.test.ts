@@ -244,6 +244,12 @@ describe('createHttpServer: POST /slack/events', () => {
     expect(res.status).toBe(503);
   });
 
+  it('fails closed with 503 on interactive when no signing secret is configured', async () => {
+    const h = await startAt();
+    const res = await post(h.url, '/slack/interactive', { method: 'POST', body: 'payload=%7B%7D' });
+    expect(res.status).toBe(503);
+  });
+
   it('rejects invalid signatures with 401', async () => {
     const h = await startAt({ slackSigningSecret: secret });
     const body = slackBody({ type: 'event_callback', event: { type: 'app_mention', text: 'hi', user: 'U1', event_ts: '1' } });
@@ -315,7 +321,57 @@ describe('createHttpServer: POST /slack/events', () => {
     expect(((await exec.json()) as { ok: boolean }).ok).toBe(true);
   });
 
-  it('ignores bot-authored events and non-message event types without processing', async () => {
+  it('grants a staged approval by BLOCK BUTTON click, end to end', async () => {
+    const p = createPlatform({
+      dataDir: dir,
+      runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true }],
+      speakerRole: (id) => (id === 'U-admin' ? 'admin' : undefined),
+    });
+    const h = await createHttpServer(p, { authTokens: ['tok-1'], slackSigningSecret: secret, now: () => slackNow });
+    handles.push(h);
+    const staged = await p.pipeline.processUtterance('U-admin', 'agent, can you restart the checkout pod?', 500);
+    expect(staged.approvalId).toBeDefined();
+
+    // Slack delivers a button click as a form-encoded interactive payload.
+    const payload = JSON.stringify({
+      type: 'block_actions',
+      user: { id: 'U-admin' },
+      actions: [{ action_id: 'approval:approve:' + staged.approvalId }],
+    });
+    const form = 'payload=' + encodeURIComponent(payload);
+    const sig = 'v0=' + createHmac('sha256', secret).update('v0:' + ts + ':' + form).digest('hex');
+    const click = await post(h.url, '/slack/interactive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-slack-signature': sig, 'x-slack-timestamp': ts },
+      body: form,
+    });
+    expect(click.status).toBe(200);
+    const body = (await click.json()) as { results: Array<{ matched: boolean; accepted: boolean; status: string; signatures: number }> };
+    // M-of-N (approverCount 2): the admin click counts signature 1 of 2.
+    expect(body.results?.[0]).toMatchObject({ matched: true, accepted: true, status: 'pending', signatures: 1 });
+
+    // Second signature (API path) completes M-of-N; then execute over HTTP.
+    await p.pipeline.signApproval(staged.approvalId!, 'admin', 'human-2');
+    const exec = await post(h.url, '/approvals/' + staged.approvalId + '/execute', {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ correlationId: staged.correlationId }),
+    });
+    expect(exec.status).toBe(200);
+    expect(((await exec.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('rejects unsigned interactive payloads with 401', async () => {
+    const h = await startAt({ slackSigningSecret: secret });
+    const res = await post(h.url, '/slack/interactive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'payload=%7B%22type%22%3A%22block_actions%22%7D',
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('fails closed with 503 when no signing secret is configured', async () => {
     const counter = { calls: 0 };
     const h = await createHttpServer(wrapped(counter), { authTokens: ['tok-1'], slackSigningSecret: secret, now: () => slackNow });
     handles.push(h);

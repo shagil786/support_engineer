@@ -16,10 +16,10 @@ import type { Decision, ProposedAction } from './decision.js';
 import type { SpeakerRole } from './safety-net/rbac.js';
 
 /** Minimal Slack port satisfied by SlackNotifier and test fakes alike.
- *  `postMessageWithRef` is OPTIONAL: bot-token clients implement it so emoji
- *  reactions can be correlated to the exact approval message; incoming-
- *  webhook clients cannot resolve a message ref and omit it (reactions then
- *  correlate via the single-pending fallback). */
+ *  Everything past `postMessage` is OPTIONAL — capability probing, never
+ *  requirement: `postMessageWithRef` (bot tokens) enables reaction
+ *  correlation, `postRichMessage`/`updateRichMessage` enable Block Kit
+ *  cards, `updateMessage`/`postReply` enable in-place lifecycle edits. */
 export interface SlackLike {
   postMessage(channel: string, text: string): Promise<void>;
   postMessageWithRef?(channel: string, text: string): Promise<{ channel: string; ts: string }>;
@@ -29,6 +29,20 @@ export interface SlackLike {
   /** Reply in-thread under the original message (chat.postMessage with
    *  thread_ts). Middle rung of the lifecycle-update ladder. */
   postReply?(channel: string, ts: string, text: string): Promise<void>;
+  /** Post a rich Block Kit message (cards). Returns the ref so interactive
+   *  elements can be updated in place later. */
+  postRichMessage?(channel: string, message: RichMessage): Promise<{ channel: string; ts: string }>;
+  /** Re-render a posted rich message (chat.update with blocks/attachments). */
+  updateRichMessage?(channel: string, ts: string, message: RichMessage): Promise<void>;
+}
+
+/** Slack message with optional Block Kit payload. `text` is the fallback
+ *  (notifications, plain clients); `attachments`/`blocks` are Slack's JSON
+ *  shapes, left structural so this port stays dependency-free. */
+export interface RichMessage {
+  text: string;
+  attachments?: unknown[];
+  blocks?: unknown[];
 }
 
 export interface ApprovalRequestInput {
@@ -81,6 +95,18 @@ export interface ReactionResult {
   signatures?: number;
   reason?: string;
 }
+
+/** A Slack interactive-element click (block_actions). The approval id rides
+ *  INSIDE the action_id (`approval:approve:<id>`), so correlation never
+ *  depends on which message the button lived on. */
+export interface ActionEvent {
+  actionId: string;
+  userId: string;
+  /** Resolved server-side by the host — a click proves identity, not role. */
+  userRole?: SpeakerRole;
+}
+
+export type ActionResult = ReactionResult;
 
 interface PendingApproval {
   id: string;
@@ -156,17 +182,31 @@ export class ApprovalGate {
     this.pending.set(id, p);
     const text = this.renderMessage(p);
     p.originalText = text;
-    if (this.slack.postMessageWithRef) {
+    let delivered = false;
+    if (this.slack.postRichMessage) {
+      // Richest path: Block Kit card with state color + buttons.
+      try {
+        const ref = await this.slack.postRichMessage(this.channel, this.renderRich(p));
+        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
+        p.ref = { channel: ref.channel, ts: ref.ts };
+        delivered = true;
+      } catch {
+        /* fall through to the text ladder */
+      }
+    }
+    if (!delivered && this.slack.postMessageWithRef) {
       // Bot-token path: record the message ref so reactions correlate to
       // THIS approval even with several pending at once.
       try {
         const ref = await this.slack.postMessageWithRef(this.channel, text);
         this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
         p.ref = { channel: ref.channel, ts: ref.ts };
+        delivered = true;
       } catch {
         await this.slack.postMessage(this.channel, text);
       }
-    } else {
+    }
+    if (!delivered) {
       await this.slack.postMessage(this.channel, text);
     }
     void this.eventLog?.append({
@@ -199,16 +239,10 @@ export class ApprovalGate {
           signerRole: role,
         }).catch(() => {});
       }
-      // The original message tracks reality: grant, or signature progress.
-      // Both are THREADED-ONLY: without a thread to attach to (webhook-era
-      // posters) they stay silent rather than spam standalone posts.
-      if (p.signatures.size !== before) {
-        if (p.status === 'granted') {
-          this.announce(p, `*Approval GRANTED* (${p.policyId}) — ${p.signatures.size}/${this.approverCount} signatures. Executing.`, 'threaded');
-        } else {
-          this.announce(p, `Signatures: ${p.signatures.size}/${this.approverCount} — pending.`, 'threaded');
-        }
-      }
+      // The original message tracks reality: full card re-render (rich
+      // clients), in-place text edit, or threaded-only announce — whichever
+      // the client supports. Unchanged signature count → no re-render.
+      if (p.signatures.size !== before) this.rerender(p);
     }
     return this.snapshot(p);
   }
@@ -217,7 +251,7 @@ export class ApprovalGate {
     const p = this.require(approvalId);
     if (p.status === 'pending') {
       p.status = 'denied';
-      this.announce(p, `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`);
+      this.rerender(p);
     }
     return this.snapshot(p);
   }
@@ -261,6 +295,35 @@ export class ApprovalGate {
     return { ...matched, accepted: true, status: snap.status, signatures: snap.signatures };
   }
 
+  /** Handle a Slack interactive-element click (block_actions). The approval
+   *  id is embedded in the action_id, so clicks correlate unambiguously even
+   *  with several pending approvals. Shares the role gate and dedupe with
+   *  reactions. */
+  async handleAction(event: ActionEvent): Promise<ActionResult> {
+    const m = /^approval:(approve|deny):(.+)$/.exec(event.actionId);
+    const verb = m?.[1];
+    const approvalId = m?.[2];
+    if (!verb || !approvalId) return { matched: false, reason: 'not an approval action' };
+    const p = this.tryGet(approvalId);
+    if (!p) return { matched: false, reason: `unknown approvalId: ${approvalId}` };
+    const base: ActionResult = { matched: true, approvalId };
+    if (p.status !== 'pending') {
+      return { ...base, accepted: false, status: p.status, signatures: p.signatures.size, reason: `approval already ${p.status}` };
+    }
+    if (verb === 'deny') {
+      this.deny(approvalId);
+      return { ...base, accepted: true, status: 'denied', signatures: p.signatures.size };
+    }
+    // Approve: same privilege rule as reactions — a click proves identity,
+    // the server-resolved role decides what it is worth.
+    const mapped = 'admin' as SpeakerRole;
+    if (!event.userRole || ROLE_RANK[event.userRole] > ROLE_RANK[mapped]) {
+      return { ...base, accepted: false, reason: `role ${event.userRole ?? 'unknown'} cannot contribute a ${mapped} signature` };
+    }
+    const snap = this.sign(approvalId, mapped, event.userId);
+    return { ...base, accepted: true, status: snap.status, signatures: snap.signatures };
+  }
+
   /** Expire any pending approvals past their deadline; returns expired ids. */
   checkTimeouts(): string[] {
     const now = this.now();
@@ -269,7 +332,7 @@ export class ApprovalGate {
       if (p.status === 'pending' && now > p.createdAt + p.timeoutMs) {
         p.status = 'timeout';
         expired.push(p.id);
-        this.announce(p, `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`);
+        this.rerender(p);
         void this.eventLog?.append({
           correlationId: p.id,
           ts: now,
@@ -292,6 +355,65 @@ export class ApprovalGate {
     const p = this.pending.get(approvalId);
     if (!p) throw new Error(`ApprovalGate: unknown approvalId: ${approvalId}`);
     return p;
+  }
+
+  private tryGet(approvalId: string): PendingApproval | undefined {
+    return this.pending.get(approvalId);
+  }
+
+  /** The Block Kit card. Color encodes state: ⚠️ warning pending, 🟢 good
+   *  granted, 🔴 danger denied, 🟠 warning timeout; buttons vanish once the
+   *  approval resolves. `text` mirrors the state for notifications and
+   *  plain-text fallback. */
+  private renderRich(p: PendingApproval): RichMessage {
+    const state =
+      p.status === 'granted'
+        ? { color: 'good', head: '*Approval GRANTED*', sub: `Signatures: ${p.signatures.size}/${this.approverCount}. Executing.` }
+        : p.status === 'denied'
+          ? { color: 'danger', head: '*Approval DENIED*', sub: `Action \`${p.action.tool}\` will not execute.` }
+          : p.status === 'timeout'
+            ? { color: 'warning', head: '*Approval TIMED OUT*', sub: `Action \`${p.action.tool}\` was not approved in time.` }
+            : { color: 'warning', head: '*Approval needed*', sub: `Signatures: ${p.signatures.size}/${this.approverCount}.` };
+    const detail = [
+      `*${state.head}* (${p.policyId}) — ${p.decision.reason}`,
+      `Action: \`${p.action.tool}\`  ·  Args: \`${JSON.stringify(p.action.args)}\`  ·  ${state.sub}`,
+    ].join('\n');
+    const blocks: unknown[] = [
+      { type: 'section', text: { type: 'mrkdwn', text: detail } },
+    ];
+    if (p.status === 'pending') {
+      blocks.push({
+        type: 'actions',
+        elements: [
+          { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Approve', emoji: true }, action_id: `approval:approve:${p.id}` },
+          { type: 'button', style: 'danger', text: { type: 'plain_text', text: 'Deny', emoji: true }, action_id: `approval:deny:${p.id}` },
+        ],
+      });
+    }
+    const messageText = `${state.head} (${p.policyId}) — ${p.action.tool} — ${state.sub}`;
+    return {
+      text: messageText,
+      attachments: [{ color: state.color, blocks }],
+    };
+  }
+
+  /** Lifecycle re-render on the rich ladder: full card update in place when
+   *  the client can, else the text ladder (announce), else standalone. */
+  private rerender(p: PendingApproval): void {
+    const ref = p.ref;
+    const textLine =
+      p.status === 'granted'
+        ? `*Approval GRANTED* (${p.policyId}) — ${p.signatures.size}/${this.approverCount} signatures. Executing.`
+        : p.status === 'denied'
+          ? `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`
+          : p.status === 'timeout'
+            ? `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`
+            : `Signatures: ${p.signatures.size}/${this.approverCount} — pending.`;
+    if (ref && this.slack.updateRichMessage) {
+      void this.slack.updateRichMessage(ref.channel, ref.ts, this.renderRich(p)).catch(() => this.announce(p, textLine));
+      return;
+    }
+    this.announce(p, textLine, p.status === 'granted' || p.status === 'pending' ? 'threaded' : 'ladder');
   }
 
   /** Fire-and-forget follow-up (deny/timeout): sync callers must never block
