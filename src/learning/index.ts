@@ -8,3 +8,4 @@ export {
   type KnowledgeExtractorOptions,
 } from './knowledge-extractor.js';
 export { EvalRunner, type EvalResult, type EvalRunnerOptions } from './eval-runner.js';
+export { runSafetyNetRegression } from './safety-net-regression.js';

@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { PolicyStore, PolicyBundle } from '../governance/policy-store.js';
 import { PolicyEngine } from '../governance/policy-engine.js';
 import { EvalRunner } from './eval-runner.js';
+import { runSafetyNetRegression } from './safety-net-regression.js';
 import type { SafetyNet } from '../governance/safety-net/index.js';
 import type { EventLog } from '../event-log/log.js';
 import type { PolicySuggestion } from './suggestion-queue.js';
@@ -41,17 +42,6 @@ const SuggestionSchema = z
     estimatedImpact: z.object({ outcomeMetric: z.string(), expectedDelta: z.string() }),
   })
   .strict();
-
-const SafetyNetScenarioSchema = z.object({
-  id: z.string().min(1),
-  intent: z.object({ kind: z.string(), subKind: z.string().optional() }).passthrough(),
-  entities: z.record(z.string(), z.unknown()).default({}),
-  action: z.object({ tool: z.string().min(1), args: z.record(z.string(), z.unknown()).default({}) }),
-  speakerId: z.string().min(1),
-  expected_safety_net: z.enum(['rbac', 'injection', 'output', 'cost', 'loop']),
-});
-
-const SafetyNetFileSchema = z.object({ scenarios: z.array(SafetyNetScenarioSchema).min(1) });
 
 export interface PromotionGateOptions {
   store: PolicyStore;
@@ -118,7 +108,7 @@ export class PromotionGate {
     }
 
     // 5. SafetyNet regression on the candidate's action space.
-    this.runSafetyNetRegression();
+    runSafetyNetRegression(readFileSync(this.opts.safetyNetScenariosPath, 'utf8'), this.opts.safetyNet);
 
     // 6. Persist + promote atomically via the store.
     const saved = await this.opts.store.save({
@@ -166,25 +156,4 @@ export class PromotionGate {
     return stringifyYaml({ rules });
   }
 
-  private runSafetyNetRegression(): void {
-    const yaml = readFileSync(this.opts.safetyNetScenariosPath, 'utf8');
-    const file = SafetyNetFileSchema.parse(parseYaml(yaml));
-    for (const s of file.scenarios) {
-      const result = this.opts.safetyNet.runAll({
-        correlationId: `regression-${s.id}`,
-        speakerId: s.speakerId,
-        tool: s.action.tool,
-        args: s.action.args,
-        tokens: { prompt: 0, completion: 0 },
-        candidateOutput: JSON.stringify(s.action.args),
-      });
-      if (!result.vetoed) {
-        throw new Error(`SafetyNet regression: scenario '${s.id}' did not veto`);
-      }
-      const reasons = result.reasons.join(' ');
-      if (!reasons.includes(s.expected_safety_net)) {
-        throw new Error(`SafetyNet regression: scenario '${s.id}' vetoed for the wrong reason (expected ${s.expected_safety_net}): ${reasons}`);
-      }
-    }
-  }
 }
