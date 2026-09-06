@@ -49,6 +49,16 @@ export interface IntegrationsFromEnv {
   logs?: LogProvider;
   slack?: SlackNotifier;
   llm?: LlmConfig;
+  /** Learning layer opt-in. Off by default — the operator must enable it. */
+  learning?: { enabled: boolean };
+}
+
+/** Learning layer opt-in: LEARNING_ENABLED=true|1 enables it. Defaults to
+ *  false — the agent never learns or suggests policy changes unless the
+ *  operator explicitly turns this on. */
+export function learningEnabledFromEnv(env: Env = process.env): { enabled: boolean } {
+  const raw = envVar(env, 'LEARNING_ENABLED')?.toLowerCase();
+  return { enabled: raw === 'true' || raw === '1' };
 }
 
 /** Build a JiraConfig from the environment, or `undefined` when any required
@@ -141,6 +151,11 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
 
   const llm = llmConfigFromEnv(env);
   if (llm) out.llm = llm;
+
+  // Absent = not wired (learning disabled), consistent with the other
+  // integrations: an empty environment still yields an empty wiring set.
+  const learning = learningEnabledFromEnv(env);
+  if (learning.enabled) out.learning = learning;
 
   return out;
 }
