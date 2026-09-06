@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# pre-push: gate policy-bundle regressions BEFORE they reach CI.
+#
+# For every ref being pushed that touched policies/, runs `npm run eval`
+# against the COMMITTED policies/default.yaml (never the dirty worktree), so
+# a regressed bundle fails on the developer's machine instead of in CI — or
+# worse, in review of a PromotionGate promotion built on a broken base.
+#
+# Skips (exit 0): no commits, pushes that don't touch policies/, ref
+# deletions. New branches validate the pushed tip's bundle.
+#
+# Bypass (at your own peril): git push --no-verify.
+
+set -u
+
+zero="0000000000000000000000000000000000000000"
+rc=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+	# Deleted ref: nothing to validate.
+	[ "$local_sha" = "$zero" ] && continue
+
+	# Fast path: this push didn't touch policies/ (new branches have no
+	# baseline, so they always validate).
+	if [ "$remote_sha" != "$zero" ]; then
+		if git diff --quiet "$remote_sha" "$local_sha" -- policies/ 2>/dev/null; then
+			continue
+		fi
+	fi
+
+	# Validate the bundle as committed on the pushed tip; if the push deletes
+	# it, validate the baseline it removes (still the effective bundle).
+	tmp=$(mktemp "${TMPDIR:-/tmp}/pre-push-eval.XXXXXX.yaml")
+	trap 'rm -f "$tmp"' EXIT
+
+	if git cat-file -e "$local_sha:policies/default.yaml" 2>/dev/null; then
+		git show "$local_sha:policies/default.yaml" > "$tmp"
+	elif [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha:policies/default.yaml" 2>/dev/null; then
+		echo "pre-push: policies/default.yaml deleted in this push; validating the baseline it removes"
+		git show "$remote_sha:policies/default.yaml" > "$tmp"
+	else
+		rm -f "$tmp"
+		continue
+	fi
+
+	# The eval CLI needs dependencies; install if missing (fail-closed).
+	if [ ! -d node_modules ]; then
+		echo "pre-push: node_modules missing; running npm ci"
+		npm ci --no-audit --no-fund || {
+			echo >&2 "pre-push: could not install dependencies; refusing to push unverified policy changes"
+			rm -f "$tmp"
+			exit 1
+		}
+	fi
+
+	echo "pre-push: evaluating committed policy bundle for ${local_ref} -> ${remote_ref}"
+	if ! npx tsx scripts/eval.ts --bundle "$tmp"; then
+		echo >&2 ""
+		echo >&2 "✖ pre-push blocked: the committed policy bundle fails eval."
+		echo >&2 "  Inspect:   git show ${local_sha}:policies/default.yaml"
+		echo >&2 "  Fix or revert the bundle, then push again."
+		echo >&2 "  (Bypass: git push --no-verify — only if you truly must.)"
+		rc=1
+	fi
+	rm -f "$tmp"
+done
+
+exit "$rc"
