@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **327/327 tests green** across 43 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **342/342 tests green** across 45 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -28,7 +28,7 @@ names and file moves that don't exist in this repo. The material deviations:
 - **Phase 2 (Understanding)** — `LegacyClassifierAdapter` checks runbook offers *before* direct questions (the draft's order misclassified "can you restart X?"). `EpisodicMemory` has **real** TTL expiry and a real `purgeMeeting` (draft's version was a stub that couldn't pass its own test). `ContextBundle` = envelope + episodes + recent decisions — **no policy summary component** (draft §4.1 item 4 dropped). No `embedders/openai.ts` — the `Embedder` port stays swappable but only the hash embedder ships.
 - **Phase 3 (Governance)** — policy DSL is a strict Zod-validated key set (`intent_kind`, `intent_subKind`, `tools_in`, `severity_in`, `runbook_destructive`, `output_matches_regex`), not dotted-path conditions; unknown keys fail at load. Default-deny on no match. `GovernanceDecision` extends `Decision` with `approverRole/approverCount/timeoutSeconds/onTimeout` so the ApprovalGate has something to consume. `PolicyStore` is SQLite (`policy_versions`, `policy_current`) with content-addressed YAML on disk; promotion metadata lives on the version row (no separate `policy_promotions` table). `ApprovalGate` posts plain-text Slack messages (no Block Kit buttons, no slash fallback in v1) and exposes pull-based `checkTimeouts()`. `LoopDetector` is **stateful per correlationId** (a stateless counter can't see pending calls). `SafetyNet.runAll` takes `args`; RBAC gates `execute_runbook_script`. No `security.yaml`/`meeting.yaml` bundles — one `default.yaml`, parity-tested.
 - **Phase 4 (Execution)** — `ToolRunner` pipeline: governed-check → SafetyNet re-check → registry lookup → Zod validate → idempotency → retry/timeout → one `tool_call` event. **No per-tool rate limiting and no `Retry-After` support in v1.** The error boundary moved: tools **throw** transport errors (so retries can fire) and return `ToolResult` for handled failures; the runner catches/retries/reports and never throws across its own boundary. Sub-agents are `LlmAgent`s with Zod JSON outputs and honest `source: 'llm' | 'fallback'` marking; tool "whitelists" are enforced in each agent's output schema, not by the runner. **No reviewer-feedback retry loop** — a `fail` verdict ends the request `ok=false` (retry-with-feedback is future work). **No cancellation/abort** (§6.3 of the draft dropped); plans execute sequentially.
-- **Phase 5 (Learning + surfaces)** — `OutcomeRecord` is lean: `correlationId`, `toolCalls`, `finalResult?`, `approvals[]`, `ts` (no intent/feedback/token fields in v1). `SuggestionQueue` v1 = one threshold heuristic (destructive approvals → propose relaxing `approver_count`, **risk: high**). `PromotionGate` evaluates the **candidate** bundle (better than the draft's "current + proposed": a regression-causing patch is refused before it lands) and refuses `tighten_safety_net`/`add_procedure` suggestions outright. `ProcedureSpec.trigger` is the tool-sequence string, not an `IntentMatch`; **procedures are stored but not yet short-circuited on** (§7.1's "skip the multi-agent dance" is future work). `LEARNING_ENABLED` env flag, default off, absent = unwired. Suggestion review is API-only — no CLI/Slack UI yet.
+- **Phase 5 (Learning + surfaces)** — `OutcomeRecord` is lean: `correlationId`, `toolCalls`, `finalResult?`, `approvals[]`, `ts` (no intent/feedback/token fields in v1). `SuggestionQueue` v1 = one threshold heuristic (destructive approvals → propose relaxing `approver_count`, **risk: high**). `PromotionGate` evaluates the **candidate** bundle (better than the draft's "current + proposed": a regression-causing patch is refused before it lands) and refuses `tighten_safety_net`/`add_procedure` suggestions outright. `ProcedureSpec.trigger` is the tool-sequence string, not an `IntentMatch`; **procedures short-circuit execution**: the Supervisor's `ProcedureLibrary` matches requests by leading tool (live thresholds: sample ≥ 3, success rate 1.0) and replaces the dance — the approved action replays with its *current* args, only read-only follow-ons replay, and any failure degrades to the full dance. `LEARNING_ENABLED` env flag, default off, absent = unwired. Suggestion review is API-only — no CLI/Slack UI yet.
 
 ### 0.3 Promised but not built in v1
 
@@ -94,7 +94,7 @@ the host of the meeting surface. See §15.
                               ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  EXECUTION  (src/execution/)                                 │
-│  • SupervisorAgent (caps: hops/tokens/wall-clock/loop)       │
+│  • SupervisorAgent (caps + learned-procedure shortcut)        │
 │  • Triage / Investigator / Executor / Reviewer (LlmAgents)   │
 │  • ToolRunner (governed-only → SafetyNet → Zod → idempotency │
 │    → retry/timeout → tool_call event)                        │
@@ -254,7 +254,13 @@ P0/P1 alerts auto-allowed; unknown tools default-deny.
 any failed verification ends the request `ok=false` with the root cause in
 `reason`. Caps (fail-closed): `maxHops=8`, `maxTokens=50k`, `maxWallClockMs=60s`,
 `maxIdenticalToolCalls=3` (reuses the SafetyNet's LoopDetector per
-correlationId). Emits `agent_outcome` (summary + hops + toolCalls). Deny and
+correlationId). Emits `agent_outcome` (summary + hops + toolCalls + `via:pipeline|procedure`).
+When a `ProcedureLibrary` is wired, a learned procedure matching the governed
+action **replaces the dance**: the action replays with its current approved
+args (never historical ones), read-only follow-ons replay, mutating follow-ons
+are skipped (policy approved *this* request, not the procedure's history), and
+any failure degrades to the full dance. Output carries
+`source: 'pipeline' | 'procedure'`. Deny and
 unresolved-approval inputs fail closed without executing. *Reviewer-fail →
 retry-with-feedback is not in v1; a `fail` verdict ends the request.*
 
@@ -336,8 +342,7 @@ deployment or after promotion.*
 sequence of **successful** tool calls (min cluster 2); failures never inflate a
 procedure's `successRate` (1.0 by construction). Produces `ProcedureSpec
 { id, trigger (tool sequence), steps, successRate, sampleSize }` into
-cross-meeting episodic memory. *Procedures are stored but not yet used to
-short-circuit execution — future work.*
+cross-meeting episodic memory.*Procedures are consumed at runtime by the Supervisor's `ProcedureLibrary` short-circuit (§6.1).*
 
 ### 7.2 SafetyNet-bounded invariants
 
@@ -372,7 +377,7 @@ src/
 │   └── memory/       # episodic, kv, vector, embedders/hash
 ├── governance/       # decision, policy-engine, policy-store, approval-gate,
 │   └── safety-net/   # rbac, injection, loop-detector, cost-cap, output-filters
-├── execution/        # supervisor, tool-runner, verifier,
+├── execution/        # supervisor, tool-runner, verifier, procedure-library,
 │   ├── agents/       # base, triage, investigator, executor, reviewer
 │   └── tools/        # schemas, registry, jira, logs, runbook, slack, memory
 ├── learning/         # outcome-recorder, suggestion-queue, eval-runner,
@@ -389,7 +394,7 @@ src/
 scripts/              # eval.ts (policy eval CLI), check-sqlite.ts (native ABI probe)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 43 files, 327 tests (original 150 = regression floor)
+tests/                # 45 files, 342 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -421,7 +426,7 @@ new tests) ✅. Every phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **327/327 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **342/342 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

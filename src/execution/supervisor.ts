@@ -21,6 +21,7 @@ import { ExecutorAgent } from './agents/executor.js';
 import { ReviewerAgent } from './agents/reviewer.js';
 import { ToolRunner, type ToolRunnerContext } from './tool-runner.js';
 import { verifyResult } from './verifier.js';
+import type { ProcedureLibrary } from './procedure-library.js';
 
 export interface SupervisorOptions {
   triage: TriageAgent;
@@ -34,6 +35,10 @@ export interface SupervisorOptions {
   maxWallClockMs?: number;
   /** Max identical (tool, args) executions before a loop veto. */
   maxIdenticalToolCalls?: number;
+  /** Learned procedures (cross-meeting memory). When wired, a matching,
+   *  well-evidenced procedure replaces the multi-agent dance for a request.
+   *  Default: unwired → the dance always runs. */
+  procedures?: ProcedureLibrary;
   now?: () => number;
 }
 
@@ -50,6 +55,9 @@ export interface SupervisorRunOutput {
   reason?: string;
   /** Spoken/returned summary of the outcome. */
   summary: string;
+  /** How the request was fulfilled: the full agent pipeline or a replayed
+   *  learned procedure. */
+  source: 'pipeline' | 'procedure';
 }
 
 const DEFAULTS = {
@@ -71,7 +79,13 @@ export class SupervisorAgent {
   private readonly maxWallClockMs: number;
   private readonly maxIdenticalToolCalls: number;
   private readonly now: () => number;
+  private readonly procedures: ProcedureLibrary | undefined;
   private readonly loops = new LoopDetector();
+
+  /** Tools whose replay cannot mutate state. Mutating steps of a learned
+   *  procedure are never replayed — policy approved THIS request's action,
+   *  not the procedure's historical args. */
+  private static readonly READ_ONLY = new Set(['query_logs']);
 
   constructor(opts: SupervisorOptions) {
     this.triage = opts.triage;
@@ -84,6 +98,7 @@ export class SupervisorAgent {
     this.maxTokens = opts.maxTokens ?? DEFAULTS.maxTokens;
     this.maxWallClockMs = opts.maxWallClockMs ?? DEFAULTS.maxWallClockMs;
     this.maxIdenticalToolCalls = opts.maxIdenticalToolCalls ?? DEFAULTS.maxIdenticalToolCalls;
+    this.procedures = opts.procedures;
     this.now = opts.now ?? Date.now;
   }
 
@@ -93,9 +108,12 @@ export class SupervisorAgent {
     let hops = 0;
     let toolCalls = 0;
 
-    const fail = async (reason: string): Promise<SupervisorRunOutput> => {
-      await this.emitOutcome(context.correlationId, false, reason, hops, toolCalls);
-      return { ok: false, hops, toolCalls, reason, summary: `Request not completed: ${reason}` };
+    const fail = async (
+      reason: string,
+      source: 'pipeline' | 'procedure' = 'pipeline',
+    ): Promise<SupervisorRunOutput> => {
+      await this.emitOutcome(context.correlationId, false, reason, hops, toolCalls, source);
+      return { ok: false, hops, toolCalls, reason, summary: `Request not completed: ${reason}`, source };
     };
     const overWallClock = () => this.now() - started >= this.maxWallClockMs;
     const overTokens = () => context.tokens.prompt + context.tokens.completion > this.maxTokens;
@@ -106,6 +124,52 @@ export class SupervisorAgent {
     }
     if (governed.kind === 'deny') {
       return fail(governed.decision.reason);
+    }
+
+    // 0. Procedure short-circuit: a well-evidenced learned procedure whose
+    //    sequence the governed action leads replaces the multi-agent dance.
+    //    The leading tool IS the request's own action and replays with the
+    //    CURRENT approved args (never historical ones). Follow-on steps
+    //    replay only if read-only; any failure degrades to the full dance —
+    //    the procedure is an accelerator, never a correctness dependency.
+    if (this.procedures) {
+      try {
+        const match = await this.procedures.match(governed.action.tool);
+        if (match) {
+          // The request's own action, with its CURRENT approved args —
+          // never the procedure's historical ones.
+          const main = await this.executeStep(governed.action.tool, governed.action.args, context, governed.decision);
+          toolCalls++;
+          const mainV = verifyResult(governed.action.tool, main, { candidateOutput: context.candidateOutput });
+          if (mainV.passed) {
+            // Replay only read-only follow-ons; mutating steps are skipped —
+            // policy approved THIS action, not the procedure's history.
+            let replayOk = true;
+            for (const step of match.replay) {
+              if (step.tool === undefined || !SupervisorAgent.READ_ONLY.has(step.tool)) continue;
+              const r = await this.executeStep(step.tool, step.args ?? {}, context, governed.decision);
+              toolCalls++;
+              const v = verifyResult(step.tool, r, { candidateOutput: context.candidateOutput });
+              if (!v.passed) {
+                replayOk = false;
+                break;
+              }
+            }
+            // The approved action succeeded; a failed follow-on must NOT
+            // trigger a dance fallback that would re-run the mutation.
+            const summary =
+              `Completed via learned procedure ${match.procedure.id} (${toolCalls} tool call(s), sampleSize=${match.procedure.sampleSize}).` +
+              (replayOk ? '' : ' (partial replay: a follow-on step failed verification)');
+            await this.emitOutcome(context.correlationId, true, summary, hops, toolCalls, 'procedure');
+            this.loops.clear({ correlationId: context.correlationId });
+            return { ok: true, hops, toolCalls, summary, source: 'procedure' };
+          }
+          // The action itself failed verification → degrade to the dance.
+        }
+      } catch {
+        // Library or replay blew up — degrade to the dance, never fail the
+        // request because an accelerator failed.
+      }
     }
 
     // 1. Triage
@@ -163,7 +227,7 @@ export class SupervisorAgent {
       : `Reviewer rejected: ${final.decision.feedback}`;
     await this.emitOutcome(context.correlationId, ok, summary, hops, toolCalls);
     this.loops.clear({ correlationId: context.correlationId });
-    return { ok, hops, toolCalls, summary };
+    return { ok, hops, toolCalls, summary, source: 'pipeline' };
   }
 
   /** Execute one step through the ToolRunner with loop detection. */
@@ -190,7 +254,14 @@ export class SupervisorAgent {
     return ['jira_create_issue', 'query_logs', 'execute_runbook_script', 'invoke_human_on_slack', 'meeting_interrupt'].includes(tool);
   }
 
-  private async emitOutcome(correlationId: string, ok: boolean, summary: string, hops: number, toolCalls: number): Promise<void> {
+  private async emitOutcome(
+    correlationId: string,
+    ok: boolean,
+    summary: string,
+    hops: number,
+    toolCalls: number,
+    source: 'pipeline' | 'procedure' = 'pipeline',
+  ): Promise<void> {
     if (!this.eventLog) return;
     await this.eventLog.append({
       correlationId,
@@ -198,7 +269,7 @@ export class SupervisorAgent {
       layer: 'execution',
       source: 'internal',
       kind: 'agent_outcome',
-      finalResult: { ok, summary: `${summary} (hops=${hops}, toolCalls=${toolCalls})` },
+      finalResult: { ok, summary: `${summary} (hops=${hops}, toolCalls=${toolCalls}, via:${source})` },
     }).catch(() => {});
   }
 }

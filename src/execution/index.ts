@@ -19,3 +19,4 @@ export { InvestigatorAgent, type InvestigatorDecision } from './agents/investiga
 export { ExecutorAgent, type ExecutorDecision } from './agents/executor.js';
 export { ReviewerAgent, type ReviewerDecision } from './agents/reviewer.js';
 export { verifyResult, type Verification, type VerifyOptions } from './verifier.js';
+export { ProcedureLibrary, type ProcedureMatch, type ProcedureLibraryOptions } from './procedure-library.js';
