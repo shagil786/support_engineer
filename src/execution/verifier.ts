@@ -45,8 +45,16 @@ export function verifyResult(tool: string, result: ToolResult, opts: VerifyOptio
     if (f.vetoed) return { passed: false, reason: `output filter: ${f.reason}` };
   }
   const check = CHECKS[tool];
+  let v: Verification;
   if (!check) {
-    return result.ok ? { passed: true } : { passed: false, reason: 'tool reported failure' };
+    v = result.ok ? { passed: true } : { passed: false, reason: 'tool reported failure' };
+  } else {
+    v = check(result);
   }
-  return check(result);
+  // Surface the underlying error (e.g. a SafetyNet veto) through the
+  // verification reason so failures are diagnosable without re-running.
+  if (!v.passed && !result.ok && typeof result.error === 'string') {
+    return { passed: false, reason: `${v.reason ?? 'failed'}: ${result.error}` };
+  }
+  return v;
 }
