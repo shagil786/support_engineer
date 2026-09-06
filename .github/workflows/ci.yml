@@ -68,3 +68,9 @@ jobs:
 
       - name: Policy eval scenarios
         run: npm run eval
+
+      - name: Retrieval quality gate
+        # Grades the shipped golden set against the knowledge base (seeds a
+        # fresh KB when empty). A regressed retriever — chunker, BM25, fusion,
+        # re-rank — fails CI exactly like a regressed policy bundle.
+        run: npm run eval:retrieval
