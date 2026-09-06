@@ -24,6 +24,9 @@ import type { AddressInfo } from 'node:net';
 import type { Platform } from '../bootstrap.js';
 import type { PipelineRouting } from '../pipeline/agent-pipeline.js';
 import type { ApprovalSnapshot } from '../governance/approval-gate.js';
+import type { IntentEnvelope } from '../event-log/types.js';
+import type { ToolName } from '../support-voice-agent/tools/types.js';
+import { buildEnvelope, ENVELOPE_SOURCES } from '../surface/dispatch.js';
 
 export interface HttpServerOptions {
   /** Bearer tokens for /utterance and /approvals/*. Empty/missing → those
@@ -100,6 +103,7 @@ export async function createHttpServer(
     if (!token || !hasToken(tokens, token)) return reply(res, 401, { error: 'invalid bearer token' });
 
     if (method === 'POST' && path === '/utterance') return handleUtterance(req, res);
+    if (method === 'POST' && path === '/envelope') return handleEnvelope(req, res);
 
     const approval = /^\/approvals\/([^/]+)\/(sign|execute)$/.exec(path);
     if (method === 'POST' && approval && approval[1] && approval[2]) {
@@ -107,7 +111,7 @@ export async function createHttpServer(
       return handleApproval(req, res, decodeURIComponent(approval[1]), approval[2] as 'sign' | 'execute');
     }
 
-    const knownPath = path === '/utterance' || approval !== null;
+    const knownPath = path === '/utterance' || path === '/envelope' || approval !== null;
     if (method !== 'POST') {
       return reply(res, knownPath ? 405 : 404, knownPath ? { error: 'method not allowed' } : { error: 'not found' });
     }
@@ -132,6 +136,35 @@ export async function createHttpServer(
     try {
       const route = await platform.pipeline.processUtterance(speakerId, text, now());
       return reply(res, 200, route);
+    } catch (e) {
+      return reply(res, 500, { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** POST /envelope — structured deliveries (Jira webhooks, monitoring
+   *  anomalies) dispatched through the same governance as utterances. The
+   *  ACTION is chosen here by policy, never by the client: a caller-supplied
+   *  `proposed` field is rejected outright. Untrusted payloads that fail
+   *  their parser are dropped with `accepted: false`, not guessed. */
+  async function handleEnvelope(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readBody(req, maxBody);
+    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
+    const parsed = parseJson(body);
+    if (!parsed.ok) return reply(res, 400, { error: parsed.error });
+    const b = parsed.value as { source?: unknown; body?: unknown; proposed?: unknown };
+    if (typeof b.source !== 'string' || !ENVELOPE_SOURCES.includes(b.source)) {
+      return reply(res, 400, { error: `source must be one of: ${ENVELOPE_SOURCES.join(', ')}` });
+    }
+    if (b.body === undefined) return reply(res, 400, { error: 'body is required' });
+    if (b.proposed !== undefined) {
+      return reply(res, 400, { error: 'proposed actions are chosen by policy, not by the client' });
+    }
+    const envelope = buildEnvelope(b.source, b.body);
+    if (!envelope) return reply(res, 200, { accepted: false, reason: 'payload rejected by the source parser' });
+    const proposedAction = proposeFor(envelope);
+    try {
+      const route = await platform.pipeline.processEnvelope(envelope, proposedAction);
+      return reply(res, 200, { accepted: true, ...route });
     } catch (e) {
       return reply(res, 500, { error: e instanceof Error ? e.message : String(e) });
     }
@@ -310,6 +343,22 @@ export async function createHttpServer(
 function reply(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+/** The action policy will evaluate for a parsed envelope — chosen by the
+ *  SERVER from the envelope's intent, never accepted from the client.
+ *  Mirrors the pipeline's own question/meeting-interrupt defaults. */
+function proposeFor(envelope: IntentEnvelope): { tool: ToolName; args: Record<string, unknown> } {
+  if (envelope.intent.kind === 'async_triage') {
+    return { tool: 'query_logs', args: { query_string: envelope.entities.ticketKeys?.[0] ?? 'errors' } };
+  }
+  if (envelope.intent.kind === 'proactive_alert') {
+    const parts: string[] = [];
+    if (envelope.entities.severity) parts.push(envelope.entities.severity);
+    if (envelope.entities.services?.length) parts.push(envelope.entities.services.join(', '));
+    return { tool: 'meeting_interrupt', args: { message: parts.length ? parts.join(' ') : 'proactive alert' } };
+  }
+  return { tool: 'meeting_interrupt', args: { message: 'surface delivery' } };
 }
 
 function bearer(req: IncomingMessage): string | undefined {
