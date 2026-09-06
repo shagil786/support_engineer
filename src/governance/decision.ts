@@ -26,6 +26,19 @@ export interface Decision {
   unconditionalSafetyNetCheck?: boolean;
 }
 
+/** A Decision with the approval constraints a matching policy attaches.
+ *  ApprovalGate consumes these when staging the human approval. */
+export interface GovernanceDecision extends Decision {
+  /** Required approver role (from the matched rule). */
+  approverRole?: string;
+  /** Number of distinct signatures required (M-of-N). */
+  approverCount?: number;
+  /** How long the approval stays open. */
+  timeoutSeconds?: number;
+  /** What happens when the approval times out. */
+  onTimeout?: 'allow' | 'deny';
+}
+
 export type GovernedAction =
   | { kind: 'execute';         action: ProposedAction; decision: Decision }
   | { kind: 'request_approval'; action: ProposedAction; decision: Decision; approvalId: string }
