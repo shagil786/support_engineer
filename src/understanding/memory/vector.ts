@@ -69,6 +69,9 @@ export interface VectorMemory {
   /** Remove records matching a predicate. Returns how many were removed.
    *  Used by EpisodicMemory for meeting scoping and TTL purges. */
   purge(predicate: (record: MemoryRecord) => boolean): Promise<number>;
+  /** Enumerate records so composite indexes (hybrid KB) can score them.
+   *  Optional so existing fakes and ports stay source-compatible. */
+  list?(): MemoryRecord[];
 }
 
 export class InMemoryVectorMemory implements VectorMemory {
@@ -98,6 +101,10 @@ export class InMemoryVectorMemory implements VectorMemory {
 
   size(): number {
     return this.entries.length;
+  }
+
+  list(): MemoryRecord[] {
+    return this.entries.map((e) => e.record);
   }
 
   async purge(predicate: (record: MemoryRecord) => boolean): Promise<number> {

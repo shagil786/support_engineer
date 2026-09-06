@@ -117,6 +117,10 @@ export class FileBackedVectorMemory {
     return this.entries.length;
   }
 
+  list(): MemoryRecord[] {
+    return this.entries.map((e) => e.record);
+  }
+
   async purge(predicate: (record: MemoryRecord) => boolean): Promise<number> {
     let removed = 0;
     for (let i = this.entries.length - 1; i >= 0; i--) {

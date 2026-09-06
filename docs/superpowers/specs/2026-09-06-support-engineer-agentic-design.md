@@ -171,9 +171,29 @@ JSON snapshot (atomic tmp+rename, corrupt-file fail-open) so learned
 procedures survive restarts; the embedder must be stable across restarts
 (persisted vectors). `perMeeting` stays intentionally ephemeral.
 
-**`ContextAssembler`** → `ContextBundle { envelope, episodes, recent }` from the
+**`ContextAssembler`** → `ContextBundle { envelope, episodes, recent, knowledge? }` from the
 envelope, top-K recall (`topK=5, minScore=0.3` default), and a recent-decision
 window. *No policy summary component in v1.*
+
+**`FileBackedKnowledgeBase`** (`understanding/knowledge/`) — the hybrid retrieval
+substrate (RAG): semantic section-boundary **chunking** (`chunker.ts`, overlap on
+oversized sections, heading + doc metadata as provenance), **Okapi BM25**
+lexical index + cosine **vector** index fused by **reciprocal-rank fusion**
+(k=60, union of top-20 candidates per signal), then a deterministic
+**re-rank** (vector score as base; term coverage/density as boosts — a
+zero-lexical-overlap paraphrase must survive; a cross-encoder replaces it
+behind the same seam). **Query-time metadata filters** (`where: {source,
+tags, …}`) pre-filter candidates before scoring. Storage mirrors
+`FileBackedVectorMemory` (atomic snapshot, corrupt-file fail-open) at
+`var/knowledge/kb.json`; hosts ingest via `knowledge.ingest({id, text,
+metadata})` or `scripts/knowledge-cli.ts` (seed/ingest/search/list). Hits
+flow into the bundle as `knowledge?: KnowledgeHit[]` with full provenance
+(`docId, index, heading, metadata`) — the citation layer's substrate.
+`evaluateRetrieval` + `assertQualityGate` (`retrieval-eval.ts`) grade
+golden sets on **hit rate / MRR**; the shipped seed corpus + 9-case golden
+set (`fixtures/retrieval-golden-set.ts`) runs in the suite and fails loudly
+on retrieval regressions. Not yet built on top: grounded generation,
+citation rendering, refusal detection (they consume this provenance next).
 
 ### 4.2 Boundary discipline
 
@@ -411,7 +431,8 @@ src/
 ├── event-log/        # log.ts (JSONL impl), types.ts (union), correlation.ts
 ├── understanding/    # intent-classifier, context-assembler,
 │   ├── legacy/classifier-adapter.ts
-│   └── memory/       # episodic, kv, vector, file-backed, embedders/hash
+│   ├── memory/       # episodic, kv, vector, file-backed, embedders/hash
+│   └── knowledge/    # chunker, bm25, knowledge-base (hybrid RAG), retrieval-eval
 ├── governance/       # decision, policy-engine, policy-store, approval-gate,
 │   └── safety-net/   # rbac, injection, loop-detector, cost-cap, output-filters
 ├── execution/        # supervisor, tool-runner, verifier, procedure-library,
@@ -434,7 +455,7 @@ src/
 scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console + optional HTTP host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 58 files, 460 tests (original 150 = regression floor)
+tests/                # 62 files, 486 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -472,7 +493,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **460/460 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **486/486 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

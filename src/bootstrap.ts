@@ -21,6 +21,7 @@ import { LegacyClassifierAdapter } from './understanding/legacy/classifier-adapt
 import { IntentClassifier } from './understanding/intent-classifier.js';
 import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
+import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
 import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
 import type { SpeakerRole } from './governance/safety-net/index.js';
@@ -95,6 +96,9 @@ export interface Platform {
   /** Always present and wired into the supervisor; matches previously-
    *  learned procedures even when the learning loop is off. */
   library: ProcedureLibrary;
+  /** Hybrid knowledge base (BM25+vector, durable snapshot). Ingest docs via
+   *  `ingestDoc()`; retrieval is wired into the ContextAssembler. */
+  knowledge: FileBackedKnowledgeBase;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
   /** The ApprovalGate: hosts with a Slack Events endpoint route
@@ -144,7 +148,10 @@ export function createPlatform(opts: PlatformOptions): Platform {
     eventLog,
     ...(now ? { now } : {}),
   });
-  const assembler = new ContextAssembler({ episodic });
+  // Durable hybrid knowledge base: runbooks/incidents/postmortems ingested by
+  // the host (or the demo seed) become retrievable context with provenance.
+  const knowledge = new FileBackedKnowledgeBase({ path: join(dataDir, 'knowledge', 'kb.json') });
+  const assembler = new ContextAssembler({ episodic, knowledge });
 
   const policyYaml = readFileSync(opts.policyPath ?? resolve(process.cwd(), 'policies/default.yaml'), 'utf8');
   const policyEngine = new PolicyEngine({ yaml: policyYaml });
@@ -221,6 +228,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     eventLog,
     learningLoop,
     library,
+    knowledge,
     approvals,
     speakerRole,
     stopLearning() {

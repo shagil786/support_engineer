@@ -46,6 +46,22 @@ describe('createPlatform', () => {
     expect(p.learningLoop).toBeUndefined();
     // The library is always wired: "serve what was learned, stop learning."
     expect(p.library).toBeDefined();
+    // The knowledge base is always present and retrieval is live in the
+    // assembler: ingest a doc, then retrieve it through the platform.
+    expect(p.knowledge).toBeDefined();
+  });
+
+  it('knowledge base: ingest → provenance-tagged retrieval through the pipeline assembler', async () => {
+    const p = createPlatform({ dataDir: dir, runbooks });
+    await p.knowledge.ingest({
+      id: 'run-cache-clear',
+      text: '# Clear the API cache',
+      metadata: { source: 'runbooks', tags: ['cache'] },
+    });
+    const hits = await p.knowledge.search('api cache clear');
+    expect(hits[0]?.docId).toBe('run-cache-clear');
+    expect(hits[0]?.metadata?.['source']).toBe('runbooks');
+    expect(hits[0]?.heading).toBe('Clear the API cache');
   });
 
   it('learning on: durable library wired into the supervisor; tick then short-circuit live request', async () => {
