@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
     "eval:retrieval": "tsx scripts/retrieval-eval.ts",
+    "eval:faithfulness": "tsx scripts/faithfulness-eval.ts",
     "prepare": "test -d .git && git config core.hooksPath .githooks || true",
     "demo": "tsx demo/cli.ts"
   },

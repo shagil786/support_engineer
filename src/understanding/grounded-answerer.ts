@@ -37,6 +37,9 @@ const GroundedAnswerSchema = z.object({
       heading: z.string(),
       source: z.string().optional(),
       score: z.number(),
+      /** The chunk text, so citation consumers (and the faithfulness
+       *  judge) can verify claims without re-reading the KB. */
+      text: z.string(),
     }),
   ),
   contextSize: z.number(),
@@ -79,6 +82,7 @@ export class GroundedAnswerer {
       heading: h.heading,
       ...(typeof h.metadata?.['source'] === 'string' ? { source: h.metadata['source'] as string } : {}),
       score: h.score,
+      text: h.text,
     }));
 
     if (hits.length === 0) {
