@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **323/323 tests green** across 42 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **327/327 tests green** across 43 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -32,7 +32,7 @@ names and file moves that don't exist in this repo. The material deviations:
 
 ### 0.3 Promised but not built in v1
 
-Eval-in-CI wiring; the "no hardcoded values" grep test; `PolicyEngine` hot-reload
+The "no hardcoded values" grep test; `PolicyEngine` hot-reload
 on promotion (the store promotes; a new engine instance is constructed per
 deployment); Slash-command approvals; per-tool rate limits; cancellation;
 multi-tenant policy (still a non-goal).
@@ -386,7 +386,10 @@ src/
 ├── config.ts         # + learningEnabledFromEnv (LEARNING_ENABLED, default off)
 └── env.ts
 
-tests/                # 42 files, 323 tests (original 150 = regression floor)
+scripts/              # eval.ts (policy eval CLI), check-sqlite.ts (native ABI probe)
+.githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
+.github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
+tests/                # 43 files, 327 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -406,7 +409,8 @@ over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 
 1. Event spine (14 tests) ✅  2. Understanding (29) ✅  3. Governance (45) ✅
 4. Execution (42) ✅  5. Learning + surfaces (33) ✅  — plus the wiring phase
-(10) ✅. Every phase ended typecheck-clean with the full suite green.
+(10) ✅ and the enforcement phase (eval CLI + CI workflow + pre-push hook, 4
+new tests) ✅. Every phase ended typecheck-clean with the full suite green.
 
 ## 12. Open questions (unchanged in substance)
 
@@ -417,7 +421,7 @@ over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **323/323 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **327/327 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅
@@ -452,3 +456,27 @@ The draft said `processUtterance` would be **deleted**. Built instead:
 The legacy agent therefore remains: the etiquette engine, the deterministic
 floor, and the blast radius limiter. This is the system's most important
 property and the draft's biggest miss.
+
+## 16. Policy enforcement ladder (added after the as-built revision)
+
+Policy behavior is gated at three stages, all running the same scenarios:
+
+1. **Local, every push** — `.githooks/pre-push` (activated via `core.hooksPath`
+   + the npm `prepare` script) runs the eval CLI against the **committed**
+   `policies/default.yaml` of every pushed ref that touches `policies/` —
+   never the dirty worktree — and blocks the push on failure. Ref deletions
+   and non-policy pushes skip; new branches validate their tip;
+   `git push --no-verify` remains the manual bypass.
+2. **CI, every push/PR** — `.github/workflows/ci.yml` (Node 22 + 24):
+   typecheck, full test suite, `npm run eval`. better-sqlite3 is probed right
+   after install (`scripts/check-sqlite.ts`); a missing/stale prebuild falls
+   back to an in-job source rebuild, which fails the job only if it cannot
+   fix the binary.
+3. **Promotion time** — the PromotionGate re-runs eval + SafetyNet regression
+   against the candidate bundle before any store write (§7.1).
+
+The first two share `scripts/eval.ts` (`npm run eval [--bundle <path>]`):
+every eval scenario + every must-veto SafetyNet regression scenario, exit 1
+on any failure, malformed scenario files fail loud. A regressed committed
+bundle now fails on the developer's machine before review — not in CI, and
+not as the base of a PromotionGate promotion.
