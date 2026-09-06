@@ -23,6 +23,12 @@ import type { SpeakerRole } from './safety-net/rbac.js';
 export interface SlackLike {
   postMessage(channel: string, text: string): Promise<void>;
   postMessageWithRef?(channel: string, text: string): Promise<{ channel: string; ts: string }>;
+  /** Edit the original message in place (chat.update). Present on bot-token
+   *  clients; preferred for grant/deny/timeout so the message is the record. */
+  updateMessage?(channel: string, ts: string, text: string): Promise<void>;
+  /** Reply in-thread under the original message (chat.postMessage with
+   *  thread_ts). Middle rung of the lifecycle-update ladder. */
+  postReply?(channel: string, ts: string, text: string): Promise<void>;
 }
 
 export interface ApprovalRequestInput {
@@ -85,6 +91,11 @@ interface PendingApproval {
   status: ApprovalStatus;
   createdAt: number;
   timeoutMs: number;
+  /** Exactly what was posted when the request was created; lifecycle
+   *  updates re-render this so the message stays the full record. */
+  originalText?: string;
+  /** Where the request message landed (bot-token path only). */
+  ref?: { channel: string; ts: string };
 }
 
 const DEFAULT_APPROVER_COUNT = 2;
@@ -144,12 +155,14 @@ export class ApprovalGate {
     };
     this.pending.set(id, p);
     const text = this.renderMessage(p);
+    p.originalText = text;
     if (this.slack.postMessageWithRef) {
       // Bot-token path: record the message ref so reactions correlate to
       // THIS approval even with several pending at once.
       try {
         const ref = await this.slack.postMessageWithRef(this.channel, text);
         this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
+        p.ref = { channel: ref.channel, ts: ref.ts };
       } catch {
         await this.slack.postMessage(this.channel, text);
       }
@@ -172,6 +185,7 @@ export class ApprovalGate {
   sign(approvalId: string, role: string, signerId?: string): ApprovalSnapshot {
     const p = this.require(approvalId);
     if (p.status === 'pending') {
+      const before = p.signatures.size;
       p.signatures.add(signerId ?? `signature-${p.signatures.size + 1}`);
       if (p.signatures.size >= this.approverCount) {
         p.status = 'granted';
@@ -185,6 +199,16 @@ export class ApprovalGate {
           signerRole: role,
         }).catch(() => {});
       }
+      // The original message tracks reality: grant, or signature progress.
+      // Both are THREADED-ONLY: without a thread to attach to (webhook-era
+      // posters) they stay silent rather than spam standalone posts.
+      if (p.signatures.size !== before) {
+        if (p.status === 'granted') {
+          this.announce(p, `*Approval GRANTED* (${p.policyId}) — ${p.signatures.size}/${this.approverCount} signatures. Executing.`, 'threaded');
+        } else {
+          this.announce(p, `Signatures: ${p.signatures.size}/${this.approverCount} — pending.`, 'threaded');
+        }
+      }
     }
     return this.snapshot(p);
   }
@@ -193,7 +217,7 @@ export class ApprovalGate {
     const p = this.require(approvalId);
     if (p.status === 'pending') {
       p.status = 'denied';
-      this.postFollowUp(p, `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`);
+      this.announce(p, `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`);
     }
     return this.snapshot(p);
   }
@@ -245,7 +269,7 @@ export class ApprovalGate {
       if (p.status === 'pending' && now > p.createdAt + p.timeoutMs) {
         p.status = 'timeout';
         expired.push(p.id);
-        this.postFollowUp(p, `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`);
+        this.announce(p, `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`);
         void this.eventLog?.append({
           correlationId: p.id,
           ts: now,
@@ -274,6 +298,27 @@ export class ApprovalGate {
    *  on Slack, and a delivery failure must never break the governance path. */
   private postFollowUp(p: PendingApproval, text: string): void {
     void this.slack.postMessage(this.channel, text).catch(() => {});
+  }
+
+  /** Announce a lifecycle change on the ORIGINAL message: update in place
+   *  when the client can, reply in-thread otherwise. 'ladder' mode (deny/
+   *  timeout) falls back to a standalone channel post; 'threaded' mode
+   *  (grant/progress) stays silent without a thread — never spams the
+   *  channel. Always fire-and-forget (see postFollowUp). */
+  private announce(p: PendingApproval, line: string, mode: 'ladder' | 'threaded' = 'ladder'): void {
+    const ref = p.ref;
+    const fallback = mode === 'ladder' ? () => this.postFollowUp(p, line) : undefined;
+    if (ref && this.slack.updateMessage) {
+      void this.slack
+        .updateMessage(ref.channel, ref.ts, `${p.originalText ?? ''}\n\n${line}`)
+        .catch(() => fallback?.());
+      return;
+    }
+    if (ref && this.slack.postReply) {
+      void this.slack.postReply(ref.channel, ref.ts, line).catch(() => fallback?.());
+      return;
+    }
+    fallback?.();
   }
 
   private snapshot(p: PendingApproval): ApprovalSnapshot {

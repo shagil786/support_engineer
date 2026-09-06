@@ -46,4 +46,32 @@ describe('SlackBotClient', () => {
     });
     await expect(client.postMessageWithRef('#security', 'x')).rejects.toThrow(/invalid_auth/);
   });
+
+  it('updates a message in place via chat.update', async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const client = new SlackBotClient({
+      botToken: 'xoxb-test-token',
+      request: async (url, init) => {
+        calls.push({ url: String(url), body: String(init?.body) });
+        return jsonResponse({ ok: true });
+      },
+    });
+    await client.updateMessage('C123', '1700000000.000100', '*Approval GRANTED*');
+    expect(calls[0]?.url).toBe('https://slack.com/api/chat.update');
+    expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ channel: 'C123', ts: '1700000000.000100', text: '*Approval GRANTED*' });
+  });
+
+  it('posts threaded replies via chat.postMessage with thread_ts', async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const client = new SlackBotClient({
+      botToken: 'xoxb-test-token',
+      request: async (url, init) => {
+        calls.push({ url: String(url), body: String(init?.body) });
+        return jsonResponse({ ok: true });
+      },
+    });
+    await client.postReply('C123', '1700000000.000100', 'Signatures: 1/2 — pending.');
+    expect(calls[0]?.url).toBe('https://slack.com/api/chat.postMessage');
+    expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ channel: 'C123', thread_ts: '1700000000.000100', text: 'Signatures: 1/2 — pending.' });
+  });
 });

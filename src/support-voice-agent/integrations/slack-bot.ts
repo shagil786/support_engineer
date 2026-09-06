@@ -67,6 +67,17 @@ export class SlackBotClient {
     return { channel: r.channel, ts: r.ts };
   }
 
+  /** Edit a posted message in place (chat.update) — the ApprovalGate uses
+   *  this to keep the original request message as the lifecycle record. */
+  async updateMessage(channel: string, ts: string, text: string): Promise<void> {
+    await this.call('chat.update', { channel, ts, text });
+  }
+
+  /** Reply in-thread under a message (chat.postMessage + thread_ts). */
+  async postReply(channel: string, ts: string, text: string): Promise<void> {
+    await this.call('chat.postMessage', { channel, thread_ts: ts, text });
+  }
+
   /** SlackLike / SlackNotifier compatibility: post and discard the ref. */
   async postMessage(channel: string, text: string): Promise<void> {
     await this.postMessageWithRef(channel, text);

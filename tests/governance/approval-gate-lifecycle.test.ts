@@ -15,6 +15,41 @@ class FakeSlack implements SlackLike {
   }
 }
 
+interface Update { channel: string; ts: string; text: string }
+interface Reply { channel: string; threadTs: string; text: string }
+
+/** Bot-token-shaped fake: resolves refs and can update or thread-reply. */
+class BotSlack implements SlackLike {
+  readonly posted: Array<{ channel: string; text: string }> = [];
+  readonly updates: Update[] = [];
+  readonly replies: Reply[] = [];
+  private seq = 0;
+  constructor(
+    private readonly withUpdate = true,
+    private readonly withReply = false,
+  ) {
+    // Emulate ABSENCE (not failure): the gate branches on capability.
+    if (!withUpdate) (this as unknown as { updateMessage?: unknown }).updateMessage = undefined;
+    if (!withReply) (this as unknown as { postReply?: unknown }).postReply = undefined;
+  }
+  async postMessage(channel: string, text: string): Promise<void> {
+    this.posted.push({ channel, text });
+  }
+  async postMessageWithRef(channel: string, text: string): Promise<{ channel: string; ts: string }> {
+    const ts = '1700000000.' + String(++this.seq).padStart(6, '0');
+    this.posted.push({ channel, text });
+    return { channel, ts };
+  }
+  async updateMessage(channel: string, ts: string, text: string): Promise<void> {
+    if (!this.withUpdate) throw new Error('updateMessage not implemented');
+    this.updates.push({ channel, ts, text });
+  }
+  async postReply(channel: string, ts: string, text: string): Promise<void> {
+    if (!this.withReply) throw new Error('postReply not implemented');
+    this.replies.push({ channel, threadTs: ts, text });
+  }
+}
+
 describe('ApprovalGate lifecycle follow-ups', () => {
   it('posts a follow-up when an approval is denied', async () => {
     const slack = new FakeSlack();
@@ -75,5 +110,91 @@ describe('ApprovalGate lifecycle follow-ups', () => {
     const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
     gate.sign(approvalId, 'admin');
     expect(slack.posted).toHaveLength(1);
+  });
+
+  it('UPDATES the original message on deny and timeout (no standalone post)', async () => {
+    let now = 1_000_000;
+    const slack = new BotSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', defaultTimeoutMs: 60_000, now: () => now });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+    const ref = { channel: '#sec', ts: '1700000000.000001' };
+
+    gate.deny(approvalId);
+    expect(slack.updates).toHaveLength(1);
+    expect(slack.updates[0]).toMatchObject({ ...ref, text: expect.stringMatching(/DENIED/) });
+    expect(slack.posted).toHaveLength(1); // request only — never a second post
+
+    const b = await gate.request({ policyId: 'p1', decision, action });
+    now += 61_000; // past the SECOND request's window
+    gate.checkTimeouts();
+    expect(slack.updates).toHaveLength(2);
+    expect(slack.updates[1]).toMatchObject({ channel: '#sec', ts: '1700000000.000002', text: expect.stringMatching(/TIMED OUT/) });
+    void b;
+  });
+
+  it('UPDATES the original message on grant with the signature count', async () => {
+    const slack = new BotSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2 });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+
+    gate.sign(approvalId, 'admin', 'alice');
+    gate.sign(approvalId, 'admin', 'bob');
+    // Two sequential edits: alice's 1/2 progress, then the grant on bob.
+    expect(slack.updates).toHaveLength(2);
+    expect(slack.updates[0]?.text).toContain('1/2');
+    expect(slack.updates[1]?.text).toMatch(/GRANTED/);
+    expect(slack.updates[1]?.text).toContain('2/2');
+    expect(slack.posted).toHaveLength(1);
+  });
+
+  it('shows signature progress on the original message while still pending', async () => {
+    const slack = new BotSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2 });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+
+    gate.sign(approvalId, 'admin', 'alice');
+    expect(slack.updates).toHaveLength(1);
+    expect(slack.updates[0]?.text).toContain('1/2');
+    expect(slack.updates[0]?.text).toMatch(/pending/i);
+    // Duplicate signature: no change, no redundant update.
+    gate.sign(approvalId, 'admin', 'alice');
+    expect(slack.updates).toHaveLength(1);
+  });
+
+  it('falls back to a THREAD REPLY when update is unavailable but reply is', async () => {
+    const slack = new BotSlack(false, true);
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1 });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+
+    gate.deny(approvalId);
+    expect(slack.replies).toHaveLength(1);
+    expect(slack.replies[0]).toMatchObject({ channel: '#sec', threadTs: '1700000000.000001', text: expect.stringMatching(/DENIED/) });
+    expect(slack.posted).toHaveLength(1);
+  });
+
+  it('ref-less posters (webhook era): grant silent, deny standalone', async () => {
+    const slack = new FakeSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1 });
+    const a = await gate.request({ policyId: 'p1', decision, action });
+    gate.sign(a.approvalId, 'admin');
+    expect(slack.posted).toHaveLength(1); // grant: silent without thread capability
+    const b = await gate.request({ policyId: 'p1', decision, action });
+    expect(slack.posted).toHaveLength(2); // request b's own message
+    gate.deny(b.approvalId);
+    expect(slack.posted).toHaveLength(3); // + standalone DENIED, as before
+    expect(slack.posted[2]?.text).toMatch(/DENIED/);
+  });
+
+  it('with a ref but no update/reply capability, deny degrades to a standalone post', async () => {
+    const slack = new BotSlack();
+    (slack as unknown as { updateMessage?: unknown }).updateMessage = undefined;
+    (slack as unknown as { postReply?: unknown }).postReply = undefined;
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1 });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+    gate.deny(approvalId);
+    expect(slack.updates).toHaveLength(0);
+    expect(slack.replies).toHaveLength(0);
+    expect(slack.posted).toHaveLength(2); // request + standalone DENIED
+    expect(slack.posted[1]?.text).toMatch(/DENIED/);
   });
 });
