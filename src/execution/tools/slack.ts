@@ -1,5 +1,7 @@
 /**
  * invoke_human_on_slack executor. Message shaping preserved from handlers.ts.
+ * Tool-side failures return ToolResult; transport failures THROW so the
+ * ToolRunner can retry them.
  */
 import type { z } from 'zod';
 import type { ToolResult } from '../../support-voice-agent/tools/types.js';
@@ -16,6 +18,7 @@ export async function invokeHumanOnSlack(args: Args, ctx: ToolContext): Promise<
     await ctx.slackNotifier.postMessage(args.target_user, `[@${args.target_user}] ${args.message} (via ${platform})`);
     return { ok: true, data: { target_user: args.target_user, platform, delivered: true } };
   } catch (e) {
-    return { ok: false, error: 'Slack notification failed', detail: e instanceof Error ? e.message : String(e) };
+    if (e instanceof Error) throw e; // transport — retryable by ToolRunner
+    return { ok: false, error: 'Slack notification failed', detail: String(e) };
   }
 }

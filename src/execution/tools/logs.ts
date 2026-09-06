@@ -1,7 +1,7 @@
 /**
- * query_logs executor. Time-range parsing and result shaping preserved from
- * tools/handlers.ts (parseTimeRange lives there; the schema constrains the
- * enum up front so only known ranges reach the provider).
+ * query_logs executor. Time-range mapping preserved from handlers.ts.
+ * Tool-side failures return ToolResult; transport failures THROW so the
+ * ToolRunner can retry them.
  */
 import type { z } from 'zod';
 import type { ToolResult } from '../../support-voice-agent/tools/types.js';
@@ -26,9 +26,14 @@ export async function queryLogs(args: Args, ctx: ToolContext): Promise<ToolResul
   const from = to - RANGE_MS[range];
   try {
     const result = await ctx.logProvider.query({ query: args.query_string, from, to, limit: 50 });
-    if (result.error) return { ok: false, error: 'Log query failed', detail: result.error };
+    if (result.error) {
+      // Provider-level handled failure (query syntax, permissions): not
+      // retryable — the same query will fail the same way.
+      return { ok: false, error: 'Log query failed', detail: result.error };
+    }
     return { ok: true, data: { provider: result.provider, rows: result.rows, time_range: range } };
   } catch (e) {
-    return { ok: false, error: 'Log query failed', detail: e instanceof Error ? e.message : String(e) };
+    if (e instanceof Error) throw e; // transport — retryable by ToolRunner
+    return { ok: false, error: 'Log query failed', detail: String(e) };
   }
 }

@@ -1,6 +1,7 @@
 /**
- * jira_create_issue executor. Behavior and error wrapping preserved from
- * tools/handlers.ts so legacy and governed paths behave identically.
+ * jira_create_issue executor. Tool-side failures (validation, not-wired)
+ * return ToolResult; transport failures THROW so the ToolRunner can retry
+ * them. Success/error shaping preserved from tools/handlers.ts.
  */
 import type { z } from 'zod';
 import type { ToolResult } from '../../support-voice-agent/tools/types.js';
@@ -23,6 +24,7 @@ export async function jiraCreateIssue(args: Args, ctx: ToolContext): Promise<Too
     });
     return { ok: true, data: { ticket_id: issue.key, url: issue.self } };
   } catch (e) {
-    return { ok: false, error: 'Jira createIssue failed', detail: e instanceof Error ? e.message : String(e) };
+    if (e instanceof Error) throw e; // transport — retryable by ToolRunner
+    return { ok: false, error: 'Jira createIssue failed', detail: String(e) };
   }
 }

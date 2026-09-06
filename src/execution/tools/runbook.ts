@@ -1,7 +1,8 @@
 /**
  * execute_runbook_script executor. Destructive-action gating stays in the
- * Governance layer (PolicyEngine + SafetyNet); this executor runs the action
- * the gate already approved. Error wrapping preserved from handlers.ts.
+ * Governance layer; this executor runs what the gate approved. Tool-side
+ * failures return ToolResult; transport failures THROW so the ToolRunner
+ * can retry them.
  */
 import type { z } from 'zod';
 import type { ToolResult } from '../../support-voice-agent/tools/types.js';
@@ -23,6 +24,7 @@ export async function executeRunbook(args: Args, ctx: ToolContext): Promise<Tool
       data: { action_id: result.actionId, output: result.output, environment: args.environment ?? 'staging' },
     };
   } catch (e) {
-    return { ok: false, error: 'Runbook execution failed', detail: e instanceof Error ? e.message : String(e) };
+    if (e instanceof Error) throw e; // transport — retryable by ToolRunner
+    return { ok: false, error: 'Runbook execution failed', detail: String(e) };
   }
 }
