@@ -99,7 +99,14 @@ export function llmConfigFromEnv(env: Env = process.env): LlmConfig | undefined 
   const apiKey = envVar(env, 'LLM_API_KEY');
   const model = envVar(env, 'LLM_MODEL');
   if (!baseUrl || !apiKey || !model) return undefined;
-  return { baseUrl, apiKey, model };
+  const timeoutMsRaw = envVar(env, 'LLM_TIMEOUT_MS');
+  const timeoutMs = timeoutMsRaw ? Number(timeoutMsRaw) : undefined;
+  return {
+    baseUrl,
+    apiKey,
+    model,
+    ...(timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : {}),
+  };
 }
 
 /** Return only the integrations whose required environment variables are all

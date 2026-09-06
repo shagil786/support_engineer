@@ -21,7 +21,7 @@ export interface LlmMessage {
 
 export interface LlmChatRequest {
   messages: LlmMessage[];
-  tools: ToolSchema[];
+  tools: OpenAiFunctionTool[];
   tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
   temperature?: number;
   max_tokens?: number;
@@ -137,7 +137,26 @@ export class OpenAiCompatibleClient {
   }
 }
 
-/** Convert our TOOL_SCHEMAS to the OpenAI tools array format. */
-export function schemasToOpenAiTools(): ToolSchema[] {
-  return Object.values(TOOL_SCHEMAS) as ToolSchema[];
+/** OpenAI wire format for a function tool (type wrapper + nested function). */
+export interface OpenAiFunctionTool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: ToolSchema['parameters'];
+  };
+}
+
+/** Convert our TOOL_SCHEMAS to the OpenAI tools array format. Real
+ *  OpenAI-compatible endpoints (OpenAI, NVIDIA NIM, Ollama, OpenRouter…)
+ *  require the `{ type: 'function', function: {...} }` wrapper. */
+export function schemasToOpenAiTools(): OpenAiFunctionTool[] {
+  return Object.values(TOOL_SCHEMAS).map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }));
 }

@@ -52,6 +52,10 @@ describe('OpenAiCompatibleClient wiring', () => {
     expect(sent?.headers.Authorization).toBe('Bearer test-key');
     expect(sent?.body.model).toBe('test-model');
     expect(Array.isArray(sent?.body.tools)).toBe(true);
+    // OpenAI wire format: each tool wrapped in { type: 'function', function: {...} }
+    const first = (sent?.body.tools as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+    expect(first.type).toBe('function');
+    expect((first.function as Record<string, unknown>).name).toBe('jira_create_issue');
     expect(sent?.body.tool_choice).toBe('auto');
   });
 
@@ -90,12 +94,17 @@ describe('tool registry schemas', () => {
     expect(s.required).toEqual(['project_key', 'summary', 'issue_type']);
   });
 
-  it('serialize to the OpenAI tools array format', () => {
+  it('serialize to the OpenAI tools array format (type wrapper)', () => {
     const tools = schemasToOpenAiTools();
     expect(tools).toHaveLength(5);
     for (const t of tools) {
-      expect(typeof t.name).toBe('string');
-      expect(t.parameters.type).toBe('object');
+      expect(t.type).toBe('function');
+      expect(typeof t.function.name).toBe('string');
+      expect(typeof t.function.description).toBe('string');
+      expect(t.function.parameters.type).toBe('object');
     }
+    expect(Object.values(TOOL_SCHEMAS).map((x) => x.name).sort()).toEqual(
+      tools.map((t) => t.function.name).sort(),
+    );
   });
 });
