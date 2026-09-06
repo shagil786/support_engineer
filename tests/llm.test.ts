@@ -75,8 +75,45 @@ describe('OpenAiCompatibleClient wiring', () => {
 
   it('throws LlmError network when fetch rejects', async () => {
     const failing = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
-    const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'test-key', model: 'm', request: failing });
+    const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'test-key', model: 'm', maxRetries: 0, request: failing });
     await expect(client.complete({ messages: [], tools: [] })).rejects.toMatchObject({ code: 'network' });
+  });
+
+  it('retries a 429 and succeeds on a later attempt (capacity recovery)', async () => {
+    let calls = 0;
+    const fn = (async () => {
+      calls += 1;
+      if (calls < 3) {
+        return { ok: false, status: 429, json: async () => ({ error: 'capacity' }), text: async () => 'capacity' } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => minimalResponse, text: async () => JSON.stringify(minimalResponse) } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 3, retryBackoffMs: 1, request: fn });
+    const r = await client.complete({ messages: [], tools: [] });
+    expect(calls).toBe(3);
+    expect(r.choices[0]?.message?.content).toBe('Got it.');
+  });
+
+  it('never retries a permanent 4xx (401 fails immediately)', async () => {
+    let calls = 0;
+    const fn = (async (): Promise<Response> => {
+      calls += 1;
+      return { ok: false, status: 401, json: async () => ({}), text: async () => 'unauthorized' } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 3, retryBackoffMs: 1, request: fn });
+    await expect(client.complete({ messages: [], tools: [] })).rejects.toMatchObject({ code: 'http_error' });
+    expect(calls).toBe(1);
+  });
+
+  it('gives up after maxRetries and throws the last error', async () => {
+    let calls = 0;
+    const fn = (async (): Promise<Response> => {
+      calls += 1;
+      return { ok: false, status: 503, json: async () => ({}), text: async () => 'overloaded' } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 2, retryBackoffMs: 1, request: fn });
+    await expect(client.complete({ messages: [], tools: [] })).rejects.toMatchObject({ code: 'http_error', message: /503/ });
+    expect(calls).toBe(3); // 1 initial + 2 retries
   });
 });
 

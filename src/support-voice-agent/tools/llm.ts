@@ -7,6 +7,12 @@ export interface LlmConfig {
   apiKey: string;           // empty string = unwired
   model: string;            // e.g. "gpt-4o", "llama3", "mistral"
   timeoutMs?: number;       // default 30_000
+  /** Retries for transient failures (429 / 5xx / network), exponential
+   *  backoff. Default 2; 0 disables. Latency budget: each retry gets the
+   *  full per-attempt timeout. */
+  maxRetries?: number;
+  /** Base backoff in ms (default 500): delay = base * 2^attempt (capped 8s). */
+  retryBackoffMs?: number;
   /** Injectable fetch for tests / proxies. */
   request?: typeof fetch;
 }
@@ -53,11 +59,13 @@ export interface LlmClient {
   complete(request: LlmChatRequest): Promise<LlmChatResponse>;
 }
 
-export class OpenAiCompatibleClient {
+export class OpenAiCompatibleClient implements LlmClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly model: string;
   private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBackoffMs: number;
   private readonly http: typeof fetch;
 
   constructor(config: LlmConfig) {
@@ -65,6 +73,8 @@ export class OpenAiCompatibleClient {
     this.apiKey = config.apiKey;
     this.model = config.model;
     this.timeoutMs = config.timeoutMs ?? 30_000;
+    this.maxRetries = config.maxRetries ?? 2;
+    this.retryBackoffMs = config.retryBackoffMs ?? 500;
     this.http = config.request ?? fetch;
   }
 
@@ -86,6 +96,36 @@ export class OpenAiCompatibleClient {
       max_tokens: request.max_tokens ?? 1024,
     };
 
+    // Retry transient failures (429 / 5xx / network) with exponential
+    // backoff — capacity-limited providers (e.g. inferX "all replicas at
+    // capacity") reject fast, so a short retry ladder recovers most
+    // requests. 4xx others are permanent and never retried.
+    let lastError: LlmError | undefined;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      if (attempt > 0) {
+        const delay = Math.min(this.retryBackoffMs * 2 ** (attempt - 1), 8_000);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+      try {
+        return await this.attempt(body);
+      } catch (e) {
+        if (!(e instanceof LlmError) || !this.isRetryable(e)) throw e;
+        lastError = e;
+      }
+    }
+    throw lastError ?? new LlmError('http_error', 'LLM request failed after retries');
+  }
+
+  private isRetryable(e: LlmError): boolean {
+    if (e.code === 'network') return true;
+    if (e.code === 'http_error') {
+      const status = Number(/^LLM HTTP (\d+)$/.exec(e.message)?.[1] ?? 0);
+      return status === 429 || status >= 500;
+    }
+    return false;
+  }
+
+  private async attempt(body: unknown): Promise<LlmChatResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 

@@ -23,6 +23,7 @@ import {
 } from '../src/understanding/faithfulness-eval.js';
 import { RETRIEVAL_SEED_DOCS } from '../src/fixtures/retrieval-golden-set.js';
 import { OpenAiCompatibleClient } from '../src/support-voice-agent/tools/llm.js';
+import { loadDotEnv } from '../src/env.js';
 import { existsSync } from 'node:fs';
 
 let minScore = 0.9;
@@ -62,6 +63,11 @@ const SET = {
   ],
 };
 
+// Auto-load .env (like configFromEnv does) so --judge llm actually wires
+// under `npm run` — and print the judge wiring honestly instead of letting
+// LlmClaimJudge silently degrade to lexical per-claim.
+loadDotEnv({ env: process.env });
+
 const kbPath = join(process.cwd(), 'var/knowledge/kb.json');
 const seededHere = !existsSync(kbPath);
 const kb = new FileBackedKnowledgeBase({ path: kbPath });
@@ -76,6 +82,10 @@ const llm = new OpenAiCompatibleClient({
   model: process.env['LLM_MODEL'] ?? '',
 });
 const answerer = new GroundedAnswerer({ knowledge: kb, llm });
+if (judgeKind === 'llm' && !llm.isWired()) {
+  console.error('error: --judge llm requires LLM_BASE_URL / LLM_API_KEY / LLM_MODEL to be wired (refusing to silently grade with the lexical judge)');
+  process.exit(2);
+}
 const judge = judgeKind === 'llm' ? new LlmClaimJudge(llm) : new LexicalClaimJudge();
 
 const report = await evaluateFaithfulness(answerer, SET, { judge });
