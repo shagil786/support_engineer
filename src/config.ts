@@ -49,16 +49,22 @@ export interface IntegrationsFromEnv {
   logs?: LogProvider;
   slack?: SlackNotifier;
   llm?: LlmConfig;
-  /** Learning layer opt-in. Off by default — the operator must enable it. */
-  learning?: { enabled: boolean };
+  /** Learning layer opt-in. Off by default — the operator must enable it.
+   *  Interval configures the LearningLoop schedule (default 15 min). */
+  learning?: { enabled: boolean; intervalMs?: number };
 }
 
 /** Learning layer opt-in: LEARNING_ENABLED=true|1 enables it. Defaults to
  *  false — the agent never learns or suggests policy changes unless the
- *  operator explicitly turns this on. */
-export function learningEnabledFromEnv(env: Env = process.env): { enabled: boolean } {
+ *  operator explicitly turns this on. LEARNING_INTERVAL_MS (>= 1000) sets
+ *  the LearningLoop tick interval. */
+export function learningEnabledFromEnv(env: Env = process.env): { enabled: boolean; intervalMs?: number } {
   const raw = envVar(env, 'LEARNING_ENABLED')?.toLowerCase();
-  return { enabled: raw === 'true' || raw === '1' };
+  const enabled = raw === 'true' || raw === '1';
+  if (!enabled) return { enabled: false };
+  const rawMs = Number(envVar(env, 'LEARNING_INTERVAL_MS') ?? 0);
+  const intervalMs = Number.isFinite(rawMs) && rawMs >= 1000 ? rawMs : undefined;
+  return { enabled, ...(intervalMs !== undefined ? { intervalMs } : {}) };
 }
 
 /** Build a JiraConfig from the environment, or `undefined` when any required

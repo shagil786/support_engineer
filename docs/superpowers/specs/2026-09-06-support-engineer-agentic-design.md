@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **364/364 tests green** across 47 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **374/374 tests green** across 48 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -113,6 +113,8 @@ the host of the meeting surface. See §15.
 │    ProcedureSpecs in cross-meeting memory)                   │
 │  • EfficacyTracker (procedure vs pipeline stats; live        │
 │    success-rate feedback; retires weak procedures)           │
+│  • LearningLoop (cron bootstrap: extract → scan → feedback   │
+│    → library refresh on a schedule; stage-failure tolerant)  │
 └──────────────────────────────────────────────────────────────┘
 
 Wiring (src/pipeline/): OrchestratedPipeline owns the legacy agent and routes
@@ -362,6 +364,16 @@ dents strong evidence instead of destroying it, and retires procedures whose
 blended rate falls below `minLiveSuccessRate` (default 0.9) from cross-meeting
 memory, returning those requests to the full dance.
 
+**`LearningLoop`** — the cron bootstrap that operates the loop
+(`scripts/learning-cron.ts`, opt-in via `LEARNING_ENABLED`, interval via
+`LEARNING_INTERVAL_MS`, default 15 min). One tick runs extract → scan →
+feedback → library refresh; every stage is individually failure-tolerant
+(errors are collected, the tick never throws), a reentrancy guard stops slow
+extractions from overlapping, and `start()` is idempotent. The loop owns the
+**durable** `EpisodicMemory` (`var/memory/procedures.json`) and its
+`library` is what the composition root passes to the SupervisorAgent as
+`procedures` — so procedures and retirements survive restarts.
+
 ### 7.2 SafetyNet-bounded invariants
 
 As drafted, all holds: SafetyNet in code; caps in code; PromotionGate in code;
@@ -399,7 +411,8 @@ src/
 │   ├── agents/       # base, triage, investigator, executor, reviewer
 │   └── tools/        # schemas, registry, jira, logs, runbook, slack, memory
 ├── learning/         # outcome-recorder, suggestion-queue, eval-runner,
-│                     # promotion-gate, knowledge-extractor, efficacy-tracker
+│                     # promotion-gate, knowledge-extractor, efficacy-tracker,
+│                     # learning-loop
 ├── surface/          # async/{jira-webhook, slack-mention, cron},
 │                     # proactive/anomaly-detector
 ├── pipeline/         # agent-pipeline.ts (OrchestratedPipeline)
@@ -409,10 +422,10 @@ src/
 ├── config.ts         # + learningEnabledFromEnv (LEARNING_ENABLED, default off)
 └── env.ts
 
-scripts/              # eval.ts (policy eval CLI), check-sqlite.ts (native ABI probe)
+scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts (loop entry)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 47 files, 364 tests (original 150 = regression floor)
+tests/                # 48 files, 374 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -433,7 +446,8 @@ over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 1. Event spine (14 tests) ✅  2. Understanding (29) ✅  3. Governance (45) ✅
 4. Execution (42) ✅  5. Learning + surfaces (33) ✅  — plus the wiring phase
 (10) ✅ and the enforcement phase (eval CLI + CI workflow + pre-push hook +
-learned-procedure short-circuit + efficacy feedback, 30 new tests) ✅. Every
+learned-procedure short-circuit + efficacy feedback + learning cron
+bootstrap, 47 new tests) ✅. Every
 phase ended typecheck-clean with the full suite green.
 
 ## 12. Open questions (unchanged in substance)
@@ -448,7 +462,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **364/364 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **374/374 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

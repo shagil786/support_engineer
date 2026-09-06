@@ -15,3 +15,4 @@ export {
   type EfficacyTrackerOptions,
   type ProcedureEfficacy,
 } from './efficacy-tracker.js';
+export { LearningLoop, type LearningLoopOptions, type TickResult } from './learning-loop.js';

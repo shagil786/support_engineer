@@ -19,4 +19,12 @@ describe('LEARNING_ENABLED', () => {
     expect(learningEnabledFromEnv({ LEARNING_ENABLED: 'yes' }).enabled).toBe(false);
     expect(learningEnabledFromEnv({ LEARNING_ENABLED: '' }).enabled).toBe(false);
   });
+
+  it('parses LEARNING_INTERVAL_MS only when enabled and valid (>= 1000)', () => {
+    expect(learningEnabledFromEnv({ LEARNING_ENABLED: 'true', LEARNING_INTERVAL_MS: '60000' })).toEqual({ enabled: true, intervalMs: 60000 });
+    expect(learningEnabledFromEnv({ LEARNING_ENABLED: 'true', LEARNING_INTERVAL_MS: '500' })).toEqual({ enabled: true });
+    expect(learningEnabledFromEnv({ LEARNING_ENABLED: 'true', LEARNING_INTERVAL_MS: 'nope' })).toEqual({ enabled: true });
+    expect(learningEnabledFromEnv({ LEARNING_ENABLED: 'true', LEARNING_INTERVAL_MS: undefined })).toEqual({ enabled: true });
+    expect(learningEnabledFromEnv({ LEARNING_INTERVAL_MS: '60000' })).toEqual({ enabled: false });
+  });
 });
