@@ -10,6 +10,7 @@
  * `support-voice-agent/heuristics.ts` — they are not duplicated here.
  */
 
+import { loadDotEnv } from './env';
 import * as h from './support-voice-agent/heuristics';
 import { SupportVoiceAgent } from './support-voice-agent/agent';
 import type { SupportVoiceAgentConfig } from './support-voice-agent/agent';
@@ -114,6 +115,9 @@ export function llmConfigFromEnv(env: Env = process.env): LlmConfig | undefined 
  *  AWS_REGION/AWS_ACCESS_KEY_* handling belongs to the host's AWS SDK setup.
  */
 export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
+  // When reading the real process environment, auto-load a repo-local .env
+  // (if present) first; real shell variables are never overwritten.
+  if (env === process.env) loadDotEnv({ env });
   const out: IntegrationsFromEnv = {};
 
   const jira = jiraConfigFromEnv(env);
