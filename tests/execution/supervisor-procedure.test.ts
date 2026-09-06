@@ -222,3 +222,100 @@ describe('SupervisorAgent procedure short-circuit', () => {
     expect(outcomes.some((s) => s.includes('via:procedure'))).toBe(true);
   });
 });
+
+describe('SupervisorAgent efficacy stats', () => {
+  it('stamps stats on agent_outcome for both pipeline and procedure sources', async () => {
+    const log = new JsonlFileEventLog({ baseDir: join(mkdtempSync(join(tmpdir(), 'stats-')), 'events') });
+    const sup = makeSupervisor({
+      procedures: await libraryWith(procedure),
+      toolRunner: new ToolRunner({
+        eventLog: log,
+        context: { logProvider: { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) } },
+      }),
+      eventLog: log,
+    });
+    // s-dance: no matching procedure (library has only query_logs-leading;
+    // this request IS query_logs... so use jira to force the dance).
+    await sup.run({
+      governed: governedExecute('jira_create_issue', { summary: 'x', issue_type: 'Bug' }),
+      context: ctx('s-dance'),
+      bundle,
+    });
+    // s-proc: matches the learned procedure.
+    await sup.run({ governed: governedExecute('query_logs', { query_string: 'x' }), context: ctx('s-proc'), bundle });
+
+    const danceStats: Array<Record<string, unknown>> = [];
+    for await (const e of log.query({ correlationId: 's-dance' })) {
+      if (e.kind === 'agent_outcome') danceStats.push((e as unknown as Record<string, unknown>).stats as Record<string, unknown>);
+    }
+    const procStats: Array<Record<string, unknown>> = [];
+    for await (const e of log.query({ correlationId: 's-proc' })) {
+      if (e.kind === 'agent_outcome') procStats.push((e as unknown as Record<string, unknown>).stats as Record<string, unknown>);
+    }
+    expect(danceStats).toHaveLength(1);
+    expect(danceStats[0]?.source).toBe('pipeline');
+    expect((danceStats[0]?.hops as number) >= 4).toBe(true);
+    expect(typeof danceStats[0]?.wallClockMs).toBe('number');
+    expect(procStats).toHaveLength(1);
+    expect(procStats[0]?.source).toBe('procedure');
+    expect(procStats[0]?.procedureId).toBe('proc-query-logs-jira-create-issue');
+    expect((procStats[0]?.hops as number)).toBe(0);
+  });
+
+  it('marks fallbackFrom when a procedure attempt degrades to the dance', async () => {
+    const log = new JsonlFileEventLog({ baseDir: join(mkdtempSync(join(tmpdir(), 'fb-')), 'events') });
+    const sup = makeSupervisor({
+      procedures: await libraryWith(procedure),
+      toolRunner: new ToolRunner({
+        eventLog: log,
+        context: { logProvider: { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: 'boom' }) } },
+      }),
+      eventLog: log,
+    });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'x' }), context: ctx('s-fb'), bundle });
+    expect(r.source).toBe('pipeline');
+    const events: Array<{ kind: string; stats?: Record<string, unknown>; finalResult: { ok: boolean } }> = [];
+    for await (const e of log.query({ correlationId: 's-fb' })) {
+      if (e.kind === 'agent_outcome') events.push(e as unknown as { kind: string; stats?: Record<string, unknown>; finalResult: { ok: boolean } });
+    }
+    // The degraded attempt must be visible: pipeline outcome carrying
+    // fallbackFrom, not a silently-procedure-looking success.
+    expect(events).toHaveLength(1);
+    expect(events[0]?.stats?.source).toBe('pipeline');
+    expect(events[0]?.stats?.fallbackFrom).toBe('proc-query-logs-jira-create-issue');
+    expect(events[0]?.finalResult.ok).toBe(false);
+  });
+
+  it('reports partial replay honestly instead of re-running the mutation', async () => {
+    const partial: ProcedureSpec = {
+      ...procedure,
+      id: 'proc-partial',
+      trigger: 'query_logs → query_logs → query_logs',
+      steps: [
+        { agent: 'investigator', tool: 'query_logs', args: { query_string: 'lead' } },
+        { agent: 'investigator', tool: 'query_logs', args: { query_string: 'hist-ok' } },
+        { agent: 'investigator', tool: 'query_logs', args: { query_string: 'hist-fail' } },
+      ],
+    };
+    // Second follow-on errors (its args make the provider fail); verification
+    // fails → replay is partial, but the approved action already ran.
+    const sup = makeSupervisor({
+      procedures: await libraryWith(partial),
+      toolRunner: new ToolRunner({
+        context: {
+          logProvider: {
+            name: 'fake',
+            query: async (q: { query: string }) =>
+              q.query === 'hist-fail'
+                ? { provider: 'splunk', rows: [], error: 'boom' }
+                : { provider: 'splunk', rows: [], error: undefined },
+          },
+        },
+      }),
+    });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'x' }), context: ctx('s-part'), bundle });
+    expect(r.ok).toBe(true);
+    expect(r.source).toBe('procedure');
+    expect(r.summary).toContain('partial replay');
+  });
+});

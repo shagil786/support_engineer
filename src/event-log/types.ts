@@ -62,7 +62,22 @@ export type DecisionEvent =
   | (BaseEvent & { kind: 'approval_granted'; approvalId: string; signerRole: string })
   | (BaseEvent & { kind: 'approval_timeout'; approvalId: string })
   | (BaseEvent & { kind: 'tool_call'; tool: ToolName; args: unknown; result: ToolResult; latencyMs: number; attempts: number })
-  | (BaseEvent & { kind: 'agent_outcome'; finalResult: { ok: boolean; summary: string } })
+  | (BaseEvent & {
+      kind: 'agent_outcome';
+      finalResult: { ok: boolean; summary: string };
+      /** Additive (optional) execution stats — present on events emitted by
+       *  the SupervisorAgent for efficacy measurement. Legacy events omit it. */
+      stats?: {
+        source: 'pipeline' | 'procedure';
+        hops: number;
+        toolCalls: number;
+        wallClockMs: number;
+        /** Set when source === 'procedure'. */
+        procedureId?: string;
+        /** Set when a procedure attempt degraded to the pipeline. */
+        fallbackFrom?: string;
+      };
+    })
   | (BaseEvent & { kind: 'policy_suggested'; suggestionId: string })
   | (BaseEvent & { kind: 'policy_promoted'; policyId: string; bundleSha: string; promotedBy: string[] })
   | (BaseEvent & { kind: 'knowledge_extracted'; procedureId: string });

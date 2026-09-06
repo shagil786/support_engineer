@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **342/342 tests green** across 45 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **353/353 tests green** across 46 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -111,6 +111,8 @@ the host of the meeting surface. See §15.
 │    M-of-N; only PolicyStore writer; policy_promoted event)   │
 │  • KnowledgeExtractor (successful tool sequences →           │
 │    ProcedureSpecs in cross-meeting memory)                   │
+│  • EfficacyTracker (procedure vs pipeline stats; live        │
+│    success-rate feedback; retires weak procedures)           │
 └──────────────────────────────────────────────────────────────┘
 
 Wiring (src/pipeline/): OrchestratedPipeline owns the legacy agent and routes
@@ -254,7 +256,10 @@ P0/P1 alerts auto-allowed; unknown tools default-deny.
 any failed verification ends the request `ok=false` with the root cause in
 `reason`. Caps (fail-closed): `maxHops=8`, `maxTokens=50k`, `maxWallClockMs=60s`,
 `maxIdenticalToolCalls=3` (reuses the SafetyNet's LoopDetector per
-correlationId). Emits `agent_outcome` (summary + hops + toolCalls + `via:pipeline|procedure`).
+correlationId). Emits `agent_outcome` (summary + hops + toolCalls + `via:pipeline|procedure`)
+with additive `stats` (`source`, `hops`, `toolCalls`, `wallClockMs`,
+`procedureId`, `fallbackFrom` on degraded attempts) consumed by the
+EfficacyTracker.
 When a `ProcedureLibrary` is wired, a learned procedure matching the governed
 action **replaces the dance**: the action replays with its current approved
 args (never historical ones), read-only follow-ons replay, mutating follow-ons
@@ -344,6 +349,15 @@ procedure's `successRate` (1.0 by construction). Produces `ProcedureSpec
 { id, trigger (tool sequence), steps, successRate, sampleSize }` into
 cross-meeting episodic memory.*Procedures are consumed at runtime by the Supervisor's `ProcedureLibrary` short-circuit (§6.1).*
 
+**`EfficacyTracker`** — the measurement half of the loop. Aggregates the
+Supervisor's `agent_outcome.stats` into a per-procedure + pipeline-baseline
+snapshot (persisted to `var/stats/procedure-stats.json`), then
+`applyFeedback()` blends live outcomes into each stored spec's `successRate`
+— `(extracted·rate + liveOk) / (extracted + liveServed)` — so one failure
+dents strong evidence instead of destroying it, and retires procedures whose
+blended rate falls below `minLiveSuccessRate` (default 0.9) from cross-meeting
+memory, returning those requests to the full dance.
+
 ### 7.2 SafetyNet-bounded invariants
 
 As drafted, all holds: SafetyNet in code; caps in code; PromotionGate in code;
@@ -381,7 +395,7 @@ src/
 │   ├── agents/       # base, triage, investigator, executor, reviewer
 │   └── tools/        # schemas, registry, jira, logs, runbook, slack, memory
 ├── learning/         # outcome-recorder, suggestion-queue, eval-runner,
-│                     # promotion-gate, knowledge-extractor
+│                     # promotion-gate, knowledge-extractor, efficacy-tracker
 ├── surface/          # async/{jira-webhook, slack-mention, cron},
 │                     # proactive/anomaly-detector
 ├── pipeline/         # agent-pipeline.ts (OrchestratedPipeline)
@@ -394,7 +408,7 @@ src/
 scripts/              # eval.ts (policy eval CLI), check-sqlite.ts (native ABI probe)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 45 files, 342 tests (original 150 = regression floor)
+tests/                # 46 files, 353 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -414,8 +428,9 @@ over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 
 1. Event spine (14 tests) ✅  2. Understanding (29) ✅  3. Governance (45) ✅
 4. Execution (42) ✅  5. Learning + surfaces (33) ✅  — plus the wiring phase
-(10) ✅ and the enforcement phase (eval CLI + CI workflow + pre-push hook, 4
-new tests) ✅. Every phase ended typecheck-clean with the full suite green.
+(10) ✅ and the enforcement phase (eval CLI + CI workflow + pre-push hook +
+learned-procedure short-circuit + efficacy feedback, 30 new tests) ✅. Every
+phase ended typecheck-clean with the full suite green.
 
 ## 12. Open questions (unchanged in substance)
 
@@ -426,7 +441,7 @@ new tests) ✅. Every phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **342/342 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **353/353 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

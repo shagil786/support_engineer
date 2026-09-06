@@ -107,12 +107,22 @@ export class SupervisorAgent {
     const { governed, context, bundle } = input;
     let hops = 0;
     let toolCalls = 0;
+    /** Procedure id when a replay was attempted but degraded to the dance. */
+    let attemptedProcedureId: string | undefined;
 
     const fail = async (
       reason: string,
       source: 'pipeline' | 'procedure' = 'pipeline',
     ): Promise<SupervisorRunOutput> => {
-      await this.emitOutcome(context.correlationId, false, reason, hops, toolCalls, source);
+      await this.emitOutcome(context.correlationId, {
+        ok: false,
+        summary: `Request not completed: ${reason}`,
+        hops,
+        toolCalls,
+        source,
+        wallClockMs: this.now() - started,
+        ...(attemptedProcedureId ? { fallbackFrom: attemptedProcedureId } : {}),
+      });
       return { ok: false, hops, toolCalls, reason, summary: `Request not completed: ${reason}`, source };
     };
     const overWallClock = () => this.now() - started >= this.maxWallClockMs;
@@ -136,6 +146,7 @@ export class SupervisorAgent {
       try {
         const match = await this.procedures.match(governed.action.tool);
         if (match) {
+          attemptedProcedureId = match.procedure.id;
           // The request's own action, with its CURRENT approved args —
           // never the procedure's historical ones.
           const main = await this.executeStep(governed.action.tool, governed.action.args, context, governed.decision);
@@ -160,7 +171,15 @@ export class SupervisorAgent {
             const summary =
               `Completed via learned procedure ${match.procedure.id} (${toolCalls} tool call(s), sampleSize=${match.procedure.sampleSize}).` +
               (replayOk ? '' : ' (partial replay: a follow-on step failed verification)');
-            await this.emitOutcome(context.correlationId, true, summary, hops, toolCalls, 'procedure');
+            await this.emitOutcome(context.correlationId, {
+              ok: true,
+              summary,
+              hops,
+              toolCalls,
+              source: 'procedure',
+              wallClockMs: this.now() - started,
+              procedureId: match.procedure.id,
+            });
             this.loops.clear({ correlationId: context.correlationId });
             return { ok: true, hops, toolCalls, summary, source: 'procedure' };
           }
@@ -225,7 +244,15 @@ export class SupervisorAgent {
     const summary = ok
       ? `Handled '${triage.decision.subKind}' with ${toolCalls} tool call(s). ${final.decision.feedback}`.trim()
       : `Reviewer rejected: ${final.decision.feedback}`;
-    await this.emitOutcome(context.correlationId, ok, summary, hops, toolCalls);
+    await this.emitOutcome(context.correlationId, {
+      ok,
+      summary,
+      hops,
+      toolCalls,
+      source: 'pipeline',
+      wallClockMs: this.now() - started,
+      ...(attemptedProcedureId ? { fallbackFrom: attemptedProcedureId } : {}),
+    });
     this.loops.clear({ correlationId: context.correlationId });
     return { ok, hops, toolCalls, summary, source: 'pipeline' };
   }
@@ -256,11 +283,16 @@ export class SupervisorAgent {
 
   private async emitOutcome(
     correlationId: string,
-    ok: boolean,
-    summary: string,
-    hops: number,
-    toolCalls: number,
-    source: 'pipeline' | 'procedure' = 'pipeline',
+    o: {
+      ok: boolean;
+      summary: string;
+      hops: number;
+      toolCalls: number;
+      source: 'pipeline' | 'procedure';
+      wallClockMs: number;
+      procedureId?: string;
+      fallbackFrom?: string;
+    },
   ): Promise<void> {
     if (!this.eventLog) return;
     await this.eventLog.append({
@@ -269,7 +301,15 @@ export class SupervisorAgent {
       layer: 'execution',
       source: 'internal',
       kind: 'agent_outcome',
-      finalResult: { ok, summary: `${summary} (hops=${hops}, toolCalls=${toolCalls}, via:${source})` },
+      finalResult: { ok: o.ok, summary: `${o.summary} (hops=${o.hops}, toolCalls=${o.toolCalls}, via:${o.source})` },
+      stats: {
+        source: o.source,
+        hops: o.hops,
+        toolCalls: o.toolCalls,
+        wallClockMs: o.wallClockMs,
+        ...(o.procedureId !== undefined ? { procedureId: o.procedureId } : {}),
+        ...(o.fallbackFrom !== undefined ? { fallbackFrom: o.fallbackFrom } : {}),
+      },
     }).catch(() => {});
   }
 }

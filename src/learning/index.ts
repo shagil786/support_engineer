@@ -9,3 +9,9 @@ export {
 } from './knowledge-extractor.js';
 export { EvalRunner, type EvalResult, type EvalRunnerOptions } from './eval-runner.js';
 export { runSafetyNetRegression } from './safety-net-regression.js';
+export {
+  EfficacyTracker,
+  type EfficacySnapshot,
+  type EfficacyTrackerOptions,
+  type ProcedureEfficacy,
+} from './efficacy-tracker.js';

@@ -73,6 +73,12 @@ export class EpisodicMemory {
     });
   }
 
+  /** Drop cross-scope records matching a predicate (e.g. retiring a learned
+   *  procedure). Returns how many were removed. */
+  async purgeCross(predicate: (r: import('./vector.js').MemoryRecord) => boolean): Promise<number> {
+    return this.cross.purge(predicate);
+  }
+
   size(scope: EpisodicScope): number {
     return scope === 'cross' ? this.cross.size() : this.perMeeting.size();
   }
