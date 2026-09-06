@@ -1,0 +1,52 @@
+# policies/eval/scenarios.yaml — eval scenarios for the PromotionGate.
+# Each scenario is (envelope, action, expected decision) evaluated against
+# the candidate bundle. Every scenario must pass before a promotion lands.
+# Tool names bind to the real ToolName union.
+scenarios:
+  - id: read_only_log_query_allowed
+    intent: { kind: meeting_response, subKind: question }
+    entities: { ticketKeys: [SUPPORT-7] }
+    action: { tool: query_logs, args: { query_string: errors } }
+    expect: allow
+
+  - id: destructive_runbook_requires_approval
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-all] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-all } }
+    expect: require_approval
+
+  - id: non_destructive_runbook_allowed
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-checkout] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-checkout } }
+    expect: allow
+
+  - id: ticket_creation_allowed
+    intent: { kind: meeting_response, subKind: feedback }
+    entities: {}
+    action: { tool: jira_create_issue, args: { summary: checkout 502s, issue_type: Bug } }
+    expect: allow
+
+  - id: p1_alert_auto_incident
+    intent: { kind: proactive_alert, subKind: incident }
+    entities: { severity: P1 }
+    action: { tool: jira_create_issue, args: { summary: down } }
+    expect: allow
+
+  - id: p1_alert_meeting_interrupt_allowed
+    intent: { kind: proactive_alert, subKind: incident }
+    entities: { severity: P0 }
+    action: { tool: meeting_interrupt, args: { message: api down } }
+    expect: allow
+
+  - id: credit_card_in_output_denied
+    intent: { kind: meeting_response, subKind: question }
+    entities: {}
+    action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'card 4111 1111 1111 1111' } }
+    expect: deny
+
+  - id: unknown_tool_default_denied
+    intent: { kind: meeting_response, subKind: question }
+    entities: {}
+    action: { tool: query_logs, args: { query_string: x } }
+    expect: allow
