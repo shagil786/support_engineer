@@ -3,7 +3,7 @@
 **Status:** Implemented (v1) — this document describes the system **as built**
 **Date:** 2026-09-06 (revised after implementation)
 **Repo:** `support_engineer` (Freebuff Desktop / Support Voice Agent)
-**Suite at time of writing:** typecheck clean, **374/374 tests green** across 48 files (the original 150 remain as the regression floor)
+**Suite at time of writing:** typecheck clean, **380/380 tests green** across 50 files (the original 150 remain as the regression floor)
 
 ---
 
@@ -118,8 +118,12 @@ the host of the meeting surface. See §15.
 └──────────────────────────────────────────────────────────────┘
 
 Wiring (src/pipeline/): OrchestratedPipeline owns the legacy agent and routes
-per §15. Event spine (src/event-log/): append-only JSONL under var/events/.
-Surfaces (src/surface/): async (jira/slack/cron parsers) + proactive (anomaly).
+per §15. **Composition root (src/bootstrap.ts): `createPlatform` builds the
+whole platform — integrations, policy, SafetyNet (unknown speaker = guest,
+`approver` = admin), durable learning — and `scripts/serve.ts` runs it as a
+console host with a `:learning tick` command.** Event spine (src/event-log/):
+append-only JSONL under var/events/. Surfaces (src/surface/): async
+(jira/slack/cron parsers) + proactive (anomaly).
 ```
 
 ### 3.1 Surface modes
@@ -416,16 +420,17 @@ src/
 ├── surface/          # async/{jira-webhook, slack-mention, cron},
 │                     # proactive/anomaly-detector
 ├── pipeline/         # agent-pipeline.ts (OrchestratedPipeline)
+├── bootstrap.ts      # createPlatform — the production composition root
 ├── support-voice-agent/   # UNCHANGED legacy agent + bridge + integrations
 ├── fixtures/         # pre-existing test fixtures (legacy)
 ├── index.ts          # pre-existing legacy export surface
 ├── config.ts         # + learningEnabledFromEnv (LEARNING_ENABLED, default off)
 └── env.ts
 
-scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts (loop entry)
+scripts/              # eval.ts, check-sqlite.ts, learning-cron.ts, serve.ts (console host)
 .githooks/pre-push        # blocks pushes of regressed policy bundles (see §16)
 .github/workflows/ci.yml  # CI: typecheck + tests + eval, Node 22/24 (see §16)
-tests/                # 48 files, 374 tests (original 150 = regression floor)
+tests/                # 50 files, 380 tests (original 150 = regression floor)
 var/                  # runtime data (gitignored): events/, outcomes/
 ```
 
@@ -447,7 +452,8 @@ over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
 4. Execution (42) ✅  5. Learning + surfaces (33) ✅  — plus the wiring phase
 (10) ✅ and the enforcement phase (eval CLI + CI workflow + pre-push hook +
 learned-procedure short-circuit + efficacy feedback + learning cron
-bootstrap, 47 new tests) ✅. Every
+bootstrap + production composition root (createPlatform/serve), 53 new
+tests) ✅. Every
 phase ended typecheck-clean with the full suite green.
 
 ## 12. Open questions (unchanged in substance)
@@ -462,7 +468,7 @@ phase ended typecheck-clean with the full suite green.
 
 ## 13. Success criteria — verified
 
-- Typecheck clean; **374/374 tests** (150-test regression floor intact). ✅
+- Typecheck clean; **380/380 tests** (150-test regression floor intact). ✅
 - Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅

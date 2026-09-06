@@ -30,8 +30,12 @@ export interface LearningLoopOptions {
   eventLog: EventLog;
   /** Directory of OutcomeRecord JSONs (OutcomeRecorder's output). */
   outcomesDir: string;
-  /** Durable snapshot path for cross-scope episodic memory. */
+  /** Durable snapshot path for cross-scope episodic memory. Ignored when an
+   *  explicit `episodic` instance is supplied (composition roots share one). */
   crossPath: string;
+  /** Pre-built shared episodic memory (e.g. the platform's durable one).
+   *  When omitted, a durable EpisodicMemory over `crossPath` is constructed. */
+  episodic?: EpisodicMemory;
   /** Where EfficacyTracker persists its snapshot (best-effort). */
   statsPath?: string;
   /** Blended success rate below which procedures are retired. */
@@ -73,7 +77,7 @@ export class LearningLoop {
 
   constructor(opts: LearningLoopOptions) {
     this.now = opts.now ?? Date.now;
-    this.episodic = new EpisodicMemory({ crossPath: opts.crossPath, now: opts.now });
+    this.episodic = opts.episodic ?? new EpisodicMemory({ crossPath: opts.crossPath, ...(opts.now ? { now: opts.now } : {}) });
     this.extractor = new KnowledgeExtractor({
       outcomesDir: opts.outcomesDir,
       episodic: this.episodic,
