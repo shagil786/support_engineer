@@ -61,7 +61,7 @@ export abstract class LlmAgent<T extends z.ZodType> {
       tools: [],
       tool_choice: 'none',
       temperature: 0,
-      max_tokens: 400,
+      max_tokens: 4000,
     });
     return String(r.choices[0]?.message?.content ?? '');
   }

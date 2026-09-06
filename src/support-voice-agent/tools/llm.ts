@@ -87,14 +87,20 @@ export class OpenAiCompatibleClient implements LlmClient {
       throw new LlmError('unwired', 'LLM not configured — set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL');
     }
 
-    const body = {
+    // Some OpenAI-compatible gateways (e.g. inferX) reject `tools: []` —
+    // "provide at least one tool or omit the field entirely" — so empty
+    // tool arrays are omitted along with tool_choice.
+    const hasTools = request.tools.length > 0;
+    const body: Record<string, unknown> = {
       model: this.model,
       messages: request.messages,
-      tools: request.tools,
-      tool_choice: request.tool_choice ?? 'auto',
       temperature: request.temperature ?? 0.2,
       max_tokens: request.max_tokens ?? 1024,
     };
+    if (hasTools) {
+      body['tools'] = request.tools;
+      body['tool_choice'] = request.tool_choice ?? 'auto';
+    }
 
     // Retry transient failures (429 / 5xx / network) with exponential
     // backoff — capacity-limited providers (e.g. inferX "all replicas at

@@ -108,7 +108,7 @@ export class GroundedAnswerer {
           tools: [],
           tool_choice: 'none',
           temperature: 0,
-          max_tokens: 400,
+          max_tokens: 4000,
         });
         const text = String(raw.choices[0]?.message?.content ?? '');
         const parsed = AnswerSchema.safeParse(safeJson(text));
@@ -168,6 +168,7 @@ const SYSTEM_PROMPT = `You answer support-engineer questions from a numbered CON
 
 Rules:
 - Use ONLY facts present in the context. Never use prior knowledge.
+- Quote the context closely; do not add specifics it does not state (e.g. do not turn "escalate to X" into "X gets paged").
 - Cite the context numbers supporting your answer in "citations".
 - If the context does not contain the answer, do not invent it: set "citations" to [] and put a one-sentence "the sources do not cover this" reply in "answer".
 - Reply with JSON only: {"answer": string, "citations": number[]}`;

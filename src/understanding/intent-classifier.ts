@@ -82,7 +82,9 @@ export class IntentClassifier {
 
     let raw: string;
     try {
-      const resp = await this.llm.complete({ messages, tools: [], tool_choice: 'none', temperature: 0, max_tokens: 400 });
+      // Generous budget: reasoning models spend tokens before content;
+      // too small a cap yields empty content (malformed → honest fallback).
+      const resp = await this.llm.complete({ messages, tools: [], tool_choice: 'none', temperature: 0, max_tokens: 4000 });
       const content = resp.choices[0]?.message?.content;
       if (typeof content !== 'string') {
         return this.useFallback(input, 'no_content');
