@@ -28,6 +28,10 @@ export interface IntentEnvelope {
     services?: string[];
     severity?: Severity;
     speakerId?: string;
+    /** Provider-confirmed destructiveness of the referenced runbooks.
+     *  Additive, optional flag — envelopes without it fall back to the
+     *  id-scope heuristic in policy evaluation. */
+    runbookDestructive?: boolean;
   };
   rawContext: { source: EventSource; ts: number; payload: unknown };
 }

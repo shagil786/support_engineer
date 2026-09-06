@@ -64,10 +64,14 @@ export class IntentClassifier {
     this.now = opts.now ?? Date.now;
   }
 
-  async classify(input: ClassifyInput): Promise<IntentEnvelope> {
+  /** Classify one input. `join.correlationId` lets a caller (e.g. the
+   *  orchestrated pipeline) stamp the emitted `understanding` event with the
+   *  request's own correlation id so the whole trail joins; when omitted,
+   *  a fresh id is minted (previous behavior). */
+  async classify(input: ClassifyInput, join?: { correlationId?: string }): Promise<IntentEnvelope> {
     // Fast-path: an unwired LLM is a configured condition, not an error.
     if (!this.llm.isWired()) {
-      return this.useFallback(input, 'unwired');
+      return this.useFallback(input, 'unwired', join?.correlationId);
     }
 
     const ts = this.now();
@@ -101,24 +105,24 @@ export class IntentClassifier {
 
     const result = IntentSchema.safeParse(parsed);
     if (!result.success) {
-      return this.useFallback(input, 'schema_invalid');
+      return this.useFallback(input, 'schema_invalid', join?.correlationId);
     }
 
     const envelope = result.data as IntentEnvelope;
-    await this.emitEvent(input, envelope, ts, 'llm');
+    await this.emitEvent(input, envelope, ts, 'llm', join?.correlationId);
     return envelope;
   }
 
-  private async useFallback(input: ClassifyInput, reason: string): Promise<IntentEnvelope> {
+  private async useFallback(input: ClassifyInput, reason: string, correlationIdOverride?: string): Promise<IntentEnvelope> {
     const env = this.fallback.classify(input);
-    await this.emitEvent(input, env, this.now(), reason);
+    await this.emitEvent(input, env, this.now(), reason, correlationIdOverride);
     return env;
   }
 
-  private async emitEvent(input: ClassifyInput, envelope: IntentEnvelope, ts: number, via: string): Promise<void> {
+  private async emitEvent(input: ClassifyInput, envelope: IntentEnvelope, ts: number, via: string, correlationIdOverride?: string): Promise<void> {
     if (!this.eventLog) return;
     await this.eventLog.append({
-      correlationId: correlationId(ts),
+      correlationId: correlationIdOverride ?? correlationId(ts),
       ts,
       layer: 'understanding',
       source: input.source as EventSource,

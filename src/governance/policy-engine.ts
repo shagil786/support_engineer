@@ -115,9 +115,12 @@ export class PolicyEngine {
     return true;
   }
 
-  /** A runbook is destructive when one of the envelope's runbook ids carries
-   *  the explicit prod/all scope markers used by today's runbook catalog. */
+  /** A runbook is destructive when the provider confirmed it (flag on the
+   *  envelope) or — for envelopes without the flag — when one of the
+   *  referenced ids carries the prod/all scope marker. */
   private destructiveRunbook(env: IntentEnvelope): boolean {
+    if (env.entities.runbookDestructive === true) return true;
+    if (env.entities.runbookDestructive === false) return false;
     return (env.entities.runbookIds ?? []).some((id) => /\b(all|prod(uction)?)\b/i.test(id));
   }
 }

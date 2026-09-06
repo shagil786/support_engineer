@@ -195,6 +195,12 @@ export class SupportVoiceAgent {
     this.emitter.emit('log', { level: 'info', message: `Mode set to '${mode}'` });
   }
 
+  /** True while the agent is muted ("Agent, shut up") at time `ts`. Surfaces
+   *  the mute state so higher orchestration layers can respect it. */
+  isMuted(ts = this.cfg.now()): boolean {
+    return this.mutedUntil > ts;
+  }
+
   getTranscript(): Utterance[] {
     return [...this.conversation];
   }
