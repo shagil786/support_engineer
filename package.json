@@ -14,6 +14,8 @@
     "eval": "tsx scripts/eval.ts",
     "eval:retrieval": "tsx scripts/retrieval-eval.ts",
     "eval:faithfulness": "tsx scripts/faithfulness-eval.ts",
+    "learn": "LEARNING_ENABLED=true tsx scripts/learning-cron.ts",
+    "learn:once": "LEARNING_ENABLED=true tsx scripts/learning-cron.ts --once",
     "prepare": "test -d .git && git config core.hooksPath .githooks || true",
     "demo": "tsx demo/cli.ts"
   },

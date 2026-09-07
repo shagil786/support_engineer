@@ -59,6 +59,7 @@ if (process.argv.includes('--reindex')) {
   process.exit(0);
 }
 
+loop.onTick = (r) => report('tick', r);
 loop.start(intervalMs);
 console.log(`[learning] loop scheduled every ${intervalMs}ms (crossPath: durable)`);
 const shutdown = (signal: string): void => {

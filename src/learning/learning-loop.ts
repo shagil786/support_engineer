@@ -40,6 +40,9 @@ export interface LearningLoopOptions {
   statsPath?: string;
   /** Blended success rate below which procedures are retired. */
   minLiveSuccessRate?: number;
+  /** Observability hook: fired after every SCHEDULED tick completes (see
+   *  the class property below — manual tick() calls do not fire it). */
+  onTick?: (r: TickResult) => void;
   /** Minimum occurrences before a sequence becomes a procedure. */
   minClusterSize?: number;
   now?: () => number;
@@ -71,12 +74,18 @@ export class LearningLoop {
   /** When true, start() ticks once immediately before scheduling. */
   runOnStart = false;
 
+  /** Observability hook for scheduled ticks: start() reports every automatic
+   *  tick result here (manual tick() calls do not fire it — the caller
+   *  already holds the result). Fired after each scheduled tick completes. */
+  onTick?: (r: TickResult) => void;
+
   private timer: ReturnType<typeof setInterval> | undefined;
   private ticking = false;
   private readonly now: () => number;
 
   constructor(opts: LearningLoopOptions) {
     this.now = opts.now ?? Date.now;
+    this.onTick = opts.onTick;
     this.episodic = opts.episodic ?? new EpisodicMemory({ crossPath: opts.crossPath, ...(opts.now ? { now: opts.now } : {}) });
     this.extractor = new KnowledgeExtractor({
       outcomesDir: opts.outcomesDir,
@@ -139,7 +148,17 @@ export class LearningLoop {
   start(intervalMs: number): void {
     this.stop();
     if (this.runOnStart) void this.tick();
-    this.timer = setInterval(() => void this.tick(), intervalMs);
+    this.timer = setInterval(() => {
+      void this.tick().then((r) => {
+        if (this.onTick) {
+          try {
+            this.onTick(r);
+          } catch {
+            // A failing observer must never break the schedule.
+          }
+        }
+      });
+    }, intervalMs);
   }
 
   stop(): void {

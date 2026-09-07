@@ -138,6 +138,20 @@ describe('LearningLoop.tick', () => {
 });
 
 describe('LearningLoop scheduling', () => {
+  it('reports scheduled ticks to onTick (scheduled ticks were silent before)', async () => {
+    const seen: Array<{ extracted: number }> = [];
+    const loop = new LearningLoop({
+      eventLog: new JsonlFileEventLog({ baseDir: join(dir, 'ev-onTick') }),
+      outcomesDir: join(dir, 'outcomes-empty'),
+      crossPath: join(dir, 'memory', 'ontick.json'),
+      onTick: (r) => seen.push({ extracted: r.extracted }),
+    });
+    loop.start(30);
+    await new Promise((r) => setTimeout(r, 150));
+    loop.stop();
+    expect(seen.length).toBeGreaterThanOrEqual(1);
+    expect(seen[0]!.extracted).toBe(0);
+  });
   it('start() ticks on the interval and stop() ends the schedule', async () => {
     vi.useFakeTimers();
     const loop = makeLoop();
