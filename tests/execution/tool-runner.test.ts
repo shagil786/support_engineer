@@ -63,6 +63,26 @@ describe('ToolRunner', () => {
     expect(r.ok === false && r.error).toMatch(/invalid args/i);
   });
 
+  it('emits a tool_call event even when args fail schema validation (audit trail completeness)', async () => {
+    // Regression: the schema-invalid early return skipped emitEvent, so an
+    // agent's malformed planned call vanished from history — the learning
+    // loop and any auditor saw a failure with no visible cause.
+    const log = new JsonlFileEventLog({ baseDir: dir });
+    const runner = new ToolRunner({ context: {}, eventLog: log });
+    const ga: GovernedAction = {
+      kind: 'execute',
+      decision: allowDecision,
+      action: { tool: 'query_logs', args: { query: 'wrong field name' } },
+    };
+    const r = await runner.run(ga, execCtx());
+    expect(r.ok).toBe(false);
+    const events: Array<{ kind: string; tool?: string; result?: { error?: string } }> = [];
+    for await (const e of log.query({})) events.push(e as never);
+    const tc = events.find((e) => e.kind === 'tool_call');
+    expect(tc?.tool).toBe('query_logs');
+    expect(tc?.result?.error).toMatch(/invalid args/i);
+  });
+
   it('runs a valid execute and emits a tool_call event', async () => {
     const log = new JsonlFileEventLog({ baseDir: dir });
     const runner = new ToolRunner({

@@ -111,6 +111,11 @@ export class ToolRunner {
 
     const parsed = await entry.schema.safeParseAsync(action.args);
     if (!parsed.success) {
+      // Emit before returning: a schema-invalid call is still a tool-call
+      // attempt — the audit trail (and the learning loop's outcome records)
+      // must see it, or agent mistakes vanish from history (found live:
+      // investigation steps failed 'invalid args' with no tool_call event).
+      await this.emitEvent(ctx.correlationId, action.tool, action.args, { ok: false, error: 'invalid args', detail: parsed.error.flatten() }, 0, 1);
       return { ok: false, error: 'invalid args', detail: parsed.error.flatten() };
     }
 
