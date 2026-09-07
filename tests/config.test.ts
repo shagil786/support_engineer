@@ -73,6 +73,16 @@ describe('configFromEnv', () => {
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '30000' }).approvalTimeoutMs).toBe(30_000);
   });
 
+  it('parses SUPERVISOR_* caps from env (with a sane floor, absent by default)', () => {
+    expect(configFromEnv({}).supervisorCaps).toBeUndefined();
+    expect(configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: '500' }).supervisorCaps).toBeUndefined();
+    expect(configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: 'nope' }).supervisorCaps).toBeUndefined();
+    expect(configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: '180000' }).supervisorCaps).toEqual({ maxWallClockMs: 180_000 });
+    expect(
+      configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: '180000', SUPERVISOR_MAX_HOPS: '12', SUPERVISOR_MAX_TOKENS: '99000', SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS: '5' }).supervisorCaps,
+    ).toEqual({ maxWallClockMs: 180_000, maxHops: 12, maxTokens: 99_000, maxIdenticalToolCalls: 5 });
+  });
+
   it('parses EMBEDDINGS_* all-or-nothing, with optional dim (>= 8)', () => {
     expect(configFromEnv({}).embeddings).toBeUndefined();
     // Partial config throws — never a silently half-wired embedder.

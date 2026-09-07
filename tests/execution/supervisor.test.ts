@@ -70,7 +70,7 @@ describe('SupervisorAgent', () => {
     const spyLlm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
     (spyLlm as unknown as { isWired: () => boolean }).isWired = () => true;
     (spyLlm as unknown as { complete: unknown }).complete = async (input: { messages: Array<{ role: string; content: string }> }) => {
-      const parsed = JSON.parse(input.messages[1].content) as { recent: Array<{ kind: string }> };
+      const parsed = JSON.parse(input.messages[1]?.content ?? '{}') as { recent: Array<{ kind: string }> };
       seen.push(parsed.recent.map((e) => e.kind));
       return { choices: [{ message: { content: JSON.stringify({ verdict: 'pass', feedback: 'trace seen' }) } }] };
     };

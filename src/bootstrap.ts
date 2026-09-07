@@ -86,6 +86,14 @@ export interface PlatformOptions {
   /** Embedding backend for the knowledge base (absent = built-in hash
    *  embedder). Provided by configFromEnv as `embeddings` in env-wired hosts. */
   embeddings?: EmbeddingsConfig;
+  /** Supervisor caps (absent keys = the supervisor's built-in defaults).
+   *  Provided by configFromEnv as `supervisorCaps` in env-wired hosts. */
+  supervisorCaps?: {
+    maxHops?: number;
+    maxTokens?: number;
+    maxWallClockMs?: number;
+    maxIdenticalToolCalls?: number;
+  };
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
   /** Where pipeline speech is delivered (TTS bridge / console). */
@@ -217,6 +225,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     reviewer: new ReviewerAgent({ llm }),
     toolRunner,
     eventLog,
+    ...opts.supervisorCaps,
     ...(library ? { procedures: library } : {}),
     ...(now ? { now } : {}),
   });

@@ -121,6 +121,14 @@ describe('createPlatform', () => {
     expect(outcome?.finalResult.summary).toContain('via:procedure');
   });
 
+  it('supervisorCaps flow through to the supervisor (maxHops=1 fails the dance fast)', async () => {
+    const p = createPlatform({ dataDir: dir, logProvider, runbooks, supervisorCaps: { maxHops: 1 } });
+    const r = await p.pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
+    expect(r.routed).toBe('pipeline');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/hop cap/);
+  });
+
   it('two security layers: guests are vetoed by the SafetyNet; approvers stage for approval', async () => {
     const p = createPlatform({
       dataDir: dir,

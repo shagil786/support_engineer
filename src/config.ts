@@ -55,6 +55,11 @@ export interface IntegrationsFromEnv {
   /** APPROVAL_TIMEOUT_MS (>= 1000): how long a staged approval stays
    *  pending before it times out. Absent = the gate's built-in default. */
   approvalTimeoutMs?: number;
+  /** Supervisor caps from env: SUPERVISOR_MAX_WALLCLOCK_MS (>= 1000),
+   *  SUPERVISOR_MAX_HOPS (>= 1), SUPERVISOR_MAX_TOKENS (>= 1000),
+   *  SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS (>= 1). Absent keys = the
+   *  supervisor's built-in defaults. */
+  supervisorCaps?: import('./bootstrap.js').PlatformOptions['supervisorCaps'];
   /** Embedding backend for the knowledge base (absent = built-in hash
    *  embedder). Remote: OpenAI-compatible /embeddings (baseUrl/apiKey/model
    *  required together). Local: an in-process transformers.js model — no
@@ -211,6 +216,22 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
 
   const approvalRawMs = Number(envVar(env, 'APPROVAL_TIMEOUT_MS') ?? 0);
   if (Number.isFinite(approvalRawMs) && approvalRawMs >= 1000) out.approvalTimeoutMs = approvalRawMs;
+
+  // Supervisor caps: each env var is optional and floor-checked independently,
+  // so operators can raise just the wall clock for slow LLM providers.
+  const num = (name: string, min: number) => {
+    const v = Number(envVar(env, name) ?? NaN);
+    return Number.isFinite(v) && v >= min ? v : undefined;
+  };
+  const caps = {
+    ...(num('SUPERVISOR_MAX_WALLCLOCK_MS', 1000) !== undefined ? { maxWallClockMs: num('SUPERVISOR_MAX_WALLCLOCK_MS', 1000) } : {}),
+    ...(num('SUPERVISOR_MAX_HOPS', 1) !== undefined ? { maxHops: num('SUPERVISOR_MAX_HOPS', 1) } : {}),
+    ...(num('SUPERVISOR_MAX_TOKENS', 1000) !== undefined ? { maxTokens: num('SUPERVISOR_MAX_TOKENS', 1000) } : {}),
+    ...(num('SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS', 1) !== undefined
+      ? { maxIdenticalToolCalls: num('SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS', 1) }
+      : {}),
+  } as NonNullable<typeof out.supervisorCaps>;
+  if (Object.keys(caps).length > 0) out.supervisorCaps = caps;
 
   const embeddings = embeddingsFromEnv(env);
   if (embeddings) out.embeddings = embeddings;
