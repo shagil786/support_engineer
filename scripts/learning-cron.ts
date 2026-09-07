@@ -2,7 +2,9 @@
 /**
  * learning-cron — runs the learning loop on a schedule (spec §7.4 wiring).
  *
- *   LEARNING_ENABLED=true npx tsx scripts/learning-cron.ts
+ *   LEARNING_ENABLED=true npx tsx scripts/learning-cron.ts          # scheduled loop
+ *   LEARNING_ENABLED=true npx tsx scripts/learning-cron.ts --once   # single tick
+ *   LEARNING_ENABLED=true npx tsx scripts/learning-cron.ts --reindex # re-embed the durable store after an embedder swap
  *
  * Env:
  *   LEARNING_ENABLED       required opt-in (off by default)
@@ -14,7 +16,7 @@
  */
 import { resolve } from 'node:path';
 import { learningEnabledFromEnv } from '../src/config.js';
-import { LearningLoop } from '../src/learning/learning-loop.js';
+import { LearningLoop, reindexCrossMemory } from '../src/learning/learning-loop.js';
 import { JsonlFileEventLog } from '../src/event-log/log.js';
 
 const env = process.env;
@@ -46,6 +48,14 @@ const report = (label: string, r: Awaited<ReturnType<LearningLoop['tick']>>): vo
 const oneShot = process.argv.includes('--once');
 if (oneShot) {
   report('tick', await loop.tick());
+  process.exit(0);
+}
+
+// Recovery path for the drift guard: after an embedder swap, re-embed the
+// durable procedure store under the current backend before restarting serve.
+if (process.argv.includes('--reindex')) {
+  const n = await reindexCrossMemory(resolve(root, 'memory', 'procedures.json'));
+  console.log(`[learning] reindexed ${n} procedure record(s) under the current embedder`);
   process.exit(0);
 }
 

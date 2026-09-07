@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LearningLoop } from '../../src/learning/learning-loop';
+import { LearningLoop, reindexCrossMemory } from '../../src/learning/learning-loop';
 import { JsonlFileEventLog } from '../../src/event-log/log';
 import { SupervisorAgent } from '../../src/execution/supervisor';
 import { ProcedureLibrary } from '../../src/execution/procedure-library';
@@ -67,6 +67,18 @@ const makeLoop = (over: Record<string, unknown> = {}) =>
   });
 
 describe('LearningLoop.tick', () => {
+  it('reindexCrossMemory re-embeds the durable store and stamps the sidecar', async () => {
+    const crossPath = join(dir, 'memory', 'procedures.json');
+    mkdirSync(join(dir, 'memory'), { recursive: true });
+    writeFileSync(crossPath, JSON.stringify([{ record: { id: 'p1', text: 'procedure: query_logs', metadata: { procedure: { id: 'p1' } } }, vector: [1, 0, 0] }]), 'utf8');
+    const n = await reindexCrossMemory(crossPath);
+    expect(n).toBe(1);
+    // Re-embedded under the loop's own embedder: a 3-dim placeholder became
+    // the embedder's real output, and the identity sidecar was stamped.
+    const entries = JSON.parse(readFileSync(crossPath, 'utf8')) as Array<{ vector: number[] }>;
+    expect(entries[0]!.vector.length).toBeGreaterThan(3);
+    expect(readFileSync(crossPath + '.meta.json', 'utf8')).toContain('embedderIdentity');
+  });
   it('extracts procedures from outcomes and loads them into the library', async () => {
     for (let i = 0; i < 3; i++) writeFileSync(join(outcomesDir, 'o' + String(i) + '.json'), successfulOutcome('o' + String(i)));
     const loop = makeLoop();

@@ -149,3 +149,16 @@ export class LearningLoop {
     }
   }
 }
+
+/**
+ * Re-embeds the durable cross-scope store at `crossPath` under the same
+ * embedder construction the LearningLoop itself uses, and stamps the identity
+ * sidecar. This is the recovery path the FileBackedVectorMemory drift guard's
+ * error message points to: after an embedder swap (dimension or model), run
+ * this once (learning-cron --reindex) before restarting serve — never mix
+ * vector spaces.
+ */
+export async function reindexCrossMemory(crossPath: string): Promise<number> {
+  const episodic = new EpisodicMemory({ crossPath });
+  return episodic.reindexCross();
+}

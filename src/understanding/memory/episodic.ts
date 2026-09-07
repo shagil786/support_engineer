@@ -38,6 +38,14 @@ const MEETING_META = '__meeting__';
 export class EpisodicMemory {
   private readonly perMeeting: import('./vector.js').VectorMemory;
   private readonly cross: import('./vector.js').VectorMemory;
+
+  /** Re-embed the durable cross-scope store under the configured embedder
+   *  (the recovery path for the drift guard's MODEL/DIMENSION MISMATCH).
+   *  Returns the number of records re-embedded; 0 for in-memory stores. */
+  async reindexCross(): Promise<number> {
+    const fb = this.cross as Partial<import('./file-backed.js').FileBackedVectorMemory>;
+    return typeof fb.reindex === 'function' ? fb.reindex() : 0;
+  }
   private readonly ttlMs: number;
   private readonly now: () => number;
 
