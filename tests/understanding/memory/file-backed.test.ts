@@ -7,6 +7,18 @@ import { EpisodicMemory } from '../../../src/understanding/memory/episodic';
 import { hashEmbedder } from '../../../src/understanding/memory/vector';
 import type { ProcedureSpec } from '../../../src/learning/knowledge-extractor';
 
+/** Embedder fakes with a stable identity — the contract real backends carry
+ *  so a store can detect a same-dim model swap (the boot check cannot). */
+const dim3 = Object.assign((text: string): number[] => [text.length, 1, 2], {
+  identity: 'fake-dim3@1',
+});
+const dim4 = Object.assign((text: string): number[] => [text.length, 1, 2, 3], {
+  identity: 'fake-dim4@1',
+});
+const dim3Other = Object.assign((text: string): number[] => [1, text.length, 2], {
+  identity: 'fake-dim3-other@1',
+});
+
 let dir: string;
 let path: string;
 
@@ -93,7 +105,8 @@ describe('FileBackedVectorMemory', () => {
     await store.add({ id: 'b', text: 'y' });
     await store.purge(() => true);
     const siblings = readdirSync(join(dir, 'cross'));
-    expect(siblings).toEqual(['procedures.json']);
+    // The identity sidecar is a durable sibling, not a temp file.
+    expect(siblings).toEqual(['procedures.json', 'procedures.json.meta.json']);
   });
 
   it('honors a custom embedder consistently across instances', async () => {
@@ -142,6 +155,75 @@ describe('FileBackedVectorMemory', () => {
 
     const second = new FileBackedVectorMemory({ path, embedder: dim3b });
     await expect(second.search('anything', 3, 0)).resolves.toBeDefined();
+  });
+
+  describe('model-identity drift guard (closes the same-dim gap)', () => {
+    it('same-dim different-model store fails LOUD on search and add', async () => {
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded under fake-dim3' });
+
+      const second = new FileBackedVectorMemory({ path, embedder: dim3Other });
+      await expect(second.search('anything', 3, 0)).rejects.toThrow(/reindex/);
+      await expect(second.add({ id: 'b', text: 'x' })).rejects.toThrow(/reindex/);
+    });
+
+    it('boot self-check warns on identity drift even when dims match', async () => {
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded' });
+
+      const err = console.error;
+      const seen: string[] = [];
+      console.error = (...args: unknown[]) => {
+        seen.push(args.map(String).join(' '));
+      };
+      try {
+        const second = new FileBackedVectorMemory({ path, embedder: dim3Other });
+        await second.whenBootChecked();
+        expect(seen.some((s) => s.includes('DIMENSION MISMATCH') || s.includes('MODEL MISMATCH'))).toBe(true);
+      } finally {
+        console.error = err;
+      }
+    });
+
+    it('identical identity stays silent across restarts', async () => {
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded' });
+
+      const err = console.error;
+      const seen: string[] = [];
+      console.error = (...args: unknown[]) => {
+        seen.push(args.map(String).join(' '));
+      };
+      try {
+        const second = new FileBackedVectorMemory({ path, embedder: dim3 });
+        await second.whenBootChecked();
+        expect(seen).toEqual([]);
+        await expect(second.search('seeded', 1, 0)).resolves.toBeDefined();
+      } finally {
+        console.error = err;
+      }
+    });
+
+    it('reindex() resolves identity drift and search recovers', async () => {
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded under fake-dim3' });
+
+      const second = new FileBackedVectorMemory({ path, embedder: dim3Other });
+      await expect(second.search('anything', 3, 0)).rejects.toThrow(/reindex/);
+      expect(await second.reindex()).toBe(1);
+      const hits = await second.search('seeded under fake-dim3', 1, 0);
+      expect(hits[0]?.id).toBe('a');
+    });
+
+    it('identity-less embedders keep the old behavior (never locked out by an optional contract)', async () => {
+      const anon3 = (text: string): number[] => [text.length, 1, 2];
+      const anon3Other = (text: string): number[] => [1, text.length, 2];
+      const first = new FileBackedVectorMemory({ path, embedder: anon3 });
+      await first.add({ id: 'a', text: 'seeded' });
+      const second = new FileBackedVectorMemory({ path, embedder: anon3Other });
+      // Same dims, no identities anywhere → no signal, no lockout.
+      await expect(second.search('anything', 3, 0)).resolves.toBeDefined();
+    });
   });
 
   it('reindex() resolves the mismatch and search recovers', async () => {

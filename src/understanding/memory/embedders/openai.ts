@@ -88,17 +88,21 @@ export class OpenAiCompatibleEmbedder {
     this.batchSize = opts.batchSize ?? 64;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.http = opts.request ?? fetch;
+    this.embed = Object.assign(async (text: string): Promise<number[]> => {
+      const [v] = await this.embedBatch([text]);
+      return v as number[];
+    }, { identity: `remote:${this.model}${this.dim !== undefined ? `@${this.dim}` : ''}` });
   }
 
   isWired(): boolean {
     return this.apiKey.length > 0 && this.baseUrl.length > 0 && this.model.length > 0;
   }
 
-  /** Single-text convenience over embedBatch. */
-  embed = async (text: string): Promise<number[]> => {
-    const [v] = await this.embedBatch([text]);
-    return v as number[];
-  };
+  /** Single-text convenience over embedBatch. Carries the stable model
+   *  identity so durable stores can detect a same-dim model swap. Assigned
+   *  in the constructor (identity needs model/dim, which field initializers
+   *  cannot see yet). */
+  embed: AsyncEmbedder;
 
   /** Embed a batch: cache lookups first, one HTTP call per uncached window. */
   async embedBatch(texts: string[]): Promise<number[][]> {

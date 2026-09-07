@@ -16,7 +16,7 @@
  * so processes that never embed pay nothing at startup. Tests inject a
  * fake factory and never touch the network or the ~25MB model download.
  */
-import { EmbeddingError, mapToDim, normalize } from './openai.js';
+import { EmbeddingError, mapToDim, normalize, type AsyncEmbedder } from './openai.js';
 
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
@@ -74,6 +74,10 @@ export class LocalEmbedder {
     this.dim = opts.dim;
     this.batchSize = opts.batchSize ?? 32;
     this.makePipeline = opts.pipeline ?? defaultPipelineFactory;
+    this.embed = Object.assign(async (text: string): Promise<number[]> => {
+      const [v] = await this.embedBatch([text]);
+      return v as number[];
+    }, { identity: `local:${this.model}${this.dim !== undefined ? `@${this.dim}` : ''}` });
   }
 
   /** Local backends are always "wired" — the model loads on first use. */
@@ -81,11 +85,11 @@ export class LocalEmbedder {
     return true;
   }
 
-  /** Single-text convenience over embedBatch. */
-  embed = async (text: string): Promise<number[]> => {
-    const [v] = await this.embedBatch([text]);
-    return v as number[];
-  };
+  /** Single-text convenience over embedBatch. Carries the stable model
+   *  identity so durable stores can detect a same-dim model swap. Assigned
+   *  in the constructor (identity needs model/dim, which field initializers
+   *  cannot see yet). */
+  embed: AsyncEmbedder;
 
   /** Embed a batch: cache lookups first, one inference call per uncached window. */
   async embedBatch(texts: string[]): Promise<number[][]> {

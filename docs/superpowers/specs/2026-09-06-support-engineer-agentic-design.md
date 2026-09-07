@@ -243,6 +243,21 @@ never triggers an accidental model load). Both processes that open
 `procedures.json` — serve's bootstrap and the learning cron — inherit
 the check for free.
 
+**Model-identity drift guard** (closes the same-dim gap the dimension
+check cannot): `EmbedderLike` carries an optional `identity` string
+(`local:Xenova/all-MiniLM-L6-v2@384`, `remote:vendor/model@dim`,
+`hash:v1`); both real backends and the built-in hash embedder stamp it.
+`FileBackedVectorMemory` persists the writer identity in an atomic
+sidecar (`<snapshot>.meta.json`) on every mutation and `reindex()`, and
+`assertCompatible()` fails loud on identity disagreement between the
+sidecar and the configured embedder — two different 384-dim models are
+dimensionally identical but embed into incompatible vector spaces, and
+this is the only signal that catches the swap. The sidecar is separate
+from the entries JSON so pre-identity snapshots and external tooling
+stay byte-compatible; a missing sidecar (or an anonymous embedder)
+disables the identity check until the next mutation stamps it — the
+contract is optional, nothing gets locked out.
+
 **`GroundedAnswerer`** (`understanding/grounded-answerer.ts`) — the
 hallucination-reduction layer over the KB: empty/near-zero retrieval →
 **refuse without calling the LLM** (guessing from nothing is structurally

@@ -12,14 +12,26 @@
 export type Embedder = (text: string) => number[];
 
 /** Widened embedder port: sync (hash) or async (cloud API) backends.
- *  Sync embedders remain valid wherever this is accepted. */
-export type EmbedderLike = (text: string) => number[] | Promise<number[]>;
+ *  Sync embedders remain valid wherever this is accepted.
+ *
+ *  `identity` (optional, attachable to the function): a stable string
+ *  naming the embedding model that produced the vectors — e.g.
+ *  `local:Xenova/all-MiniLM-L6-v2` or `remote:vendor/model@dim`. Durable
+ *  stores use it to detect a same-dim MODEL swap, which dimension checks
+ *  alone cannot see: two different 384-dim models are dimensionally
+ *  identical but embed into incompatible vector spaces. Absent identity →
+ *  the old dim-only behavior (the contract is optional; nothing gets
+ *  locked out by it). */
+export interface EmbedderLike {
+  (text: string): number[] | Promise<number[]>;
+  identity?: string;
+}
 
 /** Deterministic 256-dim hashed features: word tokens, bigrams, and
  *  character trigrams (so "payments"≈"payment", "timeout"≈"timeouts").
  *  Deliberately keyless and dependency-free — swap for a real embedding
  *  API behind the same `Embedder` type when the cloud LLM is configured. */
-export const hashEmbedder: Embedder = (() => {
+export const hashEmbedder: Embedder = Object.assign((() => {
   const DIM = 256;
   const STOP = new Set(['a','an','and','are','as','at','be','but','by','can','did','do','does','for','from','had','has','have','how','i','if','in','is','it','its','me','my','no','not','of','on','or','so','than','that','the','their','them','then','there','they','this','to','was','we','were','what','when','where','which','who','why','will','with','you','your','just','please','about','now']);
   const tokenize = (t: string) => t.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 0 && !STOP.has(w));
@@ -46,7 +58,7 @@ export const hashEmbedder: Embedder = (() => {
     const norm = Math.sqrt(vec.reduce((acc, v) => acc + v * v, 0)) || 1;
     return vec.map((v) => v / norm);
   };
-})();
+})(), { identity: 'hash:v1' });
 
 /** Dot product of two equal-length vectors (inputs are pre-normalized by
  *  every embedder, so this is cosine similarity).

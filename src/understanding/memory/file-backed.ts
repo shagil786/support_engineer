@@ -38,6 +38,23 @@ function isPersistedEntry(x: unknown): x is PersistedEntry {
   );
 }
 
+/** Sidecar metadata recording which embedder wrote the snapshot. Kept in a
+ *  SEPARATE file (not inside the entries JSON) so old snapshots — and any
+ *  external tooling that reads them — stay byte-compatible; a missing
+ *  sidecar means "written before identities existed" and disables the
+ *  identity check until the next mutation stamps it. */
+interface StoreMeta {
+  /** Stable embedder identity of the writer (EmbedderLike['identity']). */
+  embedderIdentity: string;
+  writtenAt: number;
+}
+
+function isStoreMeta(x: unknown): x is StoreMeta {
+  if (typeof x !== 'object' || x === null) return false;
+  const o = x as Record<string, unknown>;
+  return typeof o['embedderIdentity'] === 'string' && typeof o['writtenAt'] === 'number';
+}
+
 export interface FileBackedVectorMemoryOptions {
   /** Snapshot file path. Parent directories are created on first write. */
   path: string;
@@ -106,11 +123,53 @@ export class FileBackedVectorMemory {
     return this.embedDimCache;
   }
 
+  /** Sidecar meta path: `<snapshot>.meta.json`. */
+  private metaPath(): string {
+    return `${this.path}.meta.json`;
+  }
+
+  /** Which embedder identity wrote the persisted snapshot (undefined when
+   *  the sidecar is absent — pre-identity snapshot — or unreadable). */
+  private storedIdentity(): string | undefined {
+    try {
+      const raw = readFileSync(this.metaPath(), 'utf8');
+      const parsed: unknown = JSON.parse(raw);
+      return isStoreMeta(parsed) ? parsed.embedderIdentity : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Stamp the sidecar with the current embedder's identity after a
+   *  successful mutation. Best-effort: a failed stamp is logged; the next
+   *  mutation retries. */
+  private stampIdentity(): void {
+    const identity = this.embed.identity;
+    if (!identity) return;
+    const tmp = `${this.metaPath()}.tmp-${process.pid}`;
+    try {
+      mkdirSync(dirname(this.metaPath()), { recursive: true });
+      writeFileSync(tmp, JSON.stringify({ embedderIdentity: identity, writtenAt: Date.now() } satisfies StoreMeta), 'utf8');
+      renameSync(tmp, this.metaPath()); // atomic on POSIX
+    } catch (e) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* ignore */
+      }
+      console.error(`FileBackedVectorMemory: failed to stamp embedder identity for ${this.path}:`, e);
+    }
+  }
+
   /** Fail loud when the persisted vector space and the configured embedder
-   *  disagree. Silent zero-padded cosine would return garbage rankings that
-   *  look like answers — the worst failure mode retrieval can have.
-   *  Dimension equality is necessary, not sufficient (two different 384-dim
-   *  models are undetectable here and remain the operator's responsibility). */
+   *  disagree. Two checks, in order:
+   *  1. dimension — silent zero-padded cosine would return garbage rankings
+   *     that look like answers;
+   *  2. model identity — two different same-dim models are dimensionally
+   *     identical but embed into incompatible spaces; the sidecar meta
+   *     detects the swap that dimension checks cannot.
+   *  Absent identity on either side (pre-identity snapshots, anonymous
+   *  embedders) disables check 2 — the contract is optional. */
   private async assertCompatible(): Promise<void> {
     const stored = this.dim();
     if (stored === undefined || this.entries.length === 0) return;
@@ -121,15 +180,26 @@ export class FileBackedVectorMemory {
           'the two vector spaces are incompatible. Run reindex() (or the knowledge-cli / learning-cron equivalent) before using this store.',
       );
     }
+    const storedId = this.storedIdentity();
+    const liveId = this.embed.identity;
+    if (storedId !== undefined && liveId !== undefined && storedId !== liveId) {
+      throw new Error(
+        `MODEL MISMATCH: FileBackedVectorMemory (${this.path}): snapshot was written by embedder "${storedId}" but the configured embedder is "${liveId}" ` +
+          `(same ${stored}-dim output — dimension checks cannot see this). The two vector spaces are incompatible. ` +
+          'Run reindex() (or the knowledge-cli / learning-cron equivalent) before using this store.',
+      );
+    }
   }
 
   /** Re-embed every record under the current embedder and persist.
-   *  The one-time migration when swapping embedding backends. */
+   *  The one-time migration when swapping embedding backends (dimension OR
+   *  model identity). */
   async reindex(): Promise<number> {
     for (const e of this.entries) {
       e.vector = await this.embed(e.record.text);
     }
     this.persist();
+    this.stampIdentity();
     return this.entries.length;
   }
 
@@ -179,6 +249,7 @@ export class FileBackedVectorMemory {
     if (existing >= 0) this.entries[existing] = entry;
     else this.entries.push(entry);
     this.persist();
+    this.stampIdentity();
   }
 
   async search(query: string, topK = 3, minScore = 0.05): Promise<SearchHit[]> {
