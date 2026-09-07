@@ -43,6 +43,15 @@ describe('InMemoryVectorMemory (RAG)', () => {
     const mem = new InMemoryVectorMemory();
     expect(await mem.search('anything')).toEqual([]);
   });
+
+  it('cosine refuses mismatched dimensions instead of silently zero-padding (parity with the pipeline twin)', () => {
+    // The legacy agent's cosine was the last silent zero-padding twin of the
+    // bug fixed in the understanding layer. It cannot mismatch today (single
+    // in-memory embedder), but a known-silent twin of a fixed bug is a trap:
+    // anyone reusing this module elsewhere inherits the garbage-score mode.
+    expect(() => cosine([1, 2], [1, 2, 3])).toThrow(/dim/i);
+    expect(() => cosine([1, 2, 3], [1, 2])).toThrow(/dim/i);
+  });
 });
 
 describe('agent memory integration', () => {

@@ -41,9 +41,21 @@ export const hashEmbedder: Embedder = (() => {
   };
 })();
 
+/** Dot product of two equal-length vectors (inputs are pre-normalized by
+ *  every embedder, so this is cosine similarity).
+ *
+ *  Dimension mismatch throws — kept in lockstep with the pipeline twin in
+ *  src/understanding/memory/vector.ts. The original behavior silently
+ *  iterated over the shorter length, producing plausible-looking but
+ *  meaningless scores on mismatched vector spaces. This module cannot
+ *  mismatch today (single in-memory embedder), but a silent twin of a fixed
+ *  bug is a trap: anyone reusing it elsewhere inherits the garbage mode. */
 export function cosine(a: readonly number[], b: readonly number[]): number {
+  if (a.length !== b.length) {
+    throw new Error(`cosine: dimension mismatch (${a.length} vs ${b.length}) — the two vectors come from different embedding spaces`);
+  }
   let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += (a[i] ?? 0) * (b[i] ?? 0);
+  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
   return dot;
 }
 
