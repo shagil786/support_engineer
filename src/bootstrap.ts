@@ -125,6 +125,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
   const crossPath = join(dataDir, 'memory', 'procedures.json');
   const statsPath = join(dataDir, 'stats', 'procedure-stats.json');
   const learningEnabled = opts.learning?.enabled === true;
+  const learningIntervalRaw = opts.learning?.intervalMs ?? 15 * 60_000;
+  const learningIntervalMs = Number.isFinite(learningIntervalRaw) && learningIntervalRaw >= 1000 ? learningIntervalRaw : 15 * 60_000;
   const now = opts.now;
 
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
@@ -148,6 +150,11 @@ export function createPlatform(opts: PlatformOptions): Platform {
       episodic,
       ...(now ? { now } : {}),
     });
+    // Schedule the loop — construction alone was a silent no-op: the serve
+    // banner said "learning: on, every Nms" while no interval ever fired.
+    // Manual ticks (console :learning tick) always worked; this makes the
+    // scheduled loop real. Tests can drive ticks explicitly instead.
+    learningLoop.start(learningIntervalMs);
   }
   const library = new ProcedureLibrary({ episodic });
 

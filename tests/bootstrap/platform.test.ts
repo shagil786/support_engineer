@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,6 +62,31 @@ describe('createPlatform', () => {
     expect(hits[0]?.docId).toBe('run-cache-clear');
     expect(hits[0]?.metadata?.['source']).toBe('runbooks');
     expect(hits[0]?.heading).toBe('Clear the API cache');
+  });
+
+  it('learning on: the scheduled loop actually STARTS (interval fires; stopLearning stops it)', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = createPlatform({ dataDir: dir, learning: { enabled: true, intervalMs: 1000 } });
+      expect(p.learningLoop).toBeInstanceOf(LearningLoop);
+      // Regression: bootstrap constructed the loop but never called start(),
+      // so "learning: on, every Nms" was a lie — the interval never fired.
+      const tickSpy = vi.spyOn(p.learningLoop!, 'tick');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(tickSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      p.stopLearning();
+      const after = tickSpy.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(tickSpy.mock.calls.length).toBe(after); // stopped means stopped
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('learning off: no loop, no timer (stopLearning is a safe no-op)', async () => {
+    const p = createPlatform({ dataDir: dir });
+    expect(p.learningLoop).toBeUndefined();
+    expect(() => p.stopLearning()).not.toThrow();
   });
 
   it('learning on: durable library wired into the supervisor; tick then short-circuit live request', async () => {
