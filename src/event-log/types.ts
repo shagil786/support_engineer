@@ -16,7 +16,7 @@ export type EventSource =
 /** One classification of a raw input into an actionable envelope. */
 export interface IntentEnvelope {
   intent:
-    | { kind: 'meeting_response'; subKind: 'question' | 'feedback' | 'runbook_offer' | 'complaint' | 'critical' | 'mute' | 'wake' }
+    | { kind: 'meeting_response'; subKind: 'question' | 'feedback' | 'runbook_offer' | 'complaint' | 'critical' | 'mute' | 'wake'; /** True when the question asks about CURRENT system state (logs, metrics, status) — such questions must not be answered from the static knowledge base. Additive; legacy envelopes omit it. */ liveData?: boolean }
     | { kind: 'async_triage'; subKind: 'incident' | 'service_request' | 'question' | 'fyi' }
     | { kind: 'proactive_alert'; subKind: 'incident' | 'anomaly' | 'slo_breach' }
     | { kind: 'human_action'; subKind: 'approval' | 'rejection' | 'edit' | 'answer' }

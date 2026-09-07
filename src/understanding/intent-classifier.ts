@@ -19,7 +19,7 @@ import { LegacyClassifierAdapter, type ClassifyInput } from './legacy/classifier
 
 const IntentSchema = z.object({
   intent: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('meeting_response'), subKind: z.enum(['question', 'feedback', 'runbook_offer', 'complaint', 'critical', 'mute', 'wake']) }),
+    z.object({ kind: z.literal('meeting_response'), subKind: z.enum(['question', 'feedback', 'runbook_offer', 'complaint', 'critical', 'mute', 'wake']), liveData: z.boolean().optional() }),
     z.object({ kind: z.literal('async_triage'), subKind: z.enum(['incident', 'service_request', 'question', 'fyi']) }),
     z.object({ kind: z.literal('proactive_alert'), subKind: z.enum(['incident', 'anomaly', 'slo_breach']) }),
     z.object({ kind: z.literal('human_action'), subKind: z.enum(['approval', 'rejection', 'edit', 'answer']) }),
@@ -55,6 +55,7 @@ const SYSTEM_PROMPT =
   '- human_action: approval | rejection | edit | answer\n' +
   '- unknown: omit subKind\n' +
   'confidence: number 0..1.\n' +
+  'For meeting_response questions: set intent.liveData=true when the question asks about CURRENT system state — logs, metrics, status, entries "right now" — that only live tool data can answer; static documents cannot. Otherwise omit it (or false).\n' +
   'entities keys (all optional, omit unknown keys): ticketKeys (string[]), runbookIds (string[]), services (string[]), severity (P0|P1|P2|P3|P4), speakerId (string), runbookDestructive (boolean).\n' +
   'rawContext: { source: meeting|jira|slack|cloudwatch|splunk|cron, ts: number, payload: any } — copy source/ts/payload from the input verbatim.\n' +
   'Example: {"intent":{"kind":"meeting_response","subKind":"question"},"confidence":0.9,"entities":{"services":["api"]},"rawContext":{"source":"meeting","ts":123,"payload":{}}}';

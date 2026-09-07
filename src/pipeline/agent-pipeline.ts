@@ -210,7 +210,14 @@ export class OrchestratedPipeline {
     // no LLM dance. A refusal falls through to the governed log-query path
     // below, so live-data questions still work exactly as before.
     let kbRefused = false;
-    if (subKind === 'question' && this.answerer) {
+    // Live-data questions never touch the static KB: a lexically-similar
+    // chunk would otherwise answer "are there fresh errors right now?" from
+    // a postmortem. The classifier flags these (intent.liveData); absent
+    // flag (legacy/heuristic envelopes) keeps KB-first unchanged.
+    const liveData = envelope.intent.kind === 'meeting_response' && envelope.intent.subKind === 'question' && envelope.intent.liveData === true;
+    // A skipped KB is a KB that did not answer — same 'logs' provenance.
+    if (liveData) kbRefused = true;
+    if (subKind === 'question' && this.answerer && !liveData) {
       const grounded = await this.answerer.answer(ctx.text, { topK: 4, minScore: 0.4 });
       if (!grounded.refused) {
         this.deliverSpeech(grounded.answer);

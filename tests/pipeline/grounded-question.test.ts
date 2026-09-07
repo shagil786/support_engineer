@@ -46,12 +46,13 @@ afterEach(() => {
 interface Opts {
   seedKb?: boolean;
   policyYaml?: string;
+  classifierOverride?: IntentClassifier;
 }
 
 async function harness(opts: Opts = {}) {
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
   const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
-  const classifier = new IntentClassifier({ llm, fallback: new LegacyClassifierAdapter(), eventLog });
+  const classifier = opts.classifierOverride ?? new IntentClassifier({ llm, fallback: new LegacyClassifierAdapter(), eventLog });
   const episodic = new EpisodicMemory({});
   const assembler = new ContextAssembler({ episodic });
   const policyEngine = new PolicyEngine({ yaml: opts.policyYaml ?? defaultPolicyYaml });
@@ -128,6 +129,31 @@ const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => 
 };
 
 describe('grounded question path', () => {
+  it('live-data questions skip the KB entirely (a tangential chunk must not answer a logs question)', async () => {
+    // Force the classifier's verdict: this is a live-data question.
+    const eventLog0 = new JsonlFileEventLog({ baseDir: eventsDir });
+    const llm0 = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    const classifier = new IntentClassifier({ llm: llm0, fallback: new LegacyClassifierAdapter(), eventLog: eventLog0 });
+    (classifier as unknown as { classify: unknown }).classify = async (input: unknown) => ({
+      intent: { kind: 'meeting_response', subKind: 'question', liveData: true },
+      confidence: 0.9,
+      entities: {},
+      rawContext: { source: 'meeting', ts: 500, payload: {} },
+    });
+    const { pipeline, eventLog, logQueries } = await harness({ seedKb: true, classifierOverride: classifier });
+    // This question lexically overlaps the corpus ('checkout'), but asks for
+    // CURRENT data — without the gate the KB answers it from the runbook chunk.
+    const r = await pipeline.processUtterance('u1', 'agent, are there fresh checkout errors right now?', 500);
+    expect(r.routed).toBe('pipeline');
+    expect(r.answerSource).toBe('logs');
+    expect(logQueries.length).toBe(1);
+    const ks = await kinds(eventLog, r.correlationId);
+    expect(ks).not.toContain('grounded_answer');
+    expect(ks).toContain('tool_call');
+  });
+
+  // (the 'answers a KB-backed question directly' case below doubles as the
+  // non-liveData pin: flag absent = KB-first unchanged)
   it('answers a KB-backed question directly: cited spoken answer, no tool dance', async () => {
     const { pipeline, eventLog } = await harness({ seedKb: true });
     const r = await pipeline.processUtterance('u1', 'agent, what do I do when the checkout service stops responding?', 500);
