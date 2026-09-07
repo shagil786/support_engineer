@@ -221,6 +221,21 @@ genuinely concurrent with queries, and an unsettled boot race silently
 drops the semantic signal (BM25 survives, vector-only queries return
 nothing).
 
+**Dimension-mismatch guard**: `cosine()` throws on length-mismatched
+vectors — the previous behavior silently iterated over the shorter
+length, so a 384-dim query against persisted 256-dim vectors produced
+plausible-looking but meaningless scores. `FileBackedVectorMemory`
+(persisted vectors: the durable procedure store) gates `add()`/`search()`
+on stored-vs-live embedder dimension with actionable reindex guidance,
+and `ProcedureLibrary.refresh()` logs the degrade reason instead of
+swallowing it. Note the KB itself is mismatch-immune by construction
+(snapshot stores chunks; the in-memory vector store re-embeds on boot
+under the wired embedder) — the guard exists for any persisted-vector
+store and for future multi-process access to `procedures.json` where the
+cron and serve could disagree on the embedder. Dimension equality is
+necessary, not sufficient: two different same-dim models remain the
+operator's responsibility.
+
 **`GroundedAnswerer`** (`understanding/grounded-answerer.ts`) — the
 hallucination-reduction layer over the KB: empty/near-zero retrieval →
 **refuse without calling the LLM** (guessing from nothing is structurally
