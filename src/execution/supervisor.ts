@@ -196,11 +196,14 @@ export class SupervisorAgent {
     if (hops > this.maxHops) return fail('hop cap reached');
     if (overTokens()) return fail('token cap exceeded');
     const triage = await this.triage.run(bundle);
+    this.accumulate(context, triage);
 
     // 2. Investigator — read-only plan
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    if (overTokens()) return fail('token cap exceeded');
     const inv = await this.investigator.run(bundle);
+    this.accumulate(context, inv);
     for (const step of inv.decision.plan) {
       if (overWallClock()) return fail('wall clock cap exceeded');
       const r = await this.executeStep(step.tool, step.args, context, governed.decision);
@@ -214,13 +217,16 @@ export class SupervisorAgent {
     //    pre-dance bundle would blind it to the very actions it reviews.
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    if (overTokens()) return fail('token cap exceeded');
     await this.refreshTrace(bundle);
     const rev = await this.reviewer.run(bundle);
+    this.accumulate(context, rev);
     if (rev.decision.verdict === 'fail') return fail(`reviewer rejected outcome: ${rev.decision.feedback}`);
 
     // 4. The governed action itself (already approved by policy)
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    if (overTokens()) return fail('token cap exceeded');
     if (overWallClock()) return fail('wall clock cap exceeded');
     const main = await this.executeStep(governed.action.tool, governed.action.args, context, governed.decision);
     toolCalls++;
@@ -230,7 +236,9 @@ export class SupervisorAgent {
     // 5. Executor — side-effect plan (reviewer may still veto after)
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    if (overTokens()) return fail('token cap exceeded');
     const exe = await this.executor.run(bundle);
+    this.accumulate(context, exe);
     for (const step of exe.decision.sideEffects) {
       if (overWallClock()) return fail('wall clock cap exceeded');
       const r = await this.executeStep(step.tool, step.args, context, governed.decision);
@@ -242,8 +250,10 @@ export class SupervisorAgent {
     // 6. Final review — same live trace refresh.
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    if (overTokens()) return fail('token cap exceeded');
     await this.refreshTrace(bundle);
     const final = await this.reviewer.run(bundle);
+    this.accumulate(context, final);
     const ok = final.decision.verdict !== 'fail';
     const summary = ok
       ? `Handled '${triage.decision.subKind}' with ${toolCalls} tool call(s). ${final.decision.feedback}`.trim()
@@ -259,6 +269,18 @@ export class SupervisorAgent {
     });
     this.loops.clear({ correlationId: context.correlationId });
     return { ok, hops, toolCalls, summary, source: 'pipeline' };
+  }
+
+  /** Add an agent run's reported usage to the request's running total.
+   *  Absent usage (fallback paths, providers without usage) adds nothing —
+   *  honest "no data", never a fabricated zero that would hide spend. */
+  private accumulate(
+    context: ToolRunnerContext,
+    out: { usage?: { prompt: number; completion: number } },
+  ): void {
+    if (!out.usage) return;
+    context.tokens.prompt += out.usage.prompt;
+    context.tokens.completion += out.usage.completion;
   }
 
   /** Re-pull the recent-events window so reviewers judge the live trace

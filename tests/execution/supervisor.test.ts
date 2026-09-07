@@ -65,6 +65,45 @@ function makeSupervisor(over: Partial<ConstructorParameters<typeof SupervisorAge
 }
 
 describe('SupervisorAgent', () => {
+  it('accumulates reported LLM usage into context.tokens and the token cap trips on it', async () => {
+    const usageLlm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    (usageLlm as unknown as { isWired: () => boolean }).isWired = () => true;
+    (usageLlm as unknown as { complete: unknown }).complete = async () => ({
+      choices: [{ message: { content: '{}' } }],
+      usage: { prompt_tokens: 600, completion_tokens: 200, total_tokens: 800 },
+    } as never);
+    // maxTokens 2000: triage+investigator+reviewer+executor ≈ 4 agent runs
+    // × 800 = 3200 → cap trips mid-dance.
+    const sup = makeSupervisor({ maxTokens: 2000 });
+    // Swap in usage-reporting agents.
+    const uSup = new SupervisorAgent({
+      triage: new TriageAgent({ llm: usageLlm }),
+      investigator: new InvestigatorAgent({ llm: usageLlm }),
+      executor: new ExecutorAgent({ llm: usageLlm }),
+      reviewer: new ReviewerAgent({ llm: usageLlm }),
+      toolRunner: new ToolRunner({ context: {} }),
+      maxTokens: 2000,
+    });
+    const context = ctx('c-usage');
+    const r = await uSup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context, bundle });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/token cap/);
+    expect(context.tokens.prompt).toBeGreaterThan(0);
+    expect(context.tokens.completion).toBeGreaterThan(0);
+  });
+
+  it('tolerates absent usage (older providers) — tokens stay put, run succeeds', async () => {
+    const sup = makeSupervisor({
+      toolRunner: new ToolRunner({
+        context: { logProvider: { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) } },
+      }),
+    });
+    const context = ctx('c-nousage');
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context, bundle });
+    expect(r.ok).toBe(true);
+    expect(context.tokens.prompt).toBe(0);
+  });
+
   it('shows the live tool-call trace to the reviewer (a bundle built pre-dance must not blind the final review)', async () => {
     const seen: string[][] = [];
     const spyLlm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });

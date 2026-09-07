@@ -19,6 +19,10 @@ export interface AgentRunInput {
 export interface AgentRunOutput<T> {
   decision: T;
   source: 'llm' | 'fallback';
+  /** Token usage reported by the provider, when it returns one. Absent on
+   *  fallback paths and for providers that omit usage — callers must treat
+   *  absence as "no data", never as zero-cost confirmation. */
+  usage?: { prompt: number; completion: number };
 }
 
 export abstract class LlmAgent<T extends z.ZodType> {
@@ -35,24 +39,24 @@ export abstract class LlmAgent<T extends z.ZodType> {
     if (!this.llm.isWired()) {
       return { decision: this.fallback(input), source: 'fallback' };
     }
-    const raw = await this.callLlm(input);
+    const { raw, usage } = await this.callLlm(input);
     let parsedJson: unknown;
     try {
       parsedJson = JSON.parse(raw);
     } catch {
-      return { decision: this.fallback(input), source: 'fallback' };
+      return { decision: this.fallback(input), source: 'fallback', ...(usage ? { usage } : {}) };
     }
     const parsed = this.schema.safeParse(parsedJson);
     if (!parsed.success) {
-      return { decision: this.fallback(input), source: 'fallback' };
+      return { decision: this.fallback(input), source: 'fallback', ...(usage ? { usage } : {}) };
     }
-    return { decision: parsed.data, source: 'llm' };
+    return { decision: parsed.data, source: 'llm', ...(usage ? { usage } : {}) };
   }
 
   /** Deterministic decision used when the LLM is unavailable or invalid. */
   protected abstract fallback(input: AgentRunInput): z.output<T>;
 
-  private async callLlm(input: AgentRunInput): Promise<string> {
+  private async callLlm(input: AgentRunInput): Promise<{ raw: string; usage?: { prompt: number; completion: number } }> {
     const r = await this.llm.complete({
       messages: [
         { role: 'system', content: this.systemPrompt },
@@ -63,6 +67,9 @@ export abstract class LlmAgent<T extends z.ZodType> {
       temperature: 0,
       max_tokens: 4000,
     });
-    return String(r.choices[0]?.message?.content ?? '');
+    const usage = r.usage
+      ? { prompt: r.usage.prompt_tokens, completion: r.usage.completion_tokens }
+      : undefined;
+    return { raw: String(r.choices[0]?.message?.content ?? ''), usage };
   }
 }
