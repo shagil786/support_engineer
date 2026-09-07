@@ -60,6 +60,11 @@ const SET = {
     { id: 'f2', question: 'what caused the checkout timeout incident' },
     { id: 'f3', question: 'who gets paged when oncall escalation fires' },
     { id: 'f4', question: '503 gateway config push fix' },
+    // Design-corpus cases (real corpus: the spec + phase plans ingested via
+    // knowledge-cli) — the gate now also protects spec-grounded answers.
+    { id: 'f7', question: 'who is the only writer to the policy store' },
+    { id: 'f8', question: 'what model does the local embedder run' },
+    { id: 'f9', question: 'what does the governance layer do' },
     { id: 'f5', question: 'who won the 2026 championship', expectRefusal: true },
     { id: 'f6', question: 'what is the meaning of life', expectRefusal: true },
   ],
