@@ -26,7 +26,61 @@ const minimalResponse = {
   choices: [{ index: 0, message: { role: 'assistant', content: 'Got it.' }, finish_reason: 'stop' }],
 };
 
-describe('OpenAiCompatibleClient wiring', () => {
+describe('OpenAiCompatibleClient', () => {
+  it('reports every complete() to the onCall hook: attempts, latency, usage, ok/errorCode', async () => {
+    let calls = 0;
+    const fakeFetch = async (_url: string, init?: { body?: string }) => {
+      calls++;
+      if (calls === 1) return new Response('server busy', { status: 429 });
+      return Response.json({
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+    };
+    const seen: Array<Record<string, unknown>> = [];
+    const client = new OpenAiCompatibleClient({
+      baseUrl: 'http://x', apiKey: 'k', model: 'm',
+      request: fakeFetch as unknown as typeof fetch,
+      onCall: (info) => seen.push(info as Record<string, unknown>),
+    });
+    await client.complete({ messages: [{ role: 'user', content: 'hi' }], tools: [] });
+    expect(seen.length).toBe(1);
+    const info = seen[0] as { model: string; attempts: number; ok: boolean; promptTokens: number; completionTokens: number; latencyMs: number };
+    expect(info.model).toBe('m');
+    expect(info.attempts).toBe(2); // one 429, then success
+    expect(info.ok).toBe(true);
+    expect(info.promptTokens).toBe(10);
+    expect(info.completionTokens).toBe(5);
+    expect(info.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reports a failed complete() with the error code and zero usage', async () => {
+    const fakeFetch = async () => new Response('nope', { status: 400 });
+    const seen: Array<Record<string, unknown>> = [];
+    const client = new OpenAiCompatibleClient({
+      baseUrl: 'http://x', apiKey: 'k', model: 'm',
+      request: fakeFetch as unknown as typeof fetch,
+      onCall: (info) => seen.push(info as Record<string, unknown>),
+    });
+    await expect(client.complete({ messages: [{ role: 'user', content: 'hi' }], tools: [] })).rejects.toThrow();
+    expect(seen.length).toBe(1);
+    const info = seen[0] as { ok: boolean; errorCode?: string; attempts: number };
+    expect(info.ok).toBe(false);
+    expect(info.errorCode).toBeTruthy();
+    expect(info.attempts).toBe(1); // 4xx never retried
+  });
+
+  it('adds jitter within ±25% of the backoff delay', () => {
+    const client = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    const fn = (client as unknown as { jittered: (base: number, attempt: number) => number }).jittered;
+    for (let i = 0; i < 50; i++) {
+      const d = fn.call(client, 500, 1);
+      expect(d).toBeGreaterThanOrEqual(375);
+      expect(d).toBeLessThanOrEqual(625);
+    }
+  });
+
+  describe('wiring', () => {
   it('is unwired when key/baseUrl/model missing and throws LlmError unwired', async () => {
     const client = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
     expect(client.isWired()).toBe(false);
@@ -144,4 +198,5 @@ describe('tool registry schemas', () => {
       tools.map((t) => t.function.name).sort(),
     );
   });
+});
 });

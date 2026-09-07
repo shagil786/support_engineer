@@ -72,6 +72,19 @@ export type DecisionEvent =
   | (BaseEvent & { kind: 'approval_timeout'; approvalId: string })
   | (BaseEvent & { kind: 'tool_call'; tool: ToolName; args: unknown; result: ToolResult; latencyMs: number; attempts: number })
   | (BaseEvent & {
+      kind: 'llm_call';
+      /** Observability event (agentic-ai: log every LLM call) — metadata
+       *  only, never prompt or response content. correlationId is synthetic
+       *  (`llm:<ts>`) because a completion is not always request-scoped. */
+      model: string;
+      latencyMs: number;
+      attempts: number;
+      ok: boolean;
+      errorCode?: string;
+      promptTokens?: number;
+      completionTokens?: number;
+    })
+  | (BaseEvent & {
       kind: 'agent_outcome';
       finalResult: { ok: boolean; summary: string };
       /** Additive (optional) execution stats — present on events emitted by
@@ -94,7 +107,7 @@ export type DecisionEvent =
 const KINDS: readonly DecisionEvent['kind'][] = [
   'understanding', 'grounded_answer', 'governance', 'safety_net',
   'approval_request', 'approval_granted', 'approval_timeout',
-  'tool_call', 'agent_outcome',
+  'tool_call', 'agent_outcome', 'llm_call',
   'policy_suggested', 'policy_promoted', 'knowledge_extracted',
 ];
 

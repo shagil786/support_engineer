@@ -15,6 +15,19 @@ export interface LlmConfig {
   retryBackoffMs?: number;
   /** Injectable fetch for tests / proxies. */
   request?: typeof fetch;
+  /** Observability hook (agentic-ai: log every LLM call). Fired once per
+   *  complete() — success or failure — with model, total latency, attempt
+   *  count, and usage when the provider returned it. Never receives prompt
+   *  or response content. */
+  onCall?: (info: {
+    model: string;
+    latencyMs: number;
+    attempts: number;
+    ok: boolean;
+    errorCode?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+  }) => void;
 }
 
 export interface LlmMessage {
@@ -66,6 +79,7 @@ export class OpenAiCompatibleClient implements LlmClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryBackoffMs: number;
+  private readonly onCall: LlmConfig['onCall'];
   private readonly http: typeof fetch;
 
   constructor(config: LlmConfig) {
@@ -75,6 +89,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     this.timeoutMs = config.timeoutMs ?? 30_000;
     this.maxRetries = config.maxRetries ?? 2;
     this.retryBackoffMs = config.retryBackoffMs ?? 500;
+    this.onCall = config.onCall;
     this.http = config.request ?? fetch;
   }
 
@@ -107,19 +122,57 @@ export class OpenAiCompatibleClient implements LlmClient {
     // capacity") reject fast, so a short retry ladder recovers most
     // requests. 4xx others are permanent and never retried.
     let lastError: LlmError | undefined;
+    const started = Date.now();
+    let attempts = 0;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      attempts = attempt + 1;
       if (attempt > 0) {
-        const delay = Math.min(this.retryBackoffMs * 2 ** (attempt - 1), 8_000);
+        const delay = this.jittered(this.retryBackoffMs, attempt);
+        console.error(`[llm] retry ${attempt}/${this.maxRetries} after ${Math.round(delay)}ms: ${lastError?.code ?? 'unknown'}`);
         await new Promise((r) => setTimeout(r, delay));
       }
       try {
-        return await this.attempt(body);
+        const r = await this.attempt(body);
+        this.onCall?.({
+          model: this.model,
+          latencyMs: Date.now() - started,
+          attempts,
+          ok: true,
+          ...(r.usage ? { promptTokens: r.usage.prompt_tokens, completionTokens: r.usage.completion_tokens } : {}),
+        });
+        return r;
       } catch (e) {
-        if (!(e instanceof LlmError) || !this.isRetryable(e)) throw e;
+        if (!(e instanceof LlmError) || !this.isRetryable(e)) {
+          this.onCall?.({
+            model: this.model,
+            latencyMs: Date.now() - started,
+            attempts,
+            ok: false,
+            ...(e instanceof LlmError ? { errorCode: e.code } : {}),
+          });
+          throw e;
+        }
         lastError = e;
       }
     }
-    throw lastError ?? new LlmError('http_error', 'LLM request failed after retries');
+    const exhausted = lastError ?? new LlmError('http_error', 'LLM request failed after retries');
+    this.onCall?.({
+      model: this.model,
+      latencyMs: Date.now() - started,
+      attempts,
+      ok: false,
+      errorCode: exhausted.code,
+    });
+    throw exhausted;
+  }
+
+  /** Backoff delay with ±25% jitter: 500 * 2^(attempt-1), capped 8s. Jitter
+   *  keeps many concurrent callers from retrying in lockstep against a
+   *  saturated provider. */
+  private jittered(baseMs: number, attempt: number): number {
+    const base = Math.min(baseMs * 2 ** (attempt - 1), 8_000);
+    const spread = base * 0.25;
+    return base - spread + Math.random() * spread * 2;
   }
 
   private isRetryable(e: LlmError): boolean {

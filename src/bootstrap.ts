@@ -138,8 +138,34 @@ export function createPlatform(opts: PlatformOptions): Platform {
   const now = opts.now;
 
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
+  // Observability: every LLM completion (client-side, cross-layer) lands in
+  // the event spine as llm_call — model/latency/attempts/usage, never
+  // prompt or response content. correlationId is synthetic: a completion is
+  // not always request-scoped inside the client.
+  const llmCallEvent = async (info: {
+    model: string;
+    latencyMs: number;
+    attempts: number;
+    ok: boolean;
+    errorCode?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+  }): Promise<void> => {
+    try {
+      await eventLog.append({
+        correlationId: `llm:${Date.now()}`,
+        ts: Date.now(),
+        layer: 'understanding',
+        source: 'internal',
+        kind: 'llm_call',
+        ...info,
+      });
+    } catch {
+      // Telemetry must never break inference.
+    }
+  };
   const llm = opts.llm
-    ? new OpenAiCompatibleClient(opts.llm)
+    ? new OpenAiCompatibleClient({ ...opts.llm, onCall: (info) => void llmCallEvent(info) })
     : new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
 
   // Learning first: it owns the shared (durable) episodic memory that the

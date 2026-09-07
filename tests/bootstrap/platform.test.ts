@@ -121,6 +121,29 @@ describe('createPlatform', () => {
     expect(outcome?.finalResult.summary).toContain('via:procedure');
   });
 
+  it('wires LLM completions into the event spine as llm_call events', async () => {
+    const fakeRequest = (async () =>
+      Response.json({
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
+      })) as unknown as typeof fetch;
+    const p = createPlatform({
+      dataDir: dir,
+      llm: { baseUrl: 'http://fake', apiKey: 'k', model: 'fake-model', request: fakeRequest },
+    });
+    await p.pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
+    await new Promise((r) => setTimeout(r, 200)); // the onCall hook is fire-and-forget
+    let llmCall;
+    for await (const e of (p.eventLog as JsonlFileEventLog).query({})) {
+      if (e.kind === 'llm_call') llmCall = e;
+    }
+    expect(llmCall).toBeDefined();
+    expect(llmCall?.model).toBe('fake-model');
+    expect(llmCall?.ok).toBe(true);
+    expect(llmCall?.attempts).toBe(1);
+    expect(llmCall?.promptTokens).toBe(12);
+  });
+
   it('supervisorCaps flow through to the supervisor (maxHops=1 fails the dance fast)', async () => {
     const p = createPlatform({ dataDir: dir, logProvider, runbooks, supervisorCaps: { maxHops: 1 } });
     const r = await p.pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
