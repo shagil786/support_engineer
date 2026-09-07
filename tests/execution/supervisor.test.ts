@@ -65,6 +65,31 @@ function makeSupervisor(over: Partial<ConstructorParameters<typeof SupervisorAge
 }
 
 describe('SupervisorAgent', () => {
+  it('shows the live tool-call trace to the reviewer (a bundle built pre-dance must not blind the final review)', async () => {
+    const seen: string[][] = [];
+    const spyLlm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    (spyLlm as unknown as { isWired: () => boolean }).isWired = () => true;
+    (spyLlm as unknown as { complete: unknown }).complete = async (input: { messages: Array<{ role: string; content: string }> }) => {
+      const parsed = JSON.parse(input.messages[1].content) as { recent: Array<{ kind: string }> };
+      seen.push(parsed.recent.map((e) => e.kind));
+      return { choices: [{ message: { content: JSON.stringify({ verdict: 'pass', feedback: 'trace seen' }) } }] };
+    };
+    const eventLog = new JsonlFileEventLog({ baseDir: dir });
+    const sup = makeSupervisor({
+      eventLog,
+      reviewer: new ReviewerAgent({ llm: spyLlm }),
+      toolRunner: new ToolRunner({
+        eventLog,
+        context: { logProvider: { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) } },
+      }),
+    });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'errors' }), context: ctx('c-trace'), bundle });
+    expect(r.ok).toBe(true);
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    const finalView = seen[seen.length - 1] ?? [];
+    expect(finalView).toContain('tool_call');
+  });
+
   it('runs the pipeline end-to-end for a read-only query', async () => {
     const sup = makeSupervisor({
       toolRunner: new ToolRunner({

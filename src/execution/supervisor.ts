@@ -209,9 +209,12 @@ export class SupervisorAgent {
       if (!v.passed) return fail(`investigation step failed verification: ${v.reason ?? 'unknown'}`);
     }
 
-    // 3. Reviewer over the trace so far
+    // 3. Reviewer over the trace so far — refreshed so the reviewer sees
+    //    the tool_call events the dance has already emitted. Judging a
+    //    pre-dance bundle would blind it to the very actions it reviews.
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    await this.refreshTrace(bundle);
     const rev = await this.reviewer.run(bundle);
     if (rev.decision.verdict === 'fail') return fail(`reviewer rejected outcome: ${rev.decision.feedback}`);
 
@@ -236,9 +239,10 @@ export class SupervisorAgent {
       if (!v.passed) return fail(`side-effect failed verification: ${v.reason ?? 'unknown'}`);
     }
 
-    // 6. Final review
+    // 6. Final review — same live trace refresh.
     hops++;
     if (hops > this.maxHops) return fail('hop cap reached');
+    await this.refreshTrace(bundle);
     const final = await this.reviewer.run(bundle);
     const ok = final.decision.verdict !== 'fail';
     const summary = ok
@@ -255,6 +259,20 @@ export class SupervisorAgent {
     });
     this.loops.clear({ correlationId: context.correlationId });
     return { ok, hops, toolCalls, summary, source: 'pipeline' };
+  }
+
+  /** Re-pull the recent-events window so reviewers judge the live trace
+   *  (including tool_call events emitted by this dance), not the stale
+   *  bundle assembled before it. Mirrors the pipeline's 60s window. */
+  private async refreshTrace(bundle: ContextBundle): Promise<void> {
+    if (!this.eventLog) return;
+    const cutoff = this.now() - 60_000;
+    const out: ContextBundle['recent'] = [];
+    for await (const e of this.eventLog.query({ from: cutoff, to: this.now() })) {
+      out.push(e);
+      if (out.length >= 10) break;
+    }
+    if (out.length > 0) bundle.recent = out;
   }
 
   /** Execute one step through the ToolRunner with loop detection. */
