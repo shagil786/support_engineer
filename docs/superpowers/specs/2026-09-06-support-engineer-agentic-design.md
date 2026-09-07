@@ -198,25 +198,48 @@ with tunable thresholds; the shipped seed corpus + 9-case golden set
 retrieval regressions.
 
 **Embeddings** — the `EmbedderLike` port accepts sync (hash) and async
-(cloud) backends. `OpenAiCompatibleEmbedder` (`memory/embedders/openai.ts`)
+(cloud/local) backends. `OpenAiCompatibleEmbedder` (`memory/embedders/openai.ts`)
 batches, caches per (model, text), L2-normalizes, and deterministically
 folds oversized vectors to `EMBEDDINGS_DIM`; `EMBEDDINGS_BASE_URL/_API_KEY/
-_MODEL` are all-or-nothing (partial config throws). Swapping backends is a
-one-time migration: `FileBackedVectorMemory.reindex()` / the KB's
-`reindex()` re-embed every record in place (docs and BM25 untouched), also
-exposed as `knowledge-cli reindex`.
+_MODEL` are all-or-nothing (partial config throws). **`LocalEmbedder`**
+(`memory/embedders/local.ts`) runs all-MiniLM-L6-v2 in-process via
+transformers.js — real semantic vectors with no key and no second provider
+(inferX serves chat models only, verified against its `/models` catalog and
+docs). Lazy singleton pipeline (dynamic import, first-embed load, ~25MB
+cached), batching, dim folding, honest `EmbeddingError('model_load'|
+'inference')`. Config is provider-discriminated: `EMBEDDINGS_PROVIDER=local`
+(optional `EMBEDDINGS_MODEL`, `EMBEDDINGS_DIM`) vs `remote` (the legacy
+implicit default); a single **`embedderFromConfig` factory**
+(`memory/embedders/factory.ts`) is the only construction site — bootstrap,
+`knowledge-cli`, and both eval scripts — so a migrated KB is always queried
+under its own vector backend (mixing backends silently would corrupt
+retrieval). Swapping backends is a one-time migration: `reindex()` re-embeds
+every record in place (docs and BM25 untouched), also exposed as
+`knowledge-cli reindex`. Concurrency note: the KB tracks in-flight vector
+adds and `search()` settles them first — async embedders make indexing
+genuinely concurrent with queries, and an unsettled boot race silently
+drops the semantic signal (BM25 survives, vector-only queries return
+nothing).
 
 **`GroundedAnswerer`** (`understanding/grounded-answerer.ts`) — the
 hallucination-reduction layer over the KB: empty/near-zero retrieval →
 **refuse without calling the LLM** (guessing from nothing is structurally
 impossible); otherwise a numbered-context prompt ("answer ONLY from the
-context, cite the numbers"), a Zod-validated `{answer, citations[]}` reply
-with citations filtered to numbers that actually exist, and an honest
-extractive floor (top-chunk sentences, still cited) when the LLM is
-unwired, invalid, or uncited. Exposed as `platform.answerer` and
-**`POST /ask`** on the HTTP surface (`{question, topK?, where?}`, bearer
-auth + rate limit + idempotent replay like every dispatch route; refusals
-are 200 — an honest answer, not an error).
+context, cite the numbers, state facts directly — never 'the context says'"
+— meta-framing judges as unsupported even when true), a Zod-validated
+`{answer, citations[]}` reply with citations filtered to numbers that
+actually exist, and an honest extractive floor (top-chunk sentences, still
+cited) when the LLM is unwired, invalid, or uncited. **Claim-verification
+guard** (`claimJudge`, the `FaithfulnessJudge` contract reused in-request):
+when configured (bootstrap wires `LlmClaimJudge` whenever the LLM is
+wired), every sentence of an LLM answer must be entailed by its cited
+context — any unsupported claim (or judge failure) fails CLOSED to the
+extractive floor; hallucination prevention, not detection-after-the-fact.
+Answers report `llmVerified` so consumers know whether an LLM answer was
+verified or the deterministic floor served. Exposed as `platform.answerer`
+and **`POST /ask`** on the HTTP surface (`{question, topK?, where?}`,
+bearer auth + rate limit + idempotent replay like every dispatch route;
+refusals are 200 — an honest answer, not an error).
 
 **Voice grounding (live path)** — the pipeline tries the answerer FIRST for
 `question` intents, at a stricter **0.4 floor** (spoken answers must be
@@ -238,11 +261,15 @@ claims and each claim is judged against its cited context text.
 a ceiling) is deterministic and LLM-free; `LlmClaimJudge` upgrades
 verdicts via LLM-as-judge (Zod-validated `{verdict}`, per-claim fallback
 to the lexical floor). Refusals are graded: correct when `expectRefusal`,
-zero when over-refusal. `GroundedAnswer.sources` carry the chunk text so
-judges and `/ask` clients can verify claims without re-reading the KB.
-The eval grades at the production 0.4 floor; `npm run eval:faithfulness`
-(`scripts/faithfulness-eval.ts`) prints per-case OK/FAIL lines and exits
-below threshold like the retrieval gate.
+zero when over-refusal. Per-case **`servedBy`** (`llm` | `llm-rejected` |
+`extractive` | `refusal`) makes the guard's swaps visible — a guard that
+silently replaced LLM answers with the floor could not green-wash the
+gate. `GroundedAnswer.sources` carry the chunk text so judges and `/ask`
+clients can verify claims without re-reading the KB. The eval grades at
+the production 0.4 floor with the same claim guard production ships
+(`scripts/faithfulness-eval.ts` constructs the answerer identically to
+bootstrap); `npm run eval:faithfulness` prints per-case OK/FAIL lines and
+exits below threshold like the retrieval gate.
 
 ### 4.2 Boundary discipline
 

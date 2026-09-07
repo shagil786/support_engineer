@@ -42,6 +42,12 @@ export interface FaithfulnessCaseResult {
   score: number;
   claims: string[];
   unsupported: string[];
+  /** How the answer was served: 'llm' (model answer, judged supported),
+   *  'llm-rejected' (model answer failed the claim guard → extractive),
+   *  'extractive' (no usable LLM answer), 'refusal'. A guard that silently
+   *  swapped LLM answers for the extractive floor would otherwise green- wash
+   *  the gate — the swap is visible per case. */
+  servedBy: 'llm' | 'llm-rejected' | 'extractive' | 'refusal';
 }
 
 export interface FaithfulnessReport {
@@ -159,6 +165,7 @@ export async function evaluateFaithfulness(
         score: c.expectRefusal === true ? 1 : 0,
         claims: [],
         unsupported: [],
+        servedBy: 'refusal',
       });
       continue;
     }
@@ -169,6 +176,11 @@ export async function evaluateFaithfulness(
       if ((await judge.judge(claim, contexts)) === 'unsupported') unsupported.push(claim);
     }
     const supported = claims.length - unsupported.length;
+    // servedBy: the answerer's own report of how the answer was produced.
+    // usedLlm+llmVerified → 'llm'; usedLlm without verification → 'llm-rejected'
+    // (the guard swapped it for the extractive floor); else 'extractive'.
+    const servedBy: FaithfulnessCaseResult['servedBy'] =
+      result.usedLlm && result.llmVerified ? 'llm' : result.usedLlm ? 'llm-rejected' : 'extractive';
     perCase.push({
       id: c.id,
       question: c.question,
@@ -177,6 +189,7 @@ export async function evaluateFaithfulness(
       score: claims.length === 0 ? 0 : supported / claims.length,
       claims,
       unsupported,
+      servedBy,
     });
   }
 

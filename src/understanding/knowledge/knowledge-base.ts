@@ -78,6 +78,12 @@ export class FileBackedKnowledgeBase {
   private readonly docs = new Map<string, Chunk[]>();
   private readonly maxChars?: number;
   private readonly overlapChars?: number;
+  /** In-flight vector-indexing promises. Async embedders (local models,
+   *  HTTP backends) make indexing genuinely concurrent with search — every
+   *  add is tracked so `search()` can settle the backlog first. Without
+   *  this, a query racing construction or ingest sees an empty vector pool
+   *  and silently loses the entire semantic signal. */
+  private readonly pending = new Set<Promise<unknown>>();
 
   constructor(opts: FileBackedKnowledgeBaseOptions) {
     this.path = opts.path;
@@ -127,15 +133,37 @@ export class FileBackedKnowledgeBase {
     }
   }
 
+  /** Track a fire-and-forget vector add: settleable by search(), logged on
+   *  failure (a failed embed must not reject unhandled — the chunk stays
+   *  BM25-searchable; the semantic signal for it is simply absent). */
+  private track(p: Promise<unknown>): void {
+    const tracked = p.catch((e: unknown) => {
+      console.error('KnowledgeBase: vector indexing failed for a chunk:', e);
+    });
+    this.pending.add(tracked);
+    void tracked.finally(() => {
+      this.pending.delete(tracked);
+    });
+  }
+
+  /** Resolve when every tracked indexing promise has settled. */
+  private async settle(): Promise<void> {
+    while (this.pending.size > 0) {
+      await Promise.all([...this.pending]);
+    }
+  }
+
   private rebuildIndexes(): void {
     for (const [docId, chunks] of this.docs) {
       for (const c of chunks) {
         this.bm25.add(chunkKey(docId, c.index), `${c.heading}\n${c.text}`);
-        void this.vectors.add({
-          id: chunkKey(docId, c.index),
-          text: `${c.heading}\n${c.text}`,
-          metadata: c.metadata,
-        });
+        this.track(
+          this.vectors.add({
+            id: chunkKey(docId, c.index),
+            text: `${c.heading}\n${c.text}`,
+            metadata: c.metadata,
+          }),
+        );
       }
     }
   }
@@ -156,11 +184,13 @@ export class FileBackedKnowledgeBase {
     this.docs.set(doc.id, chunks);
     for (const c of chunks) {
       this.bm25.add(chunkKey(doc.id, c.index), `${c.heading}\n${c.text}`);
-      void this.vectors.add({
-        id: chunkKey(doc.id, c.index),
-        text: `${c.heading}\n${c.text}`,
-        metadata: c.metadata,
-      });
+      this.track(
+        this.vectors.add({
+          id: chunkKey(doc.id, c.index),
+          text: `${c.heading}\n${c.text}`,
+          metadata: c.metadata,
+        }),
+      );
     }
     this.persist();
     return chunks.length;
@@ -172,7 +202,7 @@ export class FileBackedKnowledgeBase {
     if (!old) return 0;
     for (const c of old) {
       this.bm25.remove(chunkKey(docId, c.index));
-      void this.vectors.purge((r) => r.id === chunkKey(docId, c.index));
+      this.track(this.vectors.purge((r) => r.id === chunkKey(docId, c.index)));
     }
     this.docs.delete(docId);
     this.persist();
@@ -208,6 +238,9 @@ export class FileBackedKnowledgeBase {
    * Metadata filters apply BEFORE scoring (pre-filter, per the skill).
    */
   async search(query: string, opts: SearchOptions = {}): Promise<KnowledgeHit[]> {
+    // Async embedders index concurrently with callers: settle the in-flight
+    // backlog so the vector signal is actually present (the boot-race guard).
+    await this.settle();
     const topK = opts.topK ?? 5;
     const minScore = opts.minScore ?? 0.05;
     const where = opts.where;

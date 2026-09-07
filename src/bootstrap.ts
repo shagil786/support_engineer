@@ -24,6 +24,7 @@ import { ContextAssembler } from './understanding/context-assembler.js';
 import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
 import { embedderFromConfig, type EmbeddingsConfig } from './understanding/memory/embedders/factory.js';
 import { GroundedAnswerer } from './understanding/grounded-answerer.js';
+import { LlmClaimJudge } from './understanding/faithfulness-eval.js';
 import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
 import type { SpeakerRole } from './governance/safety-net/index.js';
@@ -221,7 +222,14 @@ export function createPlatform(opts: PlatformOptions): Platform {
     ...(opts.slack ? { slack: opts.slack } : {}),
   });
 
-  const answerer = new GroundedAnswerer({ knowledge, llm });
+  // The claim-verification guard rides along whenever the LLM is wired: any
+  // unsupported claim in an LLM answer drops it to the extractive floor, so
+  // hallucination prevention happens in the request path, not just in eval.
+  const answerer = new GroundedAnswerer({
+    knowledge,
+    llm,
+    ...(llm.isWired() ? { claimJudge: new LlmClaimJudge(llm) } : {}),
+  });
   const pipeline = new OrchestratedPipeline({
     legacy,
     classifier,

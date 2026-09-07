@@ -89,7 +89,14 @@ const llm = new OpenAiCompatibleClient({
   apiKey: process.env['LLM_API_KEY'] ?? '',
   model: process.env['LLM_MODEL'] ?? '',
 });
-const answerer = new GroundedAnswerer({ knowledge: kb, llm });
+// Production parity: bootstrap wires the LlmClaimJudge as an in-request
+// guard whenever the LLM is wired — so the eval's answerer must grade under
+// the same guard, not a more permissive shape.
+const answerer = new GroundedAnswerer({
+  knowledge: kb,
+  llm,
+  ...(llm.isWired() ? { claimJudge: new LlmClaimJudge(llm) } : {}),
+});
 if (judgeKind === 'llm' && !llm.isWired()) {
   console.error('error: --judge llm requires LLM_BASE_URL / LLM_API_KEY / LLM_MODEL to be wired (refusing to silently grade with the lexical judge)');
   process.exit(2);
@@ -101,11 +108,12 @@ console.log(
   `Faithfulness eval '${report.name}': ${report.cases} cases, mean=${report.meanFaithfulness.toFixed(3)}, refusalAccuracy=${report.refusalAccuracy.toFixed(3)} (judge: ${judgeKind})`,
 );
 for (const c of report.perCase) {
+  const served = c.refused ? '' : ` [${c.servedBy}]`;
   if (c.refused) {
     console.log(`  ${c.refusalCorrect ? 'OK  ' : 'FAIL'} ${c.id}: refused (${c.refusalCorrect ? 'expected' : 'over-refusal'})`);
   } else {
-    for (const u of c.unsupported) console.log(`  FAIL ${c.id}: unsupported claim — "${u}"`);
-    if (c.unsupported.length === 0) console.log(`  OK   ${c.id}: ${c.claims.length} claim(s) supported`);
+    for (const u of c.unsupported) console.log(`  FAIL ${c.id}${served}: unsupported claim — "${u}"`);
+    if (c.unsupported.length === 0) console.log(`  OK   ${c.id}${served}: ${c.claims.length} claim(s) supported`);
   }
 }
 

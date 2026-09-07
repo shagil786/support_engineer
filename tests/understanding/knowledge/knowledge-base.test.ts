@@ -48,6 +48,29 @@ describe('FileBackedKnowledgeBase', () => {
   beforeEach(() => {
     root = dir();
   });
+
+  it('waits for in-flight vector indexing before searching (async-embedder boot race)', async () => {
+    // An embedder with real async latency (like a local model or HTTP call):
+    // embeds to a semantic class vector, NOT a lexical one, so BM25 cannot
+    // rescue the query — only the vector signal can find the doc.
+    const fruitEmbedder = async (t: string): Promise<number[]> => {
+      await new Promise((r) => setTimeout(r, 15));
+      return [t.toLowerCase().match(/apple|banana|cherry/) ? 1 : 0];
+    };
+    const path = join(root, 'kb.json');
+    const kb = new FileBackedKnowledgeBase({ path, embedder: fruitEmbedder });
+    await kb.ingest({ id: 'fruit-doc', text: 'Apples are kept in the cold room.', metadata: {} });
+
+    // Zero lexical overlap with the doc text — vector-only retrieval.
+    const hits = await kb.search('banana', { topK: 3 });
+    expect(hits[0]?.docId).toBe('fruit-doc');
+
+    // And the boot path: a fresh instance re-embeds from its snapshot
+    // asynchronously — a search right after construction must still see it.
+    const kb2 = new FileBackedKnowledgeBase({ path, embedder: fruitEmbedder });
+    const hits2 = await kb2.search('cherry', { topK: 3 });
+    expect(hits2[0]?.docId).toBe('fruit-doc');
+  });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
   });

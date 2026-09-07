@@ -117,4 +117,58 @@ describe('GroundedAnswerer', () => {
     expect(r.usedLlm).toBe(false);
     expect(r.answer.length).toBeGreaterThan(0);
   });
+
+  it('claim-verification guard: an unsupported LLM claim drops to the extractive floor', async () => {
+    // The LLM invents "the secondary gets paged" — the corpus never says it.
+    const llm = new EchoLlm(() => ({
+      answer: 'Escalate to the secondary. The secondary gets paged when on-call escalation fires.',
+      citations: [1],
+    }));
+    const kb = await seededKb(root);
+    const strictJudge = {
+      judge: async (claim: string) => (claim.includes('paged') ? 'unsupported' : 'supported'),
+    };
+    const ga = new GroundedAnswerer({ knowledge: kb, llm, claimJudge: strictJudge });
+    const r = await ga.answer('who gets paged when oncall escalation fires');
+    expect(r.usedLlm).toBe(false); // the LLM answer was rejected
+    expect(r.answer).not.toContain('paged');
+    expect(r.citations).toEqual([1]);
+    expect(r.llmVerified).toBe(false);
+  });
+
+  it('claim-verification guard: supported claims keep the LLM answer, marked verified', async () => {
+    const llm = new EchoLlm(() => ({ answer: 'Restart the checkout pod single-pod.', citations: [1] }));
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer({
+      knowledge: kb,
+      llm,
+      claimJudge: { judge: async () => 'supported' },
+    });
+    const r = await ga.answer('checkout not responding');
+    expect(r.usedLlm).toBe(true);
+    expect(r.llmVerified).toBe(true);
+    expect(r.answer).toContain('single-pod');
+  });
+
+  it('no claim judge configured → LLM answers still flow, honestly unverified', async () => {
+    const llm = new EchoLlm(() => ({ answer: 'Restart the pod.', citations: [1] }));
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer(wired(kb, llm));
+    const r = await ga.answer('checkout not responding');
+    expect(r.usedLlm).toBe(true);
+    expect(r.llmVerified).toBe(false);
+  });
+
+  it('a throwing claim judge fails closed to the extractive floor', async () => {
+    const llm = new EchoLlm(() => ({ answer: 'Restart the pod.', citations: [1] }));
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer({
+      knowledge: kb,
+      llm,
+      claimJudge: { judge: async () => { throw new Error('judge down'); } },
+    });
+    const r = await ga.answer('checkout not responding');
+    expect(r.usedLlm).toBe(false);
+    expect(r.citations).toEqual([1]);
+  });
 });

@@ -19,6 +19,7 @@
 import { z } from 'zod';
 import type { FileBackedKnowledgeBase, KnowledgeHit, SearchOptions } from './knowledge/knowledge-base.js';
 import type { LlmClient } from '../support-voice-agent/tools/llm.js';
+import type { FaithfulnessJudge, Verdict } from './faithfulness-eval.js';
 
 const AnswerSchema = z.object({
   answer: z.string().min(1),
@@ -30,6 +31,10 @@ const GroundedAnswerSchema = z.object({
   citations: z.array(z.number()),
   refused: z.boolean(),
   usedLlm: z.boolean(),
+  /** True when every claim of an LLM answer passed the configured claim
+   *  judge. False for extractive answers (they ARE the corpus) and when no
+   *  judge is configured (honest: unverified, not silently trusted). */
+  llmVerified: z.boolean().default(false),
   sources: z.array(
     z.object({
       docId: z.string(),
@@ -51,6 +56,12 @@ export interface GroundedAnswererOptions {
   knowledge: FileBackedKnowledgeBase;
   /** LLM optional: unwired → always extractive answers (still grounded). */
   llm?: LlmClient;
+  /** Optional claim-verification guard (the faithfulness harness's judge
+   *  contract, reused in the request path): every claim of an LLM answer is
+   *  judged against its cited context; any 'unsupported' claim fails the
+   *  whole answer to the deterministic extractive floor. Hallucination
+   *  prevention, not detection-after-the-fact. */
+  claimJudge?: FaithfulnessJudge;
 }
 
 export interface AnswerOptions {
@@ -91,6 +102,7 @@ export class GroundedAnswerer {
         citations: [],
         refused: true,
         usedLlm: false,
+        llmVerified: false,
         sources: [],
         contextSize: 0,
       };
@@ -116,11 +128,34 @@ export class GroundedAnswerer {
           const valid = [...new Set(parsed.data.citations)].filter((n) => n >= 1 && n <= hits.length);
           // A citation-less answer is unsupported by construction → fallback.
           if (valid.length > 0) {
+            const answer = parsed.data.answer.trim();
+            // Claim-verification guard (when a judge is configured): every
+            // sentence must be entailed by the context it cites. Any
+            // unsupported claim — or a judge failure — fails CLOSED to the
+            // extractive floor: a hallucination is never emitted.
+            const judge = this.opts.claimJudge;
+            if (judge) {
+              const contexts = sources.map((s) => `[${s.docId}#${s.index}]${s.heading ? ` ${s.heading}:` : ''} ${s.text}`);
+              const ok = await allClaimsSupported(answer, judge, contexts);
+              if (!ok) {
+                return this.extractive(question, hits, sources);
+              }
+              return {
+                answer,
+                citations: valid,
+                refused: false,
+                usedLlm: true,
+                llmVerified: true,
+                sources,
+                contextSize: hits.length,
+              };
+            }
             return {
-              answer: parsed.data.answer.trim(),
+              answer,
               citations: valid,
               refused: false,
               usedLlm: true,
+              llmVerified: false,
               sources,
               contextSize: hits.length,
             };
@@ -131,16 +166,50 @@ export class GroundedAnswerer {
       }
     }
 
+    return this.extractive(question, hits, sources);
+  }
+
+  /** The deterministic floor: an extractive answer from the top chunk —
+   *  grounded by construction (it IS the source), never verified-LLM. */
+  private extractive(
+    question: string,
+    hits: KnowledgeHit[],
+    sources: GroundedAnswer['sources'],
+  ): GroundedAnswer {
     const top = hits[0] as KnowledgeHit;
     return {
       answer: extractiveAnswer(question, top),
       citations: [1],
       refused: false,
       usedLlm: false,
+      llmVerified: false,
       sources,
       contextSize: hits.length,
     };
   }
+}
+
+/** Split an answer into sentence-level claims and require EVERY one to be
+ *  entailed. A judge throw fails closed (unsupported). */
+async function allClaimsSupported(
+  answer: string,
+  judge: FaithfulnessJudge,
+  contexts: string[],
+): Promise<boolean> {
+  const claims = answer
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (claims.length === 0) return false;
+  for (const claim of claims) {
+    try {
+      const verdict: Verdict = await judge.judge(claim, contexts);
+      if (verdict !== 'supported') return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function safeJson(text: string): unknown {
@@ -169,6 +238,7 @@ const SYSTEM_PROMPT = `You answer support-engineer questions from a numbered CON
 Rules:
 - Use ONLY facts present in the context. Never use prior knowledge.
 - Quote the context closely; do not add specifics it does not state (e.g. do not turn "escalate to X" into "X gets paged").
+- State facts directly. Never write meta-references like "the context says" or "according to the sources" — restate the fact itself, not a description of the context.
 - Cite the context numbers supporting your answer in "citations".
 - If the context does not contain the answer, do not invent it: set "citations" to [] and put a one-sentence "the sources do not cover this" reply in "answer".
 - Reply with JSON only: {"answer": string, "citations": number[]}`;
