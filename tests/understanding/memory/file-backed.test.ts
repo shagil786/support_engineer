@@ -155,6 +155,73 @@ describe('FileBackedVectorMemory', () => {
     const hits = await second.search('seeded under dim3', 1, 0);
     expect(hits[0]?.id).toBe('a');
   });
+
+  describe('boot self-check', () => {
+    it('warns loudly at construction when persisted dims mismatch the embedder', async () => {
+      const dim3 = (text: string): number[] => [text.length, 1, 2];
+      const dim4 = (text: string): number[] => [text.length, 1, 2, 3];
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded under dim3' });
+
+      const err = console.error;
+      const seen: string[] = [];
+      console.error = (...args: unknown[]) => {
+        seen.push(args.map(String).join(' '));
+      };
+      try {
+        const second = new FileBackedVectorMemory({ path, embedder: dim4 });
+        await second.whenBootChecked();
+        expect(seen.some((s) => s.includes('DIMENSION MISMATCH') && s.includes(path))).toBe(true);
+      } finally {
+        console.error = err;
+      }
+    });
+
+    it('stays silent when dims match and never probes an empty store', async () => {
+      const dim3 = (text: string): number[] => [text.length, 1, 2];
+      const err = console.error;
+      const seen: string[] = [];
+      console.error = (...args: unknown[]) => {
+        seen.push(args.map(String).join(' '));
+      };
+      try {
+        // Empty store: no boot check at all (nothing to mismatch against).
+        const empty = new FileBackedVectorMemory({ path, embedder: dim3 });
+        await empty.whenBootChecked();
+        expect(seen).toEqual([]);
+        // Matching dims: construction is silent.
+        const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+        await first.add({ id: 'a', text: 'seeded' });
+        const second = new FileBackedVectorMemory({ path, embedder: dim3 });
+        await second.whenBootChecked();
+        expect(seen).toEqual([]);
+      } finally {
+        console.error = err;
+      }
+    });
+
+    it('logs (never throws) when the probe embedder itself fails', async () => {
+      const dim3 = (text: string): number[] => [text.length, 1, 2];
+      const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+      await first.add({ id: 'a', text: 'seeded' });
+
+      const err = console.error;
+      const seen: string[] = [];
+      console.error = (...args: unknown[]) => {
+        seen.push(args.map(String).join(' '));
+      };
+      try {
+        const boom = (): number[] => {
+          throw new Error('model load failed');
+        };
+        const second = new FileBackedVectorMemory({ path, embedder: boom });
+        await second.whenBootChecked();
+        expect(seen.some((s) => s.includes('boot self-check failed'))).toBe(true);
+      } finally {
+        console.error = err;
+      }
+    });
+  });
 });
 
 describe('EpisodicMemory crossPath persistence', () => {

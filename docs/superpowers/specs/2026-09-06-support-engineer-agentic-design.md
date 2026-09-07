@@ -234,7 +234,14 @@ under the wired embedder) — the guard exists for any persisted-vector
 store and for future multi-process access to `procedures.json` where the
 cron and serve could disagree on the embedder. Dimension equality is
 necessary, not sufficient: two different same-dim models remain the
-operator's responsibility.
+operator's responsibility. The store also runs a **boot self-check** in
+its constructor (fire-and-forget, awaitable via `whenBootChecked()`):
+non-empty stores probe the configured embedder once and log the
+mismatch at startup — before the first request fails mid-flight and
+hides behind honest degradation; empty stores never probe (first boot
+never triggers an accidental model load). Both processes that open
+`procedures.json` — serve's bootstrap and the learning cron — inherit
+the check for free.
 
 **`GroundedAnswerer`** (`understanding/grounded-answerer.ts`) — the
 hallucination-reduction layer over the KB: empty/near-zero retrieval →

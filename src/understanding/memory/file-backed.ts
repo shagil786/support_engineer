@@ -56,6 +56,35 @@ export class FileBackedVectorMemory {
     this.path = opts.path;
     this.embed = opts.embedder ?? hashEmbedder;
     this.entries = this.load();
+    this.bootCheckPromise = this.runBootCheck();
+  }
+
+  /** Boot-time compatibility self-check (spec: fail loud at boot, not at
+   *  first request). Construction cannot await async embedders, so the
+   *  check runs fire-and-forget and logs on failure; `whenBootChecked()`
+   *  exposes it as an awaitable for hosts that want the warning to land
+   *  deterministically before serving traffic. Empty stores return before
+   *  probing — first boot never triggers an accidental model load. */
+  private bootCheckPromise?: Promise<void>;
+
+  /** Resolves once the boot compatibility check has settled (empty stores
+   *  resolve immediately — nothing to mismatch against). */
+  whenBootChecked(): Promise<void> {
+    return this.bootCheckPromise ?? Promise.resolve();
+  }
+
+  private async runBootCheck(): Promise<void> {
+    if (this.dim() === undefined) return;
+    try {
+      await this.assertCompatible();
+    } catch (e) {
+      // Two loud failure classes, both surfaced at boot instead of hiding
+      // behind the first request's honest-degradation path:
+      //  - dimension mismatch (assertCompatible's actionable message)
+      //  - probe embedder failure (model load / network — a broken embedder
+      //    would fail every later add/search anyway)
+      console.error('FileBackedVectorMemory: boot self-check failed:', e);
+    }
   }
 
   /** Dimensionality of the persisted vectors (undefined when empty).
@@ -88,7 +117,7 @@ export class FileBackedVectorMemory {
     const live = await this.embedderDim();
     if (stored !== live) {
       throw new Error(
-        `FileBackedVectorMemory (${this.path}): stored vectors are ${stored}-dim but the configured embedder produces ${live}-dim — ` +
+        `DIMENSION MISMATCH: FileBackedVectorMemory (${this.path}): stored vectors are ${stored}-dim but the configured embedder produces ${live}-dim — ` +
           'the two vector spaces are incompatible. Run reindex() (or the knowledge-cli / learning-cron equivalent) before using this store.',
       );
     }
