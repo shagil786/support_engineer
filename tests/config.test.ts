@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { configFromEnv, jiraConfigFromEnv, requireJira, createAgent } from '../src/config';
+import { rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { configFromEnv, jiraConfigFromEnv, requireJira, createAgent, runbooksFromFile } from '../src/config';
 import { InMemoryRunbookProvider } from '../src/support-voice-agent/integrations/runbook';
 import type { SpeechEvent } from '../src/index';
 
@@ -71,6 +74,29 @@ describe('configFromEnv', () => {
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '500' }).approvalTimeoutMs).toBeUndefined();
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: 'nope' }).approvalTimeoutMs).toBeUndefined();
     expect(configFromEnv({ APPROVAL_TIMEOUT_MS: '30000' }).approvalTimeoutMs).toBe(30_000);
+  });
+
+  it('runbooksFromFile validates loudly (missing file, bad JSON, bad shape, valid)', () => {
+    expect(() => runbooksFromFile('/nonexistent/runbooks.json')).toThrow(/unreadable/);
+    const bad = join(tmpdir(), `rb-bad-${Date.now()}.json`);
+    writeFileSync(bad, '{oops');
+    expect(() => runbooksFromFile(bad)).toThrow(/not valid JSON/);
+    writeFileSync(bad, '[{"id":"r1"}]');
+    expect(() => runbooksFromFile(bad)).toThrow(/RunbookAction\[\]/);
+    writeFileSync(bad, JSON.stringify([{ id: 'r1', name: 'restart', description: 'restart the api pod', destructive: true }]));
+    expect(runbooksFromFile(bad)).toEqual([{ id: 'r1', name: 'restart', description: 'restart the api pod', destructive: true }]);
+    rmSync(bad);
+  });
+
+  it('parses portability env: DATA_DIR, APPROVERS, APPROVAL_CHANNEL (absent by default)', () => {
+    expect(configFromEnv({}).dataDir).toBeUndefined();
+    expect(configFromEnv({}).approvers).toBeUndefined();
+    expect(configFromEnv({}).approvalChannel).toBeUndefined();
+    expect(configFromEnv({ DATA_DIR: '/srv/agent-data' }).dataDir).toBe('/srv/agent-data');
+    expect(configFromEnv({ DATA_DIR: '   ' }).dataDir).toBeUndefined();
+    expect(configFromEnv({ APPROVERS: ' u1, u2 ,,u3 ' }).approvers).toEqual(['u1', 'u2', 'u3']);
+    expect(configFromEnv({ APPROVERS: ',, ' }).approvers).toBeUndefined();
+    expect(configFromEnv({ APPROVAL_CHANNEL: '#incidents' }).approvalChannel).toBe('#incidents');
   });
 
   it('parses SUPERVISOR_* caps from env (with a sane floor, absent by default)', () => {

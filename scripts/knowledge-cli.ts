@@ -65,7 +65,7 @@ function openKb(): FileBackedKnowledgeBase {
   // KB's built-in hash embedder. Same contract as bootstrap and the evals.
   const embedder = embedderFromConfig(embeddingsFromEnv(process.env));
   return new FileBackedKnowledgeBase({
-    path: resolve(process.cwd(), 'var', 'knowledge', 'kb.json'),
+    path: resolve(process.env['DATA_DIR'] ?? resolve(process.cwd(), 'var'), 'knowledge', 'kb.json'),
     ...(embedder ? { embedder } : {}),
   });
 }

@@ -26,7 +26,7 @@ if (!enabled) {
   process.exit(1);
 }
 
-const root = resolve(process.cwd(), 'var');
+const root = resolve(process.env['DATA_DIR'] ?? resolve(process.cwd(), 'var'));
 const intervalRaw = Number(env['LEARNING_INTERVAL_MS'] ?? 0);
 const intervalMs = Number.isFinite(intervalRaw) && intervalRaw >= 1_000 ? intervalRaw : 15 * 60_000;
 

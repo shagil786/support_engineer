@@ -21,7 +21,7 @@ import { evaluateRetrieval, assertQualityGate } from '../src/understanding/knowl
 import { RETRIEVAL_SEED_DOCS, RETRIEVAL_GOLDEN_SET } from '../src/fixtures/retrieval-golden-set.js';
 
 // --- args ----------------------------------------------------------------
-let kbPath = join(process.cwd(), 'var/knowledge/kb.json');
+let kbPath = join(process.env['DATA_DIR'] ?? join(process.cwd(), 'var'), 'knowledge', 'kb.json');
 let minHitRate = 1;
 let minMrr = 0.9;
 const args = process.argv.slice(2);

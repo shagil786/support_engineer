@@ -75,7 +75,7 @@ const SET = {
 // LlmClaimJudge silently degrade to lexical per-claim.
 loadDotEnv({ env: process.env });
 
-const kbPath = join(process.cwd(), 'var/knowledge/kb.json');
+const kbPath = join(process.env['DATA_DIR'] ?? join(process.cwd(), 'var'), 'knowledge', 'kb.json');
 const seededHere = !existsSync(kbPath);
 // Same embedder contract as production: EMBEDDINGS_* env decides the
 // backend, so this eval always grades the KB under its real vectors.

@@ -10,6 +10,9 @@
  * `support-voice-agent/heuristics.ts` — they are not duplicated here.
  */
 
+import { readFileSync } from 'node:fs';
+import { z } from 'zod';
+import type { RunbookAction } from './support-voice-agent/integrations/runbook';
 import { loadDotEnv } from './env';
 import * as h from './support-voice-agent/heuristics';
 import { SupportVoiceAgent } from './support-voice-agent/agent';
@@ -55,6 +58,20 @@ export interface IntegrationsFromEnv {
   /** APPROVAL_TIMEOUT_MS (>= 1000): how long a staged approval stays
    *  pending before it times out. Absent = the gate's built-in default. */
   approvalTimeoutMs?: number;
+  /** DATA_DIR: root for all runtime data (events, outcomes, memory, stats,
+   *  knowledge). Absent = 'var' under the process cwd — keep the default for
+   *  local dev; production points this at a mounted volume. */
+  dataDir?: string;
+  /** RUNBOOKS_FILE: path to a JSON array of runbook actions
+   *  [{ id, name, description, destructive }] the agent may offer/execute.
+   *  The file is loaded and validated by the host; absent = no runbooks. */
+  runbooksFile?: string;
+  /** APPROVERS: comma-separated speaker ids trusted as admins (Slack user
+   *  ids, console ids). The console speaker (SPEAKER) is always admin. */
+  approvers?: string[];
+  /** APPROVAL_CHANNEL: Slack channel for staged approvals
+   *  (default: the gate's #support-agent-approvals). */
+  approvalChannel?: string;
   /** Supervisor caps from env: SUPERVISOR_MAX_WALLCLOCK_MS (>= 1000),
    *  SUPERVISOR_MAX_HOPS (>= 1), SUPERVISOR_MAX_TOKENS (>= 1000),
    *  SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS (>= 1). Absent keys = the
@@ -188,6 +205,38 @@ export function llmConfigFromEnv(env: Env = process.env): LlmConfig | undefined 
  *  must be supplied by the host (see `CloudWatchConfig`), and
  *  AWS_REGION/AWS_ACCESS_KEY_* handling belongs to the host's AWS SDK setup.
  */
+/** Load an org's runbook catalog from a JSON file (RUNBOOKS_FILE). Fails
+ *  LOUD on a missing or malformed file: an operator who points the agent at
+ *  a catalog wants that catalog, and an empty-by-accident registry would
+ *  silently downgrade every runbook offer to 'unwired'. */
+export function runbooksFromFile(path: string): RunbookAction[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    throw new Error(`RUNBOOKS_FILE ${path} is unreadable: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`RUNBOOKS_FILE ${path} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const Schema = z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().min(1),
+      destructive: z.boolean(),
+    }),
+  );
+  const result = Schema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(`RUNBOOKS_FILE ${path} does not match RunbookAction[] ({ id, name, description, destructive }): ${result.error.message}`);
+  }
+  return result.data;
+}
+
 export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
   // When reading the real process environment, auto-load a repo-local .env
   // (if present) first; real shell variables are never overwritten.
@@ -235,6 +284,20 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
 
   const embeddings = embeddingsFromEnv(env);
   if (embeddings) out.embeddings = embeddings;
+
+  // Portability kit: same binary, any org — data location, runbook catalog,
+  // approver identities and approval channel are all deployment config.
+  const dataDir = envVar(env, 'DATA_DIR')?.trim();
+  if (dataDir) out.dataDir = dataDir;
+  const approvers = (envVar(env, 'APPROVERS') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  if (approvers.length > 0) out.approvers = approvers;
+  const approvalChannel = envVar(env, 'APPROVAL_CHANNEL')?.trim();
+  if (approvalChannel) out.approvalChannel = approvalChannel;
+  const runbooksFile = envVar(env, 'RUNBOOKS_FILE')?.trim();
+  if (runbooksFile) out.runbooksFile = runbooksFile;
 
   return out;
 }

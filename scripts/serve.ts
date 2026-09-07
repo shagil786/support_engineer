@@ -35,7 +35,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { createPlatform, type Platform, type PlatformOptions } from '../src/bootstrap.js';
 import { createHttpServer, type HttpServerHandle } from '../src/http/server.js';
-import { configFromEnv } from '../src/config.js';
+import { configFromEnv, runbooksFromFile } from '../src/config.js';
 import type { TickResult } from '../src/learning/learning-loop.js';
 
 export interface ServeRuntime {
@@ -73,21 +73,29 @@ async function main(): Promise<void> {
   const approvalRawMs = Number(env['APPROVAL_TIMEOUT_MS'] ?? 0);
   const approvalTimeoutMs = Number.isFinite(approvalRawMs) && approvalRawMs >= 1000 ? approvalRawMs : undefined;
 
+  // Runbook catalog from deployment config (RUNBOOKS_FILE): the same binary
+  // joins any org — its actions are data, not code. Loud on bad config.
+  const runbooksFile = wired.runbooksFile;
+  const runbooks = runbooksFile ? runbooksFromFile(runbooksFile) : [];
+
   const rt = createServeRuntime({
-    dataDir: resolve('var'),
+    dataDir: resolve(wired.dataDir ?? 'var'),
     ...(wired.jira ? { jira: wired.jira } : {}),
     ...(wired.logs ? { logProvider: wired.logs } : {}),
     ...(wired.slack ? { slack: wired.slack } : {}),
     ...(wired.llm ? { llm: wired.llm } : {}),
+    ...(runbooks.length > 0 ? { runbooks } : {}),
+    ...(wired.approvalChannel ? { approvalChannel: wired.approvalChannel } : {}),
     // Bot token upgrades the approval channel: messages become reaction-
     // correlated, enabling M-of-N sign-off by emoji on the security channel.
     ...(env['SLACK_BOT_TOKEN'] ? { slackBotToken: env['SLACK_BOT_TOKEN'] } : {}),
     ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
     learning: learningEnv ? { enabled: true, intervalMs } : undefined,
-    // Only the console operator is admin. Slack identities stay least-
-    // privilege: with reactions driving sign-off, a blanket-admin resolver
-    // would make every reactor an admin.
-    speakerRole: (id) => (id === speaker ? 'admin' : undefined),
+    // Console operator + explicitly-configured approvers (APPROVERS) are
+    // admins. Slack identities stay least-privilege otherwise: with reactions
+    // driving sign-off, a blanket-admin resolver would make every reactor
+    // an admin.
+    speakerRole: (id) => (id === speaker || (wired.approvers?.includes(id) ?? false) ? 'admin' : undefined),
     deliverSpeech: (text) => console.log(`[agent] ${text}`),
   });
 
