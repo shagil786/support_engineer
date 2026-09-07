@@ -118,6 +118,14 @@ export interface Platform {
   answerer: GroundedAnswerer;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
+  /** Resolves when boot-time async work has settled (KB vector indexing,
+   *  durable-store compatibility self-check) and reports the state a
+   *  readiness surface should expose. */
+  ready(): Promise<{
+    learning: 'on' | 'off';
+    procedures: number;
+    kb: { docs: number };
+  }>;
   /** The ApprovalGate: hosts with a Slack Events endpoint route
    *  reaction_added events here (gate.handleReaction) for emoji sign-off. */
   approvals: ApprovalGate;
@@ -301,6 +309,18 @@ export function createPlatform(opts: PlatformOptions): Platform {
     speakerRole,
     stopLearning() {
       learningLoop?.stop();
+    },
+    async ready() {
+      // Boot async work: the KB re-embeds vectors and indexes on construction;
+      // the durable episodic store runs its compatibility self-check. Both are
+      // fire-and-forget internally — /readyz waits for them so a load balancer
+      // never routes traffic into a half-warmed agent.
+      await Promise.all([knowledge.whenIndexed(), episodic.whenBootChecked()]);
+      return {
+        learning: learningLoop ? ('on' as const) : ('off' as const),
+        procedures: library.size(),
+        kb: { docs: knowledge.stats().docs },
+      };
     },
   };
 }

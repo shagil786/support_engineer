@@ -47,6 +47,10 @@ export interface HttpServerOptions {
    *  (default 5 min): inside it, a repeat execute gets the cached result
    *  instead of re-running the governed action. */
   executeReplayTtlMs?: number;
+  /** Readiness probe backing GET /readyz: resolves with details when boot
+   *  async work (KB indexing, store self-check) has settled. Absent = the
+   *  server reports ready unconditionally (liveness parity). */
+  ready?: () => Promise<Record<string, unknown>>;
   host?: string;
   port?: number;
   now?: () => number;
@@ -139,6 +143,29 @@ export async function createHttpServer(
 
     if (method === 'GET' && path === '/healthz') {
       return reply(res, 200, { ok: true });
+    }
+
+    // Readiness: unauthenticated like /healthz, but honest — 503 while boot
+    // async work is pending, 200 with platform details once settled. The
+    // probe FAILS FAST: awaiting a pending ready() would hang the LB probe,
+    // so the pending promise is raced against a sentinel; the promise keeps
+    // running and later probes see it settled.
+    if (method === 'GET' && path === '/readyz') {
+      if (!opts.ready) return reply(res, 200, { ready: true });
+      const PENDING = Symbol('pending');
+      // 250ms grace: normal boot work (KB re-embed, self-check) settles in
+      // milliseconds, so first probes succeed; a genuinely stuck boot reports
+      // 503 fast instead of hanging the LB's probe.
+      const raced = await Promise.race([
+        opts.ready().then(
+          (d) => ({ ok: true as const, details: d }),
+          (e: unknown) => ({ ok: false as const, error: e instanceof Error ? e.message : String(e) }),
+        ),
+        new Promise<typeof PENDING>((r) => setTimeout(() => r(PENDING), 250)),
+      ]);
+      if (raced === PENDING) return reply(res, 503, { ready: false });
+      if (!raced.ok) return reply(res, 503, { ready: false, error: raced.error });
+      return reply(res, 200, { ready: true, ...raced.details });
     }
 
     // Slack routes: rate-limited by source IP (the credential IS the HMAC).

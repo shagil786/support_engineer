@@ -46,6 +46,14 @@ export class EpisodicMemory {
     const fb = this.cross as Partial<import('./file-backed.js').FileBackedVectorMemory>;
     return typeof fb.reindex === 'function' ? fb.reindex() : 0;
   }
+
+  /** Resolves once the durable cross store's boot compatibility check has
+   *  settled (in-memory stores resolve immediately — nothing persisted to
+   *  mismatch against). Readiness surfaces await this. */
+  async whenBootChecked(): Promise<void> {
+    const fb = this.cross as Partial<import('./file-backed.js').FileBackedVectorMemory>;
+    if (typeof fb.whenBootChecked === 'function') await fb.whenBootChecked();
+  }
   private readonly ttlMs: number;
   private readonly now: () => number;
 

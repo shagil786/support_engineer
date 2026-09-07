@@ -152,6 +152,14 @@ describe('createPlatform', () => {
     expect(r.reason).toMatch(/hop cap/);
   });
 
+  it('ready() resolves after boot async work and reports kb/procedure/learning state', async () => {
+    const p = createPlatform({ dataDir: dir, learning: { enabled: true }, logProvider, runbooks });
+    const r = await p.ready();
+    expect(r.learning).toBe('on');
+    expect(r.procedures).toBe(0);
+    expect(r.kb.docs).toBeGreaterThanOrEqual(0);
+  });
+
   it('two security layers: guests are vetoed by the SafetyNet; approvers stage for approval', async () => {
     const p = createPlatform({
       dataDir: dir,

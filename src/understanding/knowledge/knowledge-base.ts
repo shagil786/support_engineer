@@ -153,6 +153,19 @@ export class FileBackedKnowledgeBase {
     }
   }
 
+  /** Corpus snapshot for readiness/ops surfaces. */
+  stats(): { docs: number; chunks: number } {
+    let chunks = 0;
+    for (const c of this.docs.values()) chunks += c.length;
+    return { docs: this.docs.size, chunks };
+  }
+
+  /** Resolves once boot-time vector indexing has settled (re-embeds from the
+   *  snapshot happen on construction; readiness surfaces await this). */
+  async whenIndexed(): Promise<void> {
+    await this.settle();
+  }
+
   private rebuildIndexes(): void {
     for (const [docId, chunks] of this.docs) {
       for (const c of chunks) {

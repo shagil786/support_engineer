@@ -109,6 +109,7 @@ async function main(): Promise<void> {
     const rateRaw = Number(env['RATE_LIMIT_PER_MINUTE'] ?? 0);
     http = await createHttpServer(rt.platform, {
       authTokens: httpTokens,
+      ready: () => rt.platform.ready(),
       host: env['HTTP_HOST'] ?? '127.0.0.1',
       port: Number(env['HTTP_PORT'] ?? 8787),
       ...(env['SLACK_SIGNING_SECRET'] ? { slackSigningSecret: env['SLACK_SIGNING_SECRET'] } : {}),
