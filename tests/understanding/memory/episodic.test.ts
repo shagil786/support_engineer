@@ -1,6 +1,22 @@
 import { describe, it, expect } from 'vitest';
 import { EpisodicMemory } from '../../../src/understanding/memory/episodic';
-import { InMemoryVectorMemory } from '../../../src/understanding/memory/vector';
+import { InMemoryVectorMemory, cosine } from '../../../src/understanding/memory/vector';
+
+describe('cosine (the score under every vector search)', () => {
+  it('refuses mismatched dimensions instead of silently zero-padding into garbage', () => {
+    // The old behavior: cosine([1,2], [1,2,3]) iterated only over a.length,
+    // dropping b's extra component — a plausible-looking but wrong score.
+    // Every vector search in the pipeline routes through this function, so
+    // a mismatch must throw, not approximate.
+    expect(() => cosine([1, 2], [1, 2, 3])).toThrow(/dim/i);
+    expect(() => cosine([1, 2, 3], [1, 2])).toThrow(/dim/i);
+  });
+
+  it('keeps exact-length scoring identical', () => {
+    expect(cosine([1, 0], [0, 1])).toBe(0);
+    expect(cosine([1, 1], [1, 1])).toBeCloseTo(2, 6); // unnormalized dot
+  });
+});
 
 describe('EpisodicMemory', () => {
   it('records and recalls from a single scope', async () => {

@@ -65,6 +65,35 @@ export class FileBackedVectorMemory {
     return v?.length;
   }
 
+  /** Dimensionality of the configured embedder's output. Cheap probe:
+   *  embeds a probe string once and caches the length (sync and async
+   *  embedders both supported — EmbedderLike permits either). */
+  private embedDimCache: number | undefined;
+  private async embedderDim(): Promise<number> {
+    if (this.embedDimCache === undefined) {
+      const out = await this.embed('__dim_probe__');
+      this.embedDimCache = out.length;
+    }
+    return this.embedDimCache;
+  }
+
+  /** Fail loud when the persisted vector space and the configured embedder
+   *  disagree. Silent zero-padded cosine would return garbage rankings that
+   *  look like answers — the worst failure mode retrieval can have.
+   *  Dimension equality is necessary, not sufficient (two different 384-dim
+   *  models are undetectable here and remain the operator's responsibility). */
+  private async assertCompatible(): Promise<void> {
+    const stored = this.dim();
+    if (stored === undefined || this.entries.length === 0) return;
+    const live = await this.embedderDim();
+    if (stored !== live) {
+      throw new Error(
+        `FileBackedVectorMemory (${this.path}): stored vectors are ${stored}-dim but the configured embedder produces ${live}-dim — ` +
+          'the two vector spaces are incompatible. Run reindex() (or the knowledge-cli / learning-cron equivalent) before using this store.',
+      );
+    }
+  }
+
   /** Re-embed every record under the current embedder and persist.
    *  The one-time migration when swapping embedding backends. */
   async reindex(): Promise<number> {
@@ -115,6 +144,7 @@ export class FileBackedVectorMemory {
   }
 
   async add(record: MemoryRecord): Promise<void> {
+    await this.assertCompatible();
     const existing = this.entries.findIndex((e) => e.record.id === record.id);
     const entry = { record, vector: await this.embed(record.text) };
     if (existing >= 0) this.entries[existing] = entry;
@@ -123,6 +153,7 @@ export class FileBackedVectorMemory {
   }
 
   async search(query: string, topK = 3, minScore = 0.05): Promise<SearchHit[]> {
+    await this.assertCompatible();
     if (this.entries.length === 0) return [];
     const q = await this.embed(query);
     return this.entries

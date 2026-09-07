@@ -88,6 +88,28 @@ describe('ProcedureLibrary', () => {
     expect(lib.size()).toBe(0);
   });
 
+  it('logs the degrade reason when memory recall throws (a silent swallow hides ops signals)', async () => {
+    const err = console.error;
+    const seen: unknown[] = [];
+    console.error = (...args: unknown[]) => {
+      seen.push(args);
+    };
+    try {
+      const lib = new ProcedureLibrary({
+        episodic: {
+          recall: async () => {
+            throw new Error('vector dim mismatch: stored 256, query 384 — run reindex');
+          },
+        } as never,
+      });
+      await lib.refresh();
+      expect(lib.size()).toBe(0);
+      expect(seen.some((args) => (args as unknown[]).some((s) => String(s).includes('dim mismatch')))).toBe(true);
+    } finally {
+      console.error = err;
+    }
+  });
+
   it('refresh() picks up newly learned procedures', async () => {
     const episodic = new EpisodicMemory({});
     const lib = new ProcedureLibrary({ episodic });

@@ -48,9 +48,21 @@ export const hashEmbedder: Embedder = (() => {
   };
 })();
 
+/** Dot product of two equal-length vectors (inputs are pre-normalized by
+ *  every embedder, so this is cosine similarity).
+ *
+ *  Dimension mismatch throws. The previous behavior silently iterated over
+ *  the shorter length — a 384-dim query against persisted 256-dim vectors
+ *  produced a plausible-looking but meaningless score, which is the worst
+ *  failure mode retrieval can have: wrong answers that look like answers.
+ *  Every vector search in the pipeline routes through this function, so
+ *  mismatched vector spaces fail loudly here rather than rank garbage. */
 export function cosine(a: readonly number[], b: readonly number[]): number {
+  if (a.length !== b.length) {
+    throw new Error(`cosine: dimension mismatch (${a.length} vs ${b.length}) — the stored vectors were embedded by a different backend; run reindex()`);
+  }
   let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += (a[i] ?? 0) * (b[i] ?? 0);
+  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
   return dot;
 }
 

@@ -58,13 +58,17 @@ export class ProcedureLibrary {
   }
 
   /** Reload procedures from cross-scope memory. A throwing memory backend
-   *  leaves the library empty — callers degrade to the full agent dance. */
+   *  leaves the library empty — callers degrade to the full agent dance.
+   *  The error is logged, never swallowed silently: a dim mismatch between
+   *  the persisted procedures and the live embedder otherwise hides behind
+   *  "the accelerator is off" with no ops signal at all. */
   async refresh(): Promise<void> {
     this.procedures.length = 0;
     let hits;
     try {
       hits = await this.episodic.recall('cross', 'procedure:', 100, 0);
-    } catch {
+    } catch (e) {
+      console.error('ProcedureLibrary: cross-scope recall failed — degrading to the full agent dance:', e);
       return;
     }
     for (const h of hits) {

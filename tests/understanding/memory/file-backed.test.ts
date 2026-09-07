@@ -106,6 +106,55 @@ describe('FileBackedVectorMemory', () => {
     const hits = await second.search('checkout', 1, 0.5);
     expect(hits[0]?.id).toBe('c');
   });
+
+  it('fails LOUD when the embedder dimension mismatches persisted vectors (add)', async () => {
+    // Persist under a 3-dim embedder, then reopen under a 4-dim one: cosine
+    // over mismatched dims silently zero-pads and returns garbage scores —
+    // the store must refuse instead.
+    const dim3 = (text: string): number[] => [text.length, 1, 2];
+    const dim4 = (text: string): number[] => [text.length, 1, 2, 3];
+    const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+    await first.add({ id: 'a', text: 'seeded under dim3' });
+
+    const second = new FileBackedVectorMemory({ path, embedder: dim4 });
+    await expect(second.add({ id: 'b', text: 'new under dim4' })).rejects.toThrow(/reindex/);
+  });
+
+  it('fails LOUD when the embedder dimension mismatches persisted vectors (search)', async () => {
+    const dim3 = (text: string): number[] => [text.length, 1, 2];
+    const dim4 = (text: string): number[] => [text.length, 1, 2, 3];
+    const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+    await first.add({ id: 'a', text: 'seeded under dim3' });
+
+    const second = new FileBackedVectorMemory({ path, embedder: dim4 });
+    await expect(second.search('anything', 3, 0)).rejects.toThrow(/reindex/);
+  });
+
+  it('same-dim different-backend vectors still load (dim alone is not proof of mismatch)', async () => {
+    // Dimension equality is necessary, not sufficient — a same-dim backend
+    // swap (e.g. two different 384-dim models) cannot be detected here and
+    // remains the operator's responsibility. This test pins the non-guard:
+    // a same-dim reopen must NOT throw.
+    const dim3a = (text: string): number[] => [text.length, 1, 2];
+    const dim3b = (text: string): number[] => [1, text.length, 2];
+    const first = new FileBackedVectorMemory({ path, embedder: dim3a });
+    await first.add({ id: 'a', text: 'seeded under dim3a' });
+
+    const second = new FileBackedVectorMemory({ path, embedder: dim3b });
+    await expect(second.search('anything', 3, 0)).resolves.toBeDefined();
+  });
+
+  it('reindex() resolves the mismatch and search recovers', async () => {
+    const dim3 = (text: string): number[] => [text.length, 1, 2];
+    const dim4 = (text: string): number[] => [text.length, 1, 2, 3];
+    const first = new FileBackedVectorMemory({ path, embedder: dim3 });
+    await first.add({ id: 'a', text: 'seeded under dim3' });
+
+    const second = new FileBackedVectorMemory({ path, embedder: dim4 });
+    expect(await second.reindex()).toBe(1);
+    const hits = await second.search('seeded under dim3', 1, 0);
+    expect(hits[0]?.id).toBe('a');
+  });
 });
 
 describe('EpisodicMemory crossPath persistence', () => {
