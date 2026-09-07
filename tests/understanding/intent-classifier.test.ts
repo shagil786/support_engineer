@@ -36,6 +36,38 @@ class MemEventLog implements EventLog {
   }
 }
 
+describe('IntentClassifier system prompt', () => {
+  // The prompt is the schema's only voice to the model: without the exact
+  // discriminated union, models invent plausible kinds ("log_query",
+  // "support_request") that fail Zod and silently degrade EVERY request to
+  // the legacy floor — the LLM ceiling never engages. This test pins the
+  // contract so prompt and schema can never drift apart again.
+  it('enumerates every kind and subKind the schema accepts', async () => {
+    const seen: Array<{ system?: string }> = [];
+    const probe: typeof fetch = (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      seen.push({ system: body.messages?.[0]?.content });
+      return json({ id: 'cmpl', choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(GOOD_ENVELOPE) } }] });
+    };
+    const c = new IntentClassifier({
+      llm: new OpenAiCompatibleClient({ baseUrl: 'http://x', apiKey: 'k', model: 'm', request: probe }),
+      fallback: new LegacyClassifierAdapter(),
+    });
+    await c.classify({ text: 'x', source: 'meeting', ts: 1 });
+    const prompt = seen[0]?.system ?? '';
+    for (const kind of ['meeting_response', 'async_triage', 'proactive_alert', 'human_action', 'unknown']) {
+      expect(prompt).toContain(kind);
+    }
+    for (const sub of ['question', 'feedback', 'runbook_offer', 'complaint', 'critical', 'mute', 'wake', 'incident', 'service_request', 'fyi', 'anomaly', 'slo_breach', 'approval', 'rejection', 'edit', 'answer']) {
+      expect(prompt).toContain(sub);
+    }
+    // Entity keys too — unknown keys fail the strict entities object.
+    for (const key of ['ticketKeys', 'runbookIds', 'services', 'severity', 'speakerId', 'runbookDestructive']) {
+      expect(prompt).toContain(key);
+    }
+  });
+});
+
 describe('IntentClassifier', () => {
   it('uses the LLM when wired and validates the envelope with Zod', async () => {
     const llm = new OpenAiCompatibleClient({ baseUrl: 'https://api.test/v1', apiKey: 'k', model: 'm', request: fakeFetch });

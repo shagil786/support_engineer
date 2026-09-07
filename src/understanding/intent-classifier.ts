@@ -40,9 +40,24 @@ const IntentSchema = z.object({
   }),
 });
 
+/** The prompt must carry the EXACT discriminated union the schema enforces:
+ *  without it, models invent plausible kinds ("log_query", "support_request")
+ *  that fail validation and silently degrade every request to the legacy
+ *  floor — the LLM ceiling never engages. Entities are likewise restricted
+ *  to the schema's known keys; anything else fails the strict object. */
 const SYSTEM_PROMPT =
-  'You classify support-engineer inputs into a strict JSON envelope ' +
-  '({ intent: { kind, subKind }, confidence, entities, rawContext }). Output ONLY the JSON object.';
+  'You classify support-engineer inputs into a strict JSON envelope. Output ONLY the JSON object, no prose.\n' +
+  'intent.kind must be exactly one of: meeting_response, async_triage, proactive_alert, human_action, unknown.\n' +
+  'subKind depends on kind:\n' +
+  '- meeting_response: question | feedback | runbook_offer | complaint | critical | mute | wake\n' +
+  '- async_triage: incident | service_request | question | fyi\n' +
+  '- proactive_alert: incident | anomaly | slo_breach\n' +
+  '- human_action: approval | rejection | edit | answer\n' +
+  '- unknown: omit subKind\n' +
+  'confidence: number 0..1.\n' +
+  'entities keys (all optional, omit unknown keys): ticketKeys (string[]), runbookIds (string[]), services (string[]), severity (P0|P1|P2|P3|P4), speakerId (string), runbookDestructive (boolean).\n' +
+  'rawContext: { source: meeting|jira|slack|cloudwatch|splunk|cron, ts: number, payload: any } — copy source/ts/payload from the input verbatim.\n' +
+  'Example: {"intent":{"kind":"meeting_response","subKind":"question"},"confidence":0.9,"entities":{"services":["api"]},"rawContext":{"source":"meeting","ts":123,"payload":{}}}';
 
 export interface IntentClassifierOptions {
   llm: LlmClient;
