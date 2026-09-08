@@ -1,75 +1,37 @@
-/** Offline end-to-end demo of the Support Voice Agent brain.
+/** Offline end-to-end demo of the Support Voice Agent platform.
  *
  *  Run:  npm run demo          (interactive: type  speakerId: text  lines)
  *         npm run demo -- --script   (built-in scripted war-room scene)
  *
- *  Everything runs against in-process fakes (ScriptedBridge + fake Jira/
- *  Slack HTTP) — no credentials, no network. Real wiring replaces the fakes
- *  via configFromEnv()/createVoiceSession().
+ *  One brain, driven like production: every utterance — scripted or typed —
+ *  enters through platform.pipeline.processUtterance, the same entry the
+ *  HTTP surface uses. Mute and feedback are pipeline-owned (a mute silences
+ *  KB answers too; confirmed feedback files through governed dispatch).
+ *  The legacy agent remains the meeting-summary data owner, handles critical
+ *  declarations, and serves as the honest-degradation fallback. All
+ *  integrations run against in-process fakes — no credentials, no network.
  */
 import { createInterface } from 'node:readline';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  SupportVoiceAgent,
-  ScriptedBridge,
-  createVoiceSession,
-  InMemoryKeyValueStore,
-  InMemoryRunbookProvider,
-  SlackWebhookNotifier,
-  SAMPLE_RUNBOOK_ACTIONS,
-} from '../src/index';
-import type { RunbookResult } from '../src/support-voice-agent/integrations/runbook';
-import type { MemoryRecord, SearchHit, VectorMemory } from '../src/understanding/memory/vector';
+import { createPlatform } from '../src/bootstrap';
+import { SAMPLE_RUNBOOK_ACTIONS } from '../src/index';
 import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base';
 import type { IngestDoc } from '../src/understanding/knowledge/chunker';
 
-/* ------------------- KB-backed vector memory (Layer 1) ------------------- */
-
-/** Adapt the durable hybrid knowledge base to the agent's Layer-1
- *  VectorMemory port: one retrieval substrate instead of the legacy
- *  cosine-only in-memory store. BM25 + vector + RRF + rerank now rank the
- *  demo corpus; nothing in the agent changes.
- *
- *  search: top-1 with a permissive floor (the hybrid rerank scale does not
- *  match the legacy cosine 0.3; relevance gating stays BM25/rerank work,
- *  and a miss falls through to the honest no-data fallback as before).
- *  add: swallowed — indexing Layer-1 chatter into the KB would overwrite
- *  the corpus (replace-by-doc-id); it stays observable in episodic memory.
- */
-function kbAsVectorMemory(kb: FileBackedKnowledgeBase): VectorMemory {
-  return {
-    add: async (_record: MemoryRecord): Promise<void> => {},
-    search: async (query: string, topK?: number, _minScore?: number): Promise<SearchHit[]> => {
-      const hits = await kb.search(query, { topK: topK ?? 1 });
-      return hits.map((h) => ({
-        id: h.docId,
-        text: h.heading ? `${h.heading}\n${h.text}` : h.text,
-        metadata: h.metadata,
-        score: Math.min(1, h.score * 2),
-      }));
-    },
-    size: () => kb.size(),
-    purge: async (_predicate: (record: MemoryRecord) => boolean): Promise<number> => 0,
-    list: () => kb.docIds().map((docId) => ({ id: docId, text: docId })),
-  };
-}
-
 /* --------------------------- knowledge corpus --------------------------- */
 
-/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the durable
- *  hybrid knowledge base, so direct questions answer from real operational
- *  notes — "From my notes: …" — instead of the honest no-data fallback.
- *
- *  The same substrate the platform uses: BM25 + vector hybrid retrieval,
- *  markdown-section chunking (never mid-sentence), and provenance metadata.
- *  Ingest is replace-by-doc-id, so a doc removed from the corpus is evicted
- *  explicitly — the KB never answers from a stale demo file. The snapshot
- *  persists under demo/.demo-kb/ (gitignored), so a second boot reloads
- *  instead of re-chunking. */
-const KNOWLEDGE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'knowledge');
-const DEMO_KB_PATH = join(dirname(fileURLToPath(import.meta.url)), '.demo-kb', 'kb.json');
+/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the platform's
+ *  durable hybrid knowledge base — BM25 + vector hybrid retrieval, markdown-
+ *  section chunking, provenance metadata. Ingest is replace-by-doc-id, so a
+ *  doc removed from the corpus is evicted explicitly — the KB never answers
+ *  from a stale demo file. The snapshot persists under demo/.demo-kb/
+ *  (gitignored), so a second boot reloads instead of re-chunking. */
+const DEMO_ROOT = dirname(fileURLToPath(import.meta.url));
+const KNOWLEDGE_DIR = join(DEMO_ROOT, 'knowledge');
+const DEMO_KB_PATH = join(DEMO_ROOT, '.demo-kb', 'kb.json');
+const DEMO_DATA_DIR = join(DEMO_ROOT, '.demo-data');
 
 async function seedKnowledge(kb: FileBackedKnowledgeBase): Promise<number> {
   let files: string[] | undefined;
@@ -115,99 +77,74 @@ const fakeJiraFetch: typeof fetch = (input, init) => {
     return jsonResponse({ key, id: String(ticketCounter), self: `https://jira.demo/browse/${key}` });
   }
   if (url.includes('/comment')) return jsonResponse({ id: 'c1' });
-  if (/\/issue\/SUPPORT-\d+\?fields/.test(url)) {
-    return jsonResponse({ key: 'SUPPORT-7', fields: { summary: 'Checkout 500s', status: { name: 'In Progress' } } });
-  }
   return jsonResponse({ errorMessages: ['demo fake 404'], errors: {} }, 404);
-};
-
-const fakeSlackFetch: typeof fetch = (input, init) => {
-  const body = JSON.parse(String(init?.body ?? '{}'));
-  console.log(`   └─ [slack → #demo] ${String(body.text ?? '').slice(0, 120)}`);
-  return jsonResponse({ ok: true });
 };
 
 /* ------------------------------ wiring ------------------------------ */
 
 const clock = { now: 1_000_000 };
-const bridge = new ScriptedBridge({ meetingId: 'demo-meeting', now: () => clock.now });
 
-const kb = new FileBackedKnowledgeBase({ path: DEMO_KB_PATH });
-
-const vectors = kbAsVectorMemory(kb);
-const agent = new SupportVoiceAgent({
-  mode: 'response',
-  wakeWord: 'hey agent',
+const platform = createPlatform({
+  dataDir: DEMO_DATA_DIR,
   now: () => clock.now,
   jira: { baseUrl: 'https://jira.demo', auth: { type: 'bearer', token: 'demo' }, projectKey: 'SUPPORT', request: fakeJiraFetch },
-  slack: new SlackWebhookNotifier({ webhookUrl: 'https://hooks.demo/slack', request: fakeSlackFetch }),
-  runbooks: new InMemoryRunbookProvider(SAMPLE_RUNBOOK_ACTIONS, async (id): Promise<RunbookResult> => {
-    console.log(`   ⚙ [runbook] executing '${id}'…`);
-    return { actionId: id, ok: true, output: 'pod restarted, healthz green' };
-  }),
-  memory: { kv: new InMemoryKeyValueStore({ now: () => clock.now }), vectors },
+  runbooks: SAMPLE_RUNBOOK_ACTIONS,
+  speakerRole: (id) => (id === 'U1' || id === 'U2' ? 'admin' : undefined),
+  deliverSpeech: (text) => console.log(`\n🗣  AGENT: ${text}`),
 });
 
-const session = createVoiceSession(bridge, agent);
-
-agent.on('speech', (e) => console.log(`\n🗣  AGENT${e.urgent ? ' [URGENT BARGE-IN]' : ''}: ${e.text}`));
-agent.on('jira', (e) => console.log(`   📋 [jira] ${e.type} ${e.issueKey} — ${e.detail}`));
-agent.on('muted', () => console.log('   🔇 [muted]'));
-agent.on('log', (e) => { if (e.level !== 'info') console.log(`   · [${e.level}] ${e.message}`); });
+// The cascade (critical declarations, chatter) still speaks through its own
+// event port — print it so the scene shows both brains' outputs.
+platform.legacy.on('speech', (e) => console.log(`\n🗣  AGENT${e.urgent ? ' [URGENT BARGE-IN]' : ''}: ${e.text}`));
+platform.legacy.on('log', (e) => { if (e.level !== 'info') console.log(`   · [${e.level}] ${e.message}`); });
 
 /* ------------------------------- drive ------------------------------- */
 
-const RUNBOOK_REQUEST = /\bcan you\b.*\brestart\b.*\b(checkout|payment|cache) pod\b/i;
-
+/** Every utterance — scripted or interactive — enters through the platform
+ *  pipeline, the same entry the HTTP surface uses. Mute and feedback are
+ *  pipeline-owned: "agent, shut up" silences KB answers too, and confirmed
+ *  feedback files through governed dispatch (policy → SafetyNet → audit). */
 async function say(speakerId: string, text: string): Promise<void> {
   clock.now += 4000; // advance virtual clock between turns
   console.log(`\n🎙  ${speakerId}: ${text}`);
-  // Host-side intent routing (stand-in for the LLM router): a runbook request
-  // enters the offer→confirm flow instead of the generic question path.
-  const rb = text.match(RUNBOOK_REQUEST);
-  if (rb) {
-    const id = `restart-${(rb[1] as string).toLowerCase()}-pod`;
-    console.log(`   · [host] routing runbook request → offer('${id}')`);
-    await agent.offerRunbookAction(id);
-    clock.now += 100;
-    bridge.emitPause(1600);
-    await new Promise((r) => setTimeout(r, 30));
-    return;
+  const r = await platform.pipeline.processUtterance(speakerId, text, clock.now, 'demo-war-room');
+  if (r.routed === 'pipeline') {
+    console.log(`   · [pipeline] ok=${String(r.ok)}${r.reason ? ` — ${r.reason}` : ''}${r.approvalId ? ` approvalId=${r.approvalId}` : ''}`);
+  } else if (r.routed === 'etiquette') {
+    console.log(`   · [etiquette·pipeline] ${r.reason ?? 'handled'}`);
+  } else {
+    console.log('   · [legacy] handled by the etiquette cascade');
   }
-  bridge.emitTranscript(speakerId, text, clock.now);
-  await new Promise((r) => setTimeout(r, 30));
-  bridge.emitPause(1600); // everyone stops talking
-  await new Promise((r) => setTimeout(r, 30));
+  await new Promise((res) => setTimeout(res, 30));
 }
 
 async function scriptedScene(): Promise<void> {
   await say('U1', 'Users hate the new onboarding flow, it takes forever');
   await say('U2', 'yeah make it a high priority bug');
-  await say('U1', "what's the status of SUPPORT-7?");
+  await say('U1', 'hey agent, what did the cache incident postmortem conclude?');
   await say('U2', 'hey agent, can you restart the checkout pod?');
-  await say('U1', 'yes do it');
   console.log('\n🚨 [monitor] CloudWatch P1: payment-api returning 500s');
-  agent.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
+  platform.legacy.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
   await new Promise((r) => setTimeout(r, 30));
   await say('U2', 'this is a P1');
   await say('U1', 'hey agent, what do we do when the database is unreachable?');
   await say('U1', 'hey agent, are we okay on disk space?');
   await say('U1', 'hey agent, shut up');
   await say('U2', 'what about the database?');
-  const summary = agent.finishMeeting({ title: 'Demo war room' });
-  console.log(`\n📝 meeting summary captured: ${summary.feedback.length} feedback, ${summary.jiraChanges.length} Jira changes, ${summary.alerts.length} alerts, ${summary.spokenResponseCount} spoken lines (persisted to KV, never read aloud)`);
+  await say('U1', 'hey agent');
+  const summary = platform.legacy.finishMeeting({ title: 'Demo war room' });
+  console.log(`\n📝 meeting summary captured: ${summary.feedback.length} feedback, ${summary.jiraChanges.length} Jira changes, ${summary.alerts.length} alerts (persisted to KV, never read aloud)`);
 }
 
 async function main(): Promise<void> {
-  const chunks = await seedKnowledge(kb);
+  const chunks = await seedKnowledge(platform.knowledge);
   console.log(`📚 knowledge: ${chunks} chunks seeded from demo/knowledge/*.md`);
-  await session.start();
-  console.log('=== Support Voice Agent — offline demo (fake Jira/Slack, no network) ===');
+  await platform.ready();
+  console.log('=== Support Voice Agent — offline demo (one pipeline brain, fake Jira/Slack, no network) ===');
   console.log('Type lines as  speaker: text   — or: /script /summary /quit\n');
 
   if (process.argv.includes('--script')) {
     await scriptedScene();
-    await session.stop();
     return;
   }
 
@@ -219,7 +156,7 @@ async function main(): Promise<void> {
     if (line === '/quit') { rl.close(); return; }
     if (line === '/script') { await scriptedScene(); rl.prompt(); return; }
     if (line === '/summary') {
-      const s = agent.finishMeeting({ title: 'Interactive demo' });
+      const s = platform.legacy.finishMeeting({ title: 'Interactive demo' });
       console.log(`📝 feedback=${s.feedback.length} jira=${s.jiraChanges.length} alerts=${s.alerts.length}`);
       rl.prompt(); return;
     }
@@ -228,7 +165,7 @@ async function main(): Promise<void> {
     else console.log('format: speaker: text  (or /script /summary /quit)');
     rl.prompt();
   });
-  rl.on('close', async () => { await session.stop(); process.exit(0); });
+  rl.on('close', () => process.exit(0));
 }
 
 void main();

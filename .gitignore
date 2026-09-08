@@ -9,3 +9,4 @@ coverage/
 .superpowers/
 var/
 demo/.demo-kb/
+demo/.demo-data/
