@@ -33,7 +33,7 @@ import type { LlmClient } from './tools/llm';
 import { Guardrails } from './guardrails';
 import type { GuardrailsConfig } from './guardrails';
 import type { KeyValueStore } from './memory/store';
-import type { MemoryRecord, VectorMemory } from './memory/vector';
+import type { MemoryRecord, VectorMemory } from '../understanding/memory/vector';
 
 export interface SupportVoiceAgentConfig {
   mode?: AgentMode;

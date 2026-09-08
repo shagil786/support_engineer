@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { InMemoryKeyValueStore } from '../src/support-voice-agent/memory/store.ts';
-import { InMemoryVectorMemory, hashEmbedder, cosine } from '../src/support-voice-agent/memory/vector.ts';
+import { InMemoryVectorMemory, hashEmbedder, cosine } from '../src/understanding/memory/vector.ts';
 import { SupportVoiceAgent } from '../src/index';
 import type { SpeechEvent } from '../src/index';
 
