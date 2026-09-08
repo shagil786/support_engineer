@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import http from 'node:http';
 import { createPlatform } from '../../src/bootstrap';
 import { LearningLoop } from '../../src/learning/learning-loop';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
@@ -212,5 +213,49 @@ describe('createPlatform', () => {
     });
     const r = await p.approvals.handleReaction({ type: 'reaction_added', reaction: 'shield', userId: 'U-alice', userRole: p.speakerRole('U-alice') });
     expect(r).toMatchObject({ matched: true, approvalId, accepted: true });
+  });
+
+  it('routes the approval gate through slackBotRequest — a local fake Slack Web API without process-wide patching', async () => {
+    // Stand-in Slack Web API on an ephemeral port: records every method
+    // called and returns ref-bearing ok responses like the real one.
+    const apiCalls: string[] = [];
+    const fakeSlack = http.createServer((req, res) => {
+      const method = req.url?.replace('/api/', '') ?? '';
+      let raw = '';
+      req.on('data', (c: Buffer) => (raw += c));
+      req.on('end', () => {
+        apiCalls.push(method);
+        const body = JSON.parse(raw || '{}') as { channel?: string };
+        res.end(JSON.stringify({ ok: true, channel: body.channel ?? 'C-approvals', ts: '1700000000.000100' }));
+      });
+    });
+    await new Promise<void>((resolve) => fakeSlack.listen(0, '127.0.0.1', resolve));
+    const addr = fakeSlack.address() as { port: number };
+
+    try {
+      const p = createPlatform({
+        dataDir: dir,
+        runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true }],
+        speakerRole: (id) => (id === 'U-admin' ? 'admin' : undefined),
+        slackBotToken: 'xoxb-fake-test',
+        slackBotRequest: ((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.startsWith('https://slack.com/api/')) {
+            return fetch(url.replace('https://slack.com/api', `http://127.0.0.1:${addr.port}/api`));
+          }
+          return fetch(input, init);
+        }) as typeof fetch,
+      });
+
+      // A destructive request stages through the REAL gate, whose Slack is
+      // the real SlackBotClient — pointed at the fake by the new option.
+      const staged = await p.pipeline.processUtterance('U-admin', 'agent, can you restart the checkout pod?', 500);
+      expect(staged.approvalId).toBeDefined();
+      expect(apiCalls).toContain('chat.postMessage');
+      const grants = apiCalls.filter((m) => m === 'chat.postMessage').length;
+      expect(grants).toBeGreaterThanOrEqual(1);
+    } finally {
+      fakeSlack.close();
+    }
   });
 });

@@ -84,6 +84,10 @@ export interface PlatformOptions {
    *  gate posts via chat.postMessage (resolving message refs so reactions
    *  correlate to the right approval) instead of the fire-and-forget webhook. */
   slackBotToken?: string;
+  /** Injectable fetch for the bot-token Slack client — points BOTH the
+   *  approval gate's client and the thread-reply client at a local fake of
+   *  the Slack Web API (tests/proxies). No effect without slackBotToken. */
+  slackBotRequest?: typeof fetch;
   /** Approval pending window (default: the gate's 5 minutes); overrides via
    *  APPROVAL_TIMEOUT_MS (>= 1000) in env-wired hosts. */
   approvalTimeoutMs?: number;
@@ -245,10 +249,15 @@ export function createPlatform(opts: PlatformOptions): Platform {
   const safetyNet = new SafetyNet({ speakers: speakerRole });
   // With a bot token, approvals post via chat.postMessage (message refs let
   // reactions correlate to the right approval); otherwise the fire-and-forget
-  // webhook / console fallback posts as before.
-  const approvalSlack = opts.slackBotToken
-    ? new SlackBotClient({ botToken: opts.slackBotToken })
-    : (opts.slack ?? consoleSlack);
+  // webhook / console fallback posts as before. One client instance serves
+  // both the gate and thread replies; `request` injects a local fake API.
+  const slackBotClient = opts.slackBotToken
+    ? new SlackBotClient({
+        botToken: opts.slackBotToken,
+        ...(opts.slackBotRequest ? { request: opts.slackBotRequest } : {}),
+      })
+    : undefined;
+  const approvalSlack = slackBotClient ?? opts.slack ?? consoleSlack;
   const approvals = new ApprovalGate({
     slack: approvalSlack,
     securityChannel: opts.approvalChannel ?? '#support-agent-approvals',
@@ -268,7 +277,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
   // alerts) speaks through the same channel via the ToolRunner context. When a
   // Slack bot is wired, deliverSpeech ALSO replies in-thread — the answer lands
   // where the question was asked, not just on the console.
-  const slackBot = opts.slackBot ?? (opts.slackBotToken ? new SlackBotClient({ botToken: opts.slackBotToken }) : undefined);
+  const slackBot = opts.slackBot ?? slackBotClient;
   const toolRunner = new ToolRunner({
     context: {
       ...(opts.jira ? { jiraClient: new JiraClient(opts.jira) } : {}),
