@@ -47,6 +47,17 @@ describe('LegacyClassifierAdapter parity', () => {
     expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'complaint' });
   });
 
+  it('flags telemetry questions as live-data (floor parity with the LLM ceiling rule)', () => {
+    // "check the error logs" asks about CURRENT system state — the static KB
+    // must not answer it from a lexically-overlapping chunk.
+    const env = a.classify({ text: 'agent, can you check the error logs for the api?', source: 'meeting', ts: 1 });
+    expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'question', liveData: true });
+    // How-to / postmortem phrasings stay static-document questions (KB-first).
+    const howTo = a.classify({ text: 'agent, what do I do when the checkout service stops responding?', source: 'meeting', ts: 1 });
+    expect(howTo.intent).toEqual({ kind: 'meeting_response', subKind: 'question' });
+    if (howTo.intent.kind === 'meeting_response') expect(howTo.intent.liveData).toBeUndefined();
+  });
+
   it('classifies a runbook offer', () => {
     const env = a.classify({ text: 'hey agent, can you restart the checkout pod?', source: 'meeting', ts: 1 });
     expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });

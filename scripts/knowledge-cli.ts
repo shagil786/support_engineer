@@ -4,18 +4,25 @@
  *
  *   npx tsx scripts/knowledge-cli.ts seed                       # load the shipped seed corpus
  *   npx tsx scripts/knowledge-cli.ts ingest <file.md> [source]  # ingest a markdown/text file
+ *   npx tsx scripts/knowledge-cli.ts runbooks <file.json>       # sync a RUNBOOKS_FILE catalog into the KB
  *   npx tsx scripts/knowledge-cli.ts search "<query>"           # hybrid search (BM25 + vector)
  *   npx tsx scripts/knowledge-cli.ts list                       # list ingested documents
  *   npx tsx scripts/knowledge-cli.ts reindex                    # re-embed after an embedder swap
  *
  * Storage: var/knowledge/kb.json (atomic snapshot; survives restarts).
+ *
+ * `runbooks` performs the same catalog↔KB sync createPlatform does at boot
+ * (each action becomes a `runbook:<id>` doc; docs for actions removed from
+ * the file are evicted) — useful for a separate data directory or a
+ * catalog change without a restart.
  */
 import { readFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
 import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base.js';
 import { embedderFromConfig } from '../src/understanding/memory/embedders/factory.js';
-import { embeddingsFromEnv } from '../src/config.js';
+import { embeddingsFromEnv, runbooksFromFile } from '../src/config.js';
 import { loadDotEnv } from '../src/env.js';
+import { syncRunbooksToKnowledge } from '../src/bootstrap/runbooks-kb.js';
 import { RETRIEVAL_SEED_DOCS } from '../src/fixtures/retrieval-golden-set.js';
 
 const [cmd, arg, source] = process.argv.slice(2);
@@ -34,6 +41,15 @@ if (cmd === 'seed') {
   const text = readFileSync(resolve(process.cwd(), arg), 'utf8');
   const chunks = await kbase.ingest({ id: fileDocId(arg), text, metadata: source ? { source } : undefined });
   console.log(`Ingested ${arg} as ${chunks} chunks`);
+} else if (cmd === 'runbooks' && arg) {
+  // Same sync createPlatform performs at boot (see runbooks-kb.ts): ingest
+  // every catalog action as a `runbook:<id>` doc, evict docs for actions no
+  // longer in the file. Loud on a missing/malformed file (runbooksFromFile).
+  const actions = runbooksFromFile(resolve(process.cwd(), arg));
+  const kbase = openKb();
+  const { ops, synced, evicted } = syncRunbooksToKnowledge(kbase, actions);
+  await Promise.all(ops);
+  console.log(`Synced ${synced} runbook actions into the KB (${evicted} stale doc(s) evicted)`);
 } else if (cmd === 'search' && arg) {
   const kbase = openKb();
   const hits = await kbase.search(arg, { topK: 5 });
@@ -56,7 +72,7 @@ if (cmd === 'seed') {
   const n = await kbase.reindex();
   console.log(`Reindexed ${n} chunks under the current embedder.`);
 } else {
-  console.error('Usage: npx tsx scripts/knowledge-cli.ts <seed|ingest <file> [source]|search "<query>"|list|reindex>');
+  console.error('Usage: npx tsx scripts/knowledge-cli.ts <seed|ingest <file> [source]|runbooks <file>|search "<query>"|list|reindex>');
   process.exit(1);
 }
 

@@ -6,6 +6,14 @@
  *
  * Order note: runbook offers are checked before direct questions because
  * "can you restart X?" is both; the offer is the more specific intent.
+ *
+ * Live-data parity: the LLM ceiling sets `liveData=true` for questions
+ * about CURRENT system state (see intent-classifier.ts's prompt); the floor
+ * mirrors that in its narrow form — a question explicitly asking for
+ * logs/errors/metrics is telemetry, which only live tool data can answer.
+ * Without this, a populated knowledge base answers "check the error logs"
+ * from whatever static chunk lexically overlaps it. Broader live-data
+ * detection stays the LLM's job.
  */
 import type { IntentEnvelope } from '../../event-log/types.js';
 import * as h from '../../support-voice-agent/heuristics.js';
@@ -30,7 +38,13 @@ function pickIntent(text: string): IntentEnvelope['intent'] {
   if (h.isFeedback(text)) return { kind: 'meeting_response', subKind: 'feedback' };
   if (h.isVagueTechnicalComplaint(text)) return { kind: 'meeting_response', subKind: 'complaint' };
   if (containsRunbookOffer(text)) return { kind: 'meeting_response', subKind: 'runbook_offer' };
-  if (h.isDirectQuestion(text)) return { kind: 'meeting_response', subKind: 'question' };
+  if (h.isDirectQuestion(text)) {
+    return {
+      kind: 'meeting_response',
+      subKind: 'question',
+      ...(h.asksForLogs(text) ? { liveData: true } : {}),
+    };
+  }
   if (h.containsWakeWord(text)) return { kind: 'meeting_response', subKind: 'wake' };
   return { kind: 'unknown' };
 }

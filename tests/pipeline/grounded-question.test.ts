@@ -242,7 +242,11 @@ describe('grounded question path', () => {
     const r = await pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
     expect(r.routed).toBe('pipeline');
     expect(r.ok).toBe(true);
-    expect(r.answerSource).toBeUndefined();
+    // Provenance is now stamped even without an answerer: the floor flags
+    // telemetry questions as live-data, and a skipped KB is a KB that did
+    // not answer — the governed log query IS the answer source ('logs').
+    // The governed run itself is unchanged (see the assertions below).
+    expect(r.answerSource).toBe('logs');
     const files = readdirSync(outcomesDir).filter((f) => f.endsWith('.json'));
     expect(files.length).toBe(1); // the governed run was recorded
   });

@@ -43,6 +43,20 @@ npx tsx scripts/knowledge-cli.ts ingest /path/to/runbook.md runbooks
 npx tsx scripts/knowledge-cli.ts search "how do I rotate the TLS cert"
 ```
 
+**Runbook actions are knowledge too** — every action in `RUNBOOKS_FILE` is
+auto-ingested into the KB at boot as a `runbook:<id>` doc (`source: runbooks`,
+plus `runbookId`/`destructive` metadata), so `/ask` and KB-first answers cite
+the executable catalog with zero manual ingest. The KB re-syncs to the catalog
+on every boot: changed actions replace atomically, and actions removed from
+the catalog have their docs evicted. The same sync runs on demand:
+
+```bash
+npx tsx scripts/knowledge-cli.ts runbooks /path/to/runbooks.json
+```
+
+Telemetry requests ("check the error logs", "any fresh errors?") always go to
+live log data, never to the static KB — including without an LLM.
+
 The KB re-embeds on boot under the configured embedding backend, so changing
 `EMBEDDINGS_*` only requires a restart (and, if the model identity changed, a
 `npx tsx scripts/learning-cron.ts --reindex` for the durable procedure store).

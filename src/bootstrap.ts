@@ -22,6 +22,7 @@ import { IntentClassifier } from './understanding/intent-classifier.js';
 import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
 import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
+import { syncRunbooksToKnowledge } from './bootstrap/runbooks-kb.js';
 import { embedderFromConfig, type EmbeddingsConfig } from './understanding/memory/embedders/factory.js';
 import { GroundedAnswerer } from './understanding/grounded-answerer.js';
 import { LlmClaimJudge } from './understanding/faithfulness-eval.js';
@@ -69,7 +70,10 @@ export interface PlatformOptions {
   jira?: JiraConfig;
   logProvider?: LogProvider;
   slack?: SlackNotifier;
-  /** Runbook catalog; defaults to an empty (no-op) provider. */
+  /** Runbook catalog; defaults to an empty (no-op) provider. Every action is
+   *  also auto-ingested into the knowledge base as a `runbook:<id>` doc
+   *  (re-synced on every boot) so KB-first answers cover the executable
+   *  catalog. */
   runbooks?: RunbookAction[];
   llm?: LlmConfig;
   /** Policy bundle path; defaults to ./policies/default.yaml. */
@@ -255,6 +259,11 @@ export function createPlatform(opts: PlatformOptions): Platform {
   });
 
   const runbookProvider = new InMemoryRunbookProvider(opts.runbooks ?? []);
+  // The catalog is knowledge too: KB-first answers cite the actions this
+  // platform can actually execute, with zero manual ingest (see
+  // runbooks-kb.ts). Re-synced on every boot; ready() awaits the ops so a
+  // readiness surface never reports a half-ingested corpus.
+  const catalogSync = syncRunbooksToKnowledge(knowledge, opts.runbooks ?? []);
   // Speech: the pipeline's deliverSpeech is the voice; meeting_interrupt (P0/P1
   // alerts) speaks through the same channel via the ToolRunner context. When a
   // Slack bot is wired, deliverSpeech ALSO replies in-thread — the answer lands
@@ -342,7 +351,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
       // the durable episodic store runs its compatibility self-check. Both are
       // fire-and-forget internally — /readyz waits for them so a load balancer
       // never routes traffic into a half-warmed agent.
-      await Promise.all([knowledge.whenIndexed(), episodic.whenBootChecked()]);
+      await Promise.all([...catalogSync.ops, knowledge.whenIndexed(), episodic.whenBootChecked()]);
       return {
         learning: learningLoop ? ('on' as const) : ('off' as const),
         procedures: library.size(),
