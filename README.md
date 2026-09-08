@@ -60,6 +60,12 @@ Integrations are dependency-free ports you wire in:
 - `LlmOrchestrator` — LLM + tools loop that coexists with the deterministic etiquette brain. When LLM is unwired, falls back to the deterministic agent byte-for-byte.
 - Tools: `jira_create_issue`, `query_logs`, `execute_runbook_script`, `invoke_human_on_slack`, `meeting_interrupt`.
 
+**Design decisions** — the reasoning behind the core architecture lives in [docs/adr/](docs/adr/):
+- [ADR-0001](docs/adr/0001-kb-first-before-governance.md) — KB-first answering before governance (live-data gate, refusal floor, explicit provenance).
+- [ADR-0002](docs/adr/0002-hybrid-retrieval.md) — Hybrid BM25 + vector retrieval with RRF fusion and a deterministic re-rank.
+- [ADR-0003](docs/adr/0003-runbook-catalog-ingest-on-boot.md) — The runbook catalog is the source of truth; the KB mirrors it on every boot.
+- [ADR-0004](docs/adr/0004-llm-saturation-circuit-breaker.md) — Saturation circuit breaker on the LLM client: sustained 429 windows fail fast instead of hammering.
+
 ## Getting started
 
 ```bash

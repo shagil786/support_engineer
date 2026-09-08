@@ -5,6 +5,10 @@ point it at a data directory, hand it a runbook catalog and a context corpus,
 wire whatever integrations the org has (each one degrades honestly when
 absent), and expose the meeting surface you want.
 
+The architectural decisions behind these behaviors are recorded in
+[docs/adr/](../docs/adr/) — KB-first answering, hybrid retrieval, catalog
+ingest-on-boot, and the LLM saturation breaker each have a page.
+
 ## Runtime data — `DATA_DIR`
 
 All runtime state lives under one root (default `var/` in the repo, fine for
@@ -55,7 +59,11 @@ npx tsx scripts/knowledge-cli.ts runbooks /path/to/runbooks.json
 ```
 
 Telemetry requests ("check the error logs", "any fresh errors?") always go to
-live log data, never to the static KB — including without an LLM.
+live log data, never to the static KB — including without an LLM. The
+KB-first-before-governance ordering and its gates are specified in
+[ADR-0001](../docs/adr/0001-kb-first-before-governance.md); the retrieval
+stack in [ADR-0002](../docs/adr/0002-hybrid-retrieval.md); the catalog sync
+semantics in [ADR-0003](../docs/adr/0003-runbook-catalog-ingest-on-boot.md).
 
 The KB re-embeds on boot under the configured embedding backend, so changing
 `EMBEDDINGS_*` only requires a restart (and, if the model identity changed, a
@@ -125,6 +133,9 @@ breaker entirely. 5xx/network failures retry as before but never open it, and
 a single overloaded request still just retries — the breaker counts
 completions, not attempts. The `llm_call` audit event records
 `errorCode: circuit_open` plus the remaining cooldown ms (`breakerState`).
+The tripping rule (completions, not attempts), the adaptive cooldown, and
+the half-open probe are specified in
+[ADR-0004](../docs/adr/0004-llm-saturation-circuit-breaker.md).
 
 ## Approval timing — `APPROVAL_TIMEOUT_MS`
 
