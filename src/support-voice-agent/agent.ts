@@ -437,6 +437,19 @@ export class SupportVoiceAgent {
     this.queueSpeech(formatJiraUpdate({ issueKey, comment }));
   }
 
+  /** Pipeline-facing note ports (two-brain consolidation, pass two): the
+   *  orchestrated pipeline owns complaint/feedback handling, but this agent
+   *  still owns the meeting summary — hosts feed notes through these so
+   *  finishMeeting() keeps collecting them. Not used by the legacy cascade
+   *  itself. */
+  addPipelineFeedback(item: { at: number; speakerId: string; original: string; paraphrase: string; jiraKey?: string }): void {
+    this.feedbackItems.push(item);
+  }
+
+  addPipelineConcern(item: { at: number; speakerId: string; text: string }): void {
+    this.concerns.push(item);
+  }
+
   /** End the meeting: build + emit the summary (never read aloud). */
   finishMeeting(opts?: { meetingId?: string; title?: string; startedAt?: number }): MeetingSummaryData {
     const now = this.cfg.now();
