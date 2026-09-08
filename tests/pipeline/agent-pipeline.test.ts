@@ -135,14 +135,16 @@ const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => 
 };
 
 describe('OrchestratedPipeline', () => {
-  it('routes etiquette intents straight to the legacy cascade', async () => {
+  it('talk-permission (mute) is owned by the pipeline gate, not the cascade', async () => {
     const { pipeline, legacy } = harness();
     const muted: number[] = [];
     legacy.on('muted', (m) => muted.push(m.until));
 
     const r = await pipeline.processUtterance('u1', 'agent, shut up');
-    expect(r.routed).toBe('legacy');
-    expect(muted.length).toBe(1);
+    expect(r.routed).toBe('etiquette');
+    // One owner: the cascade never learns of the mute in orchestrated mode.
+    expect(muted.length).toBe(0);
+    expect(legacy.isMuted(1_000_000)).toBe(false);
   });
 
   it('routes unknown chatter to the legacy cascade', async () => {

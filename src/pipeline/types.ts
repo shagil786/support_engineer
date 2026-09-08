@@ -9,7 +9,10 @@ import type { Decision } from '../governance/decision.js';
 
 /** Result of routing one input through the pipeline. */
 export interface PipelineRouting {
-  routed: 'pipeline' | 'legacy';
+  /** 'etiquette': handled by the pipeline's mute/wake gate (no downstream
+   *  brain saw it). 'legacy': the cascade (action etiquette, chatter,
+   *  fallback). 'pipeline': governed work. */
+  routed: 'pipeline' | 'legacy' | 'etiquette';
   correlationId: string;
   ok?: boolean;
   reason?: string;

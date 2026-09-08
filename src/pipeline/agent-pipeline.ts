@@ -42,6 +42,7 @@ import { GovernedDispatch, recentEvents } from './governed-dispatch.js';
 import { GroundedQuestionStage } from './grounded-question.js';
 import { RunbookResolver } from './runbook-resolver.js';
 import { routeIntent } from './route.js';
+import { EtiquetteGate } from './etiquette-gate.js';
 import { runbookProposal, shapeProposal } from './proposal.js';
 import type { DispatchContext, PipelineRouting } from './types.js';
 
@@ -61,6 +62,9 @@ export interface OrchestratedPipelineOptions {
   runbookProvider?: RunbookProvider;
   /** Where pipeline-generated speech is delivered (TTS bridge). */
   deliverSpeech?: (text: string, target?: { channel: string; threadTs: string }) => void;
+  /** How long "agent, shut up" mutes the agent (EtiquetteGate default: 5 min,
+   *  matching the legacy cascade's muteDurationMs). */
+  muteDurationMs?: number;
   /** Grounded answerer over the knowledge base. When wired, question intents
    *  are answered KB-first (cited speech, no tools); KB refusals fall through
    *  to the governed log-query path. Unwired → questions go straight to the
@@ -85,6 +89,7 @@ export class OrchestratedPipeline {
   private readonly governed: GovernedDispatch;
   private readonly questions: GroundedQuestionStage;
   private readonly runbooks: RunbookResolver;
+  private readonly etiquette: EtiquetteGate;
 
   constructor(opts: OrchestratedPipelineOptions) {
     this.legacy = opts.legacy;
@@ -112,6 +117,10 @@ export class OrchestratedPipeline {
       now: this.now,
     });
     this.runbooks = new RunbookResolver(opts.runbookProvider);
+    this.etiquette = new EtiquetteGate({
+      deliverSpeech: (text) => this.deliverSpeech(text),
+      ...(opts.muteDurationMs !== undefined ? { muteDurationMs: opts.muteDurationMs } : {}),
+    });
   }
 
   /** Entry point for live meeting utterances. */
@@ -129,8 +138,19 @@ export class OrchestratedPipeline {
         { correlationId: cid },
       );
 
-      // Etiquette intents belong to the legacy cascade, always — and so does
-      // unrecognized chatter (the cascade's greeting/ignore policy owns it).
+      // Talk-permission (mute/wake) belongs to the pipeline's gate in
+      // orchestrated mode: one owner of the mute state, and the gate's
+      // window also swallows pipeline-routed work (the ownership bug this
+      // fixes: a muted meeting used to still get KB answers).
+      const etiquette = this.etiquette.offer(speakerId, text, ts);
+      if (etiquette.handled) {
+        return { routed: 'etiquette', correlationId: cid, ...(etiquette.ok !== undefined ? { ok: etiquette.ok } : {}), ...(etiquette.reason ? { reason: etiquette.reason } : {}) };
+      }
+
+      // Action etiquette (critical, complaint, feedback) and unrecognized
+      // chatter belong to the legacy cascade (its greeting/ignore policy
+      // owns it). Critical declarations were offered to the gate first and
+      // passed through by design — urgent signals break through mutes.
       if (routeIntent(envelope) === 'legacy') {
         this.legacy.processUtterance(speakerId, text, ts);
         return { routed: 'legacy', correlationId: cid, legacyFallback: false };
