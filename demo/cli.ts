@@ -15,48 +15,86 @@ import {
   SupportVoiceAgent,
   ScriptedBridge,
   createVoiceSession,
-  InMemoryVectorMemory,
   InMemoryKeyValueStore,
   InMemoryRunbookProvider,
   SlackWebhookNotifier,
   SAMPLE_RUNBOOK_ACTIONS,
 } from '../src/index';
 import type { RunbookResult } from '../src/support-voice-agent/integrations/runbook';
-import { chunkDocument, type IngestDoc } from '../src/understanding/knowledge/chunker';
+import type { MemoryRecord, SearchHit, VectorMemory } from '../src/understanding/memory/vector';
+import { FileBackedKnowledgeBase } from '../src/understanding/knowledge/knowledge-base';
+import type { IngestDoc } from '../src/understanding/knowledge/chunker';
+
+/* ------------------- KB-backed vector memory (Layer 1) ------------------- */
+
+/** Adapt the durable hybrid knowledge base to the agent's Layer-1
+ *  VectorMemory port: one retrieval substrate instead of the legacy
+ *  cosine-only in-memory store. BM25 + vector + RRF + rerank now rank the
+ *  demo corpus; nothing in the agent changes.
+ *
+ *  search: top-1 with a permissive floor (the hybrid rerank scale does not
+ *  match the legacy cosine 0.3; relevance gating stays BM25/rerank work,
+ *  and a miss falls through to the honest no-data fallback as before).
+ *  add: swallowed — indexing Layer-1 chatter into the KB would overwrite
+ *  the corpus (replace-by-doc-id); it stays observable in episodic memory.
+ */
+function kbAsVectorMemory(kb: FileBackedKnowledgeBase): VectorMemory {
+  return {
+    add: async (_record: MemoryRecord): Promise<void> => {},
+    search: async (query: string, topK?: number, _minScore?: number): Promise<SearchHit[]> => {
+      const hits = await kb.search(query, { topK: topK ?? 1 });
+      return hits.map((h) => ({
+        id: h.docId,
+        text: h.heading ? `${h.heading}\n${h.text}` : h.text,
+        metadata: h.metadata,
+        score: Math.min(1, h.score * 2),
+      }));
+    },
+    size: () => kb.size(),
+    purge: async (_predicate: (record: MemoryRecord) => boolean): Promise<number> => 0,
+    list: () => kb.docIds().map((docId) => ({ id: docId, text: docId })),
+  };
+}
 
 /* --------------------------- knowledge corpus --------------------------- */
 
-/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the agent's
- *  vector memory, so direct questions answer from real operational notes —
- *  "From my notes: …" — instead of the honest no-data fallback.
+/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the durable
+ *  hybrid knowledge base, so direct questions answer from real operational
+ *  notes — "From my notes: …" — instead of the honest no-data fallback.
  *
- *  Same chunking as the durable knowledge base (chunkDocument: markdown
- *  sections, never mid-sentence), indexed as "heading\nbody" like the hybrid
- *  KB does, with the doc's source metadata carried for provenance. */
+ *  The same substrate the platform uses: BM25 + vector hybrid retrieval,
+ *  markdown-section chunking (never mid-sentence), and provenance metadata.
+ *  Ingest is replace-by-doc-id, so a doc removed from the corpus is evicted
+ *  explicitly — the KB never answers from a stale demo file. The snapshot
+ *  persists under demo/.demo-kb/ (gitignored), so a second boot reloads
+ *  instead of re-chunking. */
 const KNOWLEDGE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'knowledge');
+const DEMO_KB_PATH = join(dirname(fileURLToPath(import.meta.url)), '.demo-kb', 'kb.json');
 
-async function seedKnowledge(vectors: InMemoryVectorMemory): Promise<number> {
-  let files: string[];
+async function seedKnowledge(kb: FileBackedKnowledgeBase): Promise<number> {
+  let files: string[] | undefined;
   try {
     files = readdirSync(KNOWLEDGE_DIR).filter((f) => f.endsWith('.md')).sort();
   } catch {
-    // Missing corpus = yesterday's demo: questions fall back honestly.
     console.log('📚 knowledge: demo/knowledge/ not found — running without notes');
-    return 0;
   }
-  let chunks = 0;
+  // The KB mirrors the corpus: docs that left it (or all of them, when the
+  // corpus directory is gone) are evicted — the durable snapshot must never
+  // answer from notes that no longer exist.
+  const wanted = new Set((files ?? []).map((f) => f.replace(/\.md$/, '')));
+  for (const docId of kb.docIds()) {
+    if (!wanted.has(docId)) await kb.deleteDoc(docId);
+  }
+  if (!files) return 0;
   for (const f of files) {
     const doc: IngestDoc = {
       id: f.replace(/\.md$/, ''),
       text: readFileSync(join(KNOWLEDGE_DIR, f), 'utf8'),
       metadata: { source: 'demo-knowledge' },
     };
-    for (const c of chunkDocument(doc)) {
-      await vectors.add({ id: `${c.docId}#${c.index}`, text: `${c.heading}\n${c.text}`, metadata: c.metadata });
-      chunks += 1;
-    }
+    await kb.ingest(doc);
   }
-  return chunks;
+  return kb.size();
 }
 
 /* ---------------- offline fake servers (no network ever) ---------------- */
@@ -94,7 +132,9 @@ const fakeSlackFetch: typeof fetch = (input, init) => {
 const clock = { now: 1_000_000 };
 const bridge = new ScriptedBridge({ meetingId: 'demo-meeting', now: () => clock.now });
 
-const vectors = new InMemoryVectorMemory();
+const kb = new FileBackedKnowledgeBase({ path: DEMO_KB_PATH });
+
+const vectors = kbAsVectorMemory(kb);
 const agent = new SupportVoiceAgent({
   mode: 'response',
   wakeWord: 'hey agent',
@@ -159,7 +199,7 @@ async function scriptedScene(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const chunks = await seedKnowledge(vectors);
+  const chunks = await seedKnowledge(kb);
   console.log(`📚 knowledge: ${chunks} chunks seeded from demo/knowledge/*.md`);
   await session.start();
   console.log('=== Support Voice Agent — offline demo (fake Jira/Slack, no network) ===');
