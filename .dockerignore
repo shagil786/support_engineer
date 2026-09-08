@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log
+var
+demo/.demo-kb
+docs
+tests
+.github
+.githooks
+.git
+.gitignore
+coverage
+*.log
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore

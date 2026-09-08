@@ -17,7 +17,8 @@
     "learn": "LEARNING_ENABLED=true tsx scripts/learning-cron.ts",
     "learn:once": "LEARNING_ENABLED=true tsx scripts/learning-cron.ts --once",
     "prepare": "test -d .git && git config core.hooksPath .githooks || true",
-    "demo": "tsx demo/cli.ts"
+    "demo": "tsx demo/cli.ts",
+    "smoke:container": "bash scripts/container-smoke.sh"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

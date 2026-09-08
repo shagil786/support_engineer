@@ -122,6 +122,24 @@ async function main(): Promise<void> {
 
   console.log(`platform up (learning: ${learningEnv ? `on, every ${intervalMs}ms` : 'off'}). Speaker: ${speaker}`);
   console.log('Type an utterance; :learning tick | :quit for commands.');
+  // Container mode (SERVE_KEEP_ALIVE=1): stdin is closed or not a TTY in a
+  // detached container, and readline's 'close' would end the process —
+  // killing the server the moment the container starts. Keep-alive holds the
+  // process open so the HTTP surface stays up; ':quit' (never delivered
+  // without stdin) stops gracefully instead.
+  const keepAlive = env['SERVE_KEEP_ALIVE'] === '1';
+  if (keepAlive) {
+    console.log('keep-alive: running until SIGINT/SIGTERM (SERVE_KEEP_ALIVE=1)');
+    const stop = async () => {
+      await http?.close();
+      rt.stopLearning();
+      console.log('bye');
+      process.exit(0);
+    };
+    process.on('SIGINT', () => void stop());
+    process.on('SIGTERM', () => void stop());
+    return;
+  }
   const rl = createInterface({ input: process.stdin, terminal: false });
   for await (const line of rl) {
     const text = line.trim();

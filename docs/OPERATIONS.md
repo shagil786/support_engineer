@@ -141,6 +141,23 @@ the half-open probe are specified in
 
 How long a staged approval stays pending (default 5 minutes; >= 1000).
 
+## Running in a container
+
+```bash
+docker build -t support-agent .
+docker run --rm -p 8787:8787 --env-file .env -v agent-data:/data support-agent
+```
+
+The image (node:22-slim, non-root) carries sources, `policies/`, and the
+probed native `better-sqlite3` binary; a prebuild/ABI failure fails the
+*build*, not a runtime request — the same contract CI enforces on the runner.
+All state lives under the `/data` volume (`DATA_DIR`); HTTP binds
+`0.0.0.0:8787`; the container runs with `SERVE_KEEP_ALIVE=1` because a
+detached container has no stdin (without it the console loop would exit and
+take the server down). `npm run smoke:container` builds, boots, and probes
+health/readiness/fail-closed auth/cited answering; it skips cleanly when no
+Docker daemon is present.
+
 ## Minimal production example
 
 ```bash
