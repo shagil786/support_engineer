@@ -16,6 +16,12 @@ export interface RecordOptions {
   meetingId?: string;
 }
 
+/** Optional meeting scoping for recall: hits are restricted to records
+ *  stamped with this meetingId. Absent → all meetings (legacy behavior). */
+export interface RecallOptions {
+  meetingId?: string;
+}
+
 export interface EpisodicMemoryOptions {
   perMeeting?: import('./vector.js').VectorMemory;
   cross?: import('./vector.js').VectorMemory;
@@ -89,7 +95,13 @@ export class EpisodicMemory {
     await this.perMeeting.add({ ...rec, metadata: { ...rec.metadata, [MEETING_META]: stamp } });
   }
 
-  async recall(scope: EpisodicScope, query: string, topK = 3, minScore = 0.05): Promise<SearchHit[]> {
+  async recall(
+    scope: EpisodicScope,
+    query: string,
+    topK = 3,
+    minScore = 0.05,
+    filter?: RecallOptions,
+  ): Promise<SearchHit[]> {
     if (scope === 'cross') {
       return this.cross.search(query, topK, minScore);
     }
@@ -99,7 +111,19 @@ export class EpisodicMemory {
       return stamp !== undefined && stamp.recordedAt <= cutoff;
     };
     await this.perMeeting.purge(expired);
-    return this.perMeeting.search(query, topK, minScore);
+    if (filter?.meetingId === undefined) {
+      return this.perMeeting.search(query, topK, minScore);
+    }
+    // Meeting-scoped recall: search wide, then keep only this meeting's
+    // records. Records whose stamp predates the filter still match by
+    // meetingId, so stores written before this filter existed stay readable.
+    const wide = await this.perMeeting.search(query, topK * 4, minScore);
+    return wide
+      .filter((hit) => {
+        const stamp = hit.metadata?.[MEETING_META] as MeetingStamp | undefined;
+        return stamp?.meetingId === filter.meetingId || hit.metadata?.meetingId === filter.meetingId;
+      })
+      .slice(0, topK);
   }
 
   /** Number of live per-meeting records (ops/readiness surfaces; test pinning). */

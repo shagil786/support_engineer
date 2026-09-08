@@ -225,17 +225,20 @@ export async function createHttpServer(
     const parsed = parseJson(body);
     if (!parsed.ok) return { status: 400, body: { error: parsed.error }, createdAt: now() };
 
-    const b = parsed.value as { speakerId?: unknown; text?: unknown; speakerRole?: unknown };
+    const b = parsed.value as { speakerId?: unknown; text?: unknown; speakerRole?: unknown; meetingChannel?: unknown };
     const text = typeof b.text === 'string' ? b.text.trim() : '';
     if (text.length === 0) return { status: 400, body: { error: 'text is required' }, createdAt: now() };
     const speakerId = typeof b.speakerId === 'string' && b.speakerId.trim() !== '' ? b.speakerId : 'http-client';
+    // Optional meeting channel: Slack thread targeting. Scope memory + approval
+    // staging to this conversation instead of the speaker's global one.
+    const meetingChannel = typeof b.meetingChannel === 'string' && b.meetingChannel.trim() !== '' ? b.meetingChannel.trim() : undefined;
     // Authorization is NOT a client assertion: roles resolve server-side from
     // the speakerId via the platform's SafetyNet resolver (unknown = guest).
     // Accepting a role from the request body would let any token holder
     // claim admin.
 
     try {
-      const route = await platform.pipeline.processUtterance(speakerId, text, now());
+      const route = await platform.pipeline.processUtterance(speakerId, text, now(), meetingChannel);
       return { status: 200, body: route, createdAt: now() };
     } catch (e) {
       return { status: 500, body: { error: e instanceof Error ? e.message : String(e) }, createdAt: now() };
@@ -392,6 +395,7 @@ export async function createHttpServer(
         ts?: string;
         event_ts?: string;
         channel?: string;
+        thread_ts?: string;
         reaction?: string;
         item?: { type?: string; channel?: string; ts?: string };
       };
@@ -439,8 +443,15 @@ export async function createHttpServer(
     }
 
     const speaker = typeof event.user === 'string' && event.user !== '' ? event.user : 'slack-user';
+    // Meeting targeting: a threaded message (thread_ts) is part of a specific
+    // conversation — memory and approvals scope to the channel, not the user.
+    const meetingChannel = typeof event.channel === 'string' && event.channel.trim() !== '' ? event.channel.trim() : undefined;
+    // The thread root: Slack sets thread_ts on every reply in a thread; when
+    // absent (a top-of-thread message that starts the conversation) the
+    // message's own ts IS the thread root.
+    const threadTs = typeof event.thread_ts === 'string' && event.thread_ts.trim() !== '' ? event.thread_ts.trim() : (typeof event.ts === 'string' && event.ts.trim() !== '' ? event.ts.trim() : undefined);
     try {
-      await platform.pipeline.processUtterance(speaker, text, now());
+      await platform.pipeline.processUtterance(speaker, text, now(), meetingChannel, threadTs);
     } catch {
       // Already logged by the pipeline's own degradation; ack regardless so
       // Slack does not retry an event we cannot process.

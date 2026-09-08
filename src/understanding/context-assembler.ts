@@ -31,6 +31,9 @@ export interface AssembleOptions {
   topK?: number;
   minScore?: number;
   scope?: EpisodicScope;
+  /** Meeting id to scope episodic recall to (channel/speaker key). Absent →
+   *  recall spans all meetings (legacy behavior). */
+  meetingId?: string;
   /** Override the metadata filter for knowledge retrieval (e.g. restrict to
    *  source: 'runbooks'). Defaults to no filter. */
   knowledgeWhere?: SearchOptions['where'];
@@ -51,7 +54,7 @@ export class ContextAssembler {
   async assemble(input: AssembleOptions): Promise<ContextBundle> {
     const query = input.text ?? this.intentToQuery(input.envelope);
     const scope: EpisodicScope = input.scope ?? 'cross';
-    const episodes = await this.opts.episodic.recall(scope, query, input.topK ?? 5, input.minScore ?? 0.3);
+    const episodes = await this.opts.episodic.recall(scope, query, input.topK ?? 5, input.minScore ?? 0.3, input.scope === 'perMeeting' && input.meetingId ? { meetingId: input.meetingId } : undefined);
 
     const knowledge = this.knowledge
       ? await this.knowledge.search(query, {

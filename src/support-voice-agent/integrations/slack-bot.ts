@@ -104,6 +104,28 @@ export class SlackBotClient {
     await this.call('chat.postMessage', { channel, thread_ts: ts, text });
   }
 
+  /** Post a Block Kit card in-thread under an existing message and resolve
+   *  the reply's ref — meeting-thread approval cards. */
+  async postRichThreadMessage(channel: string, threadTs: string, message: RichMessage): Promise<{ channel: string; ts: string }> {
+    const r = await this.call('chat.postMessage', {
+      channel,
+      thread_ts: threadTs,
+      text: message.text,
+      ...(message.attachments ? { attachments: message.attachments } : {}),
+      ...(message.blocks ? { blocks: message.blocks } : {}),
+    });
+    if (!r.channel || !r.ts) throw new Error('Slack API chat.postMessage did not return a message ref');
+    return { channel: r.channel, ts: r.ts };
+  }
+
+  /** Post plain text in-thread under an existing message and resolve the
+   *  reply's ref — text-ladder counterpart of postRichThreadMessage. */
+  async postThreadMessage(channel: string, threadTs: string, text: string): Promise<{ channel: string; ts: string }> {
+    const r = await this.call('chat.postMessage', { channel, thread_ts: threadTs, text });
+    if (!r.channel || !r.ts) throw new Error('Slack API chat.postMessage did not return a message ref');
+    return { channel: r.channel, ts: r.ts };
+  }
+
   /** SlackLike / SlackNotifier compatibility: post and discard the ref. */
   async postMessage(channel: string, text: string): Promise<void> {
     await this.postMessageWithRef(channel, text);

@@ -22,6 +22,12 @@ import type { SpeakerRole } from './safety-net/rbac.js';
  *  cards, `updateMessage`/`postReply` enable in-place lifecycle edits. */
 export interface SlackLike {
   postMessage(channel: string, text: string): Promise<void>;
+  /** Post in-thread under an existing message (chat.postMessage with
+   *  thread_ts) and resolve the reply's ref. Present on bot-token clients;
+  *  enables meeting-thread approval cards. */
+  postThreadMessage?(channel: string, threadTs: string, text: string): Promise<{ channel: string; ts: string }>;
+  /** Rich variant of postThreadMessage (Block Kit card in-thread). */
+  postRichThreadMessage?(channel: string, threadTs: string, message: RichMessage): Promise<{ channel: string; ts: string }>;
   postMessageWithRef?(channel: string, text: string): Promise<{ channel: string; ts: string }>;
   /** Edit the original message in place (chat.update). Present on bot-token
    *  clients; preferred for grant/deny/timeout so the message is the record. */
@@ -50,6 +56,11 @@ export interface ApprovalRequestInput {
   decision: Decision;
   action: ProposedAction;
   timeoutMs?: number;
+  /** When set, the approval card posts in-thread under this message
+   *  (the meeting where the action was requested) instead of the security
+   *  channel. Lifecycle updates and reaction correlation follow the same
+   *  ref, so the thread stays the single record of the decision. */
+  thread?: { channel: string; ts: string };
 }
 
 export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'timeout';
@@ -183,15 +194,38 @@ export class ApprovalGate {
     const text = this.renderMessage(p);
     p.originalText = text;
     let delivered = false;
-    if (this.slack.postRichMessage) {
-      // Richest path: Block Kit card with state color + buttons.
+    const target = input.thread ?? { channel: this.channel };
+    if (input.thread && this.slack.postRichThreadMessage) {
+      // Richest path: Block Kit card with state color + buttons, in-thread.
       try {
-        const ref = await this.slack.postRichMessage(this.channel, this.renderRich(p));
+        const ref = await this.slack.postRichThreadMessage(target.channel, input.thread.ts, this.renderRich(p));
         this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
         p.ref = { channel: ref.channel, ts: ref.ts };
         delivered = true;
       } catch {
         /* fall through to the text ladder */
+      }
+    }
+    if (!delivered && this.slack.postRichMessage) {
+      // Richest path: Block Kit card with state color + buttons.
+      try {
+        const ref = await this.slack.postRichMessage(target.channel, this.renderRich(p));
+        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
+        p.ref = { channel: ref.channel, ts: ref.ts };
+        delivered = true;
+      } catch {
+        /* fall through to the text ladder */
+      }
+    }
+    if (!delivered && input.thread && this.slack.postThreadMessage) {
+      // Bot-token path in-thread: record the ref so reactions correlate.
+      try {
+        const ref = await this.slack.postThreadMessage(target.channel, input.thread.ts, text);
+        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
+        p.ref = { channel: ref.channel, ts: ref.ts };
+        delivered = true;
+      } catch {
+        await this.slack.postMessage(this.channel, text);
       }
     }
     if (!delivered && this.slack.postMessageWithRef) {

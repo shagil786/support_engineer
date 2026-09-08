@@ -123,7 +123,13 @@ export class OrchestratedPipeline {
   }
 
   /** Entry point for live meeting utterances. */
-  async processUtterance(speakerId: string, text: string, ts = this.now()): Promise<PipelineRouting> {
+  async processUtterance(
+    speakerId: string,
+    text: string,
+    ts = this.now(),
+    meetingChannel?: string,
+    threadTs?: string,
+  ): Promise<PipelineRouting> {
     const cid = correlationId(ts);
     try {
       const envelope = await this.classifier.classify(
@@ -142,17 +148,23 @@ export class OrchestratedPipeline {
 
       // Meeting context: every routed utterance becomes a per-meeting
       // memory (durable when the platform wires a perMeetingPath), so the
-      // next utterance's dance sees this conversation's history.
+      // next utterance's dance sees this conversation's history. The meeting
+      // key is the channel when one is provided (Slack threads), else the
+      // speaker (console/HTTP default).
+      const meetingId = meetingChannel ? `channel:${meetingChannel}` : `meeting:${speakerId}`;
       try {
-        await this.episodic?.record(
-          'perMeeting',
-          { id: cid, text, metadata: { speaker: speakerId } },
-          { meetingId: `meeting:${speakerId}` },
-        );
+        await this.episodic?.record('perMeeting', { id: cid, text, metadata: { speaker: speakerId } }, { meetingId });
       } catch {
         // Memory failure must not fail the request.
       }
-      return await this.dispatch(cid, envelope, { correlationId: cid, speakerId, text, meetingScope: true });
+      return await this.dispatch(cid, envelope, {
+        correlationId: cid,
+        speakerId,
+        text,
+        meetingScope: true,
+        meetingId,
+        ...(meetingChannel ? { thread: { channel: meetingChannel, ts: threadTs ?? String(ts) } } : {}),
+      });
     } catch (e) {
       // Honest degradation: pipeline failure → legacy cascade.
       this.legacy.processUtterance(speakerId, text, ts);
@@ -210,7 +222,14 @@ export class OrchestratedPipeline {
   private async dispatch(
     cid: string,
     envelope: IntentEnvelope,
-    ctx: { correlationId: string; speakerId: string; text: string; meetingScope?: boolean },
+    ctx: {
+      correlationId: string;
+      speakerId: string;
+      text: string;
+      meetingScope?: boolean;
+      meetingId?: string;
+      thread?: { channel: string; ts: string };
+    },
   ): Promise<PipelineRouting> {
     // Meeting utterances assemble with the per-meeting scope: the dance sees
     // what was said earlier in THIS conversation (spec §4.1 episodic recall),
@@ -220,6 +239,7 @@ export class OrchestratedPipeline {
       recent: await this.recentEvents(),
       text: ctx.text,
       ...(ctx.meetingScope ? { scope: 'perMeeting' as const } : {}),
+      ...(ctx.meetingId ? { meetingId: ctx.meetingId } : {}),
     });
 
     const subKind = envelope.intent.kind === 'meeting_response' ? envelope.intent.subKind : undefined;
@@ -296,7 +316,12 @@ export class OrchestratedPipeline {
       return { routed: 'pipeline', correlationId: cid, ok: false, reason: `denied: ${decision.reason}` };
     }
     if (decision.effect === 'require_approval') {
-      const { approvalId } = await this.approvals.request({ policyId: decision.policyIds[0] ?? 'policy', decision, action: proposal });
+      const { approvalId } = await this.approvals.request({
+        policyId: decision.policyIds[0] ?? 'policy',
+        decision,
+        action: proposal,
+        ...(ctx.thread ? { thread: ctx.thread } : {}),
+      });
       this.staged.set(approvalId, { approvalId, correlationId: cid, action: proposal, decision });
       return { routed: 'pipeline', correlationId: cid, approvalId, approvalStatus: 'pending' };
     }
@@ -326,7 +351,7 @@ export class OrchestratedPipeline {
   private async handleRunbookOffer(
     cid: string,
     envelope: IntentEnvelope,
-    ctx: { correlationId: string; speakerId: string; text: string },
+    ctx: { correlationId: string; speakerId: string; text: string; thread?: { channel: string; ts: string } },
   ): Promise<PipelineRouting> {
     const wanted = envelope.entities.runbookIds?.[0];
     const resolved = await this.resolveRunbook(wanted, ctx.text);
@@ -360,7 +385,12 @@ export class OrchestratedPipeline {
       return { routed: 'pipeline', correlationId: cid, ok: false, reason: `denied: ${decision.reason}` };
     }
     if (decision.effect === 'require_approval') {
-      const { approvalId } = await this.approvals.request({ policyId: decision.policyIds[0] ?? 'policy', decision, action: proposal });
+      const { approvalId } = await this.approvals.request({
+        policyId: decision.policyIds[0] ?? 'policy',
+        decision,
+        action: proposal,
+        ...(ctx.thread ? { thread: ctx.thread } : {}),
+      });
       this.staged.set(approvalId, { approvalId, correlationId: cid, action: proposal, decision });
       return { routed: 'pipeline', correlationId: cid, approvalId, approvalStatus: 'pending' };
     }
