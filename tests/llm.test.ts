@@ -169,6 +169,129 @@ describe('OpenAiCompatibleClient', () => {
     await expect(client.complete({ messages: [], tools: [] })).rejects.toMatchObject({ code: 'http_error', message: /503/ });
     expect(calls).toBe(3); // 1 initial + 2 retries
   });
+
+  describe('saturation circuit breaker', () => {
+    /** Provider that always answers 429, counting its hits. */
+    function busy429(): { request: typeof fetch; calls: () => number } {
+      let calls = 0;
+      const request = (async (): Promise<Response> => {
+        calls += 1;
+        return { ok: false, status: 429, json: async () => ({}), text: async () => 'capacity' } as unknown as Response;
+      }) as unknown as typeof fetch;
+      return { request, calls: () => calls };
+    }
+    const busyBody = { messages: [], tools: [] };
+
+    it('opens after consecutive 429 completions and fails fast with circuit_open', async () => {
+      const { request, calls } = busy429();
+      const clock = { now: 1_000 };
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 1, retryBackoffMs: 1, request, now: () => clock.now });
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 1
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 2
+      expect(calls()).toBe(4); // each completion still reached the provider
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 3 → opens
+      expect(calls()).toBe(6);
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' }); // fail fast, provider untouched
+      expect(calls()).toBe(6);
+    });
+
+    it('half-opens after the cooldown: a probe that succeeds resets the breaker', async () => {
+      let calls = 0;
+      const request = (async (): Promise<Response> => {
+        calls += 1;
+        if (calls <= 3) return { ok: false, status: 429, json: async () => ({}), text: async () => 'capacity' } as unknown as Response;
+        return { ok: true, status: 200, json: async () => minimalResponse, text: async () => JSON.stringify(minimalResponse) } as unknown as Response;
+      }) as unknown as typeof fetch;
+      const clock = { now: 1_000 };
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 0, breakerBaseCooldownMs: 1_000, request, now: () => clock.now });
+      for (let i = 0; i < 3; i++) {
+        await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' });
+      }
+      clock.now += 999; // cooldown (1000ms) not yet elapsed
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' });
+      clock.now += 1; // elapsed → half-open: exactly one probe goes through
+      const r = await client.complete(busyBody);
+      expect(r.choices[0]?.message?.content).toBe('Got it.');
+      expect(calls).toBe(4);
+    });
+
+    it('each re-trip doubles the cooldown', async () => {
+      const { request, calls } = busy429();
+      const clock = { now: 1_000 };
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 0, breakerThreshold: 2, breakerBaseCooldownMs: 1_000, request, now: () => clock.now });
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 1
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 2 → open, cooldown 1s
+      clock.now += 999;
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' });
+      clock.now += 1; // +1000 → half-open probe 429s → re-trip, cooldown 2s
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' });
+      clock.now += 1999; // only +1999 since the re-trip → still open
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' });
+      clock.now += 1; // +2000 → half-open probe runs
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' });
+      expect(calls()).toBe(4);
+    });
+
+    it('resets fully on success: the next saturation starts from zero', async () => {
+      let calls = 0;
+      const request = (async (): Promise<Response> => {
+        calls += 1;
+        return calls === 3
+          ? ({ ok: true, status: 200, json: async () => minimalResponse, text: async () => JSON.stringify(minimalResponse) } as unknown as Response)
+          : ({ ok: false, status: 429, json: async () => ({}), text: async () => 'capacity' } as unknown as Response);
+      }) as unknown as typeof fetch;
+      const clock = { now: 1_000 };
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 0, breakerThreshold: 2, breakerBaseCooldownMs: 1_000, request, now: () => clock.now });
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 1
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 2 → open
+      clock.now += 1_001;
+      const r = await client.complete(busyBody); // half-open probe → success → reset
+      expect(r.choices[0]?.message?.content).toBe('Got it.');
+      expect(calls).toBe(3);
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // one 429 → trip 1, not open
+      expect(calls).toBe(4);
+      clock.now += 1_000;
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 2: this call opens the breaker
+      expect(calls).toBe(5);
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' }); // next call fails fast
+      expect(calls).toBe(5);
+    });
+
+    it('does not count 5xx toward the breaker', async () => {
+      let calls = 0;
+      const request = (async (): Promise<Response> => {
+        calls += 1;
+        return { ok: false, status: 503, json: async () => ({}), text: async () => 'overloaded' } as unknown as Response;
+      }) as unknown as typeof fetch;
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 1, retryBackoffMs: 1, request, now: () => 1_000 });
+      for (let i = 0; i < 4; i++) {
+        await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' });
+      }
+      expect(calls).toBe(8); // every completion reached the provider — never circuit_open
+    });
+
+    it('breakerThreshold: 0 disables the breaker entirely', async () => {
+      const { request, calls } = busy429();
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 0, breakerThreshold: 0, request });
+      for (let i = 0; i < 5; i++) {
+        await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' });
+      }
+      expect(calls()).toBe(5);
+    });
+
+    it('reports circuit_open through the onCall hook with attempts: 0', async () => {
+      const { request } = busy429();
+      const seen: Array<Record<string, unknown>> = [];
+      const client = new OpenAiCompatibleClient({ baseUrl: 'https://gw.test/v1', apiKey: 'k', model: 'm', maxRetries: 0, breakerThreshold: 1, request, now: () => 1_000, onCall: (info) => seen.push(info as Record<string, unknown>) });
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'http_error' }); // trip 1 → open
+      await expect(client.complete(busyBody)).rejects.toMatchObject({ code: 'circuit_open' });
+      const last = seen[seen.length - 1] as { ok: boolean; errorCode?: string; attempts: number; breakerState?: string };
+      expect(last.ok).toBe(false);
+      expect(last.errorCode).toBe('circuit_open');
+      expect(last.attempts).toBe(0);
+      expect(last.breakerState).toBeGreaterThan(0); // ms remaining on the cooldown
+    });
+  });
 });
 
 describe('tool registry schemas', () => {

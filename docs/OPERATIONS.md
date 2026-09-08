@@ -112,6 +112,20 @@ serve short-circuits with, and writes the efficacy snapshot. Ticks report via
 Raise the wall clock for slow LLM providers; each var is optional and
 independently floor-checked.
 
+## LLM transient failures — retry ladder + saturation breaker
+
+The LLM client retries transient failures (429 / 5xx / network) with jittered
+exponential backoff (2 retries, 500ms base, 8s cap per attempt). When
+consecutive completions end fully rate-limited — every attempt answered 429
+(default 3 in a row) — the saturation circuit breaker opens: further calls
+fail fast with a `circuit_open` error instead of hammering a provider that is
+out of capacity. After a cooldown (10s, doubling per re-trip, capped at 2min)
+a single half-open probe decides reset vs re-open; any success resets the
+breaker entirely. 5xx/network failures retry as before but never open it, and
+a single overloaded request still just retries — the breaker counts
+completions, not attempts. The `llm_call` audit event records
+`errorCode: circuit_open` plus the remaining cooldown ms (`breakerState`).
+
 ## Approval timing — `APPROVAL_TIMEOUT_MS`
 
 How long a staged approval stays pending (default 5 minutes; >= 1000).
