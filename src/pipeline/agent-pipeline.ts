@@ -70,7 +70,7 @@ export interface OrchestratedPipelineOptions {
   outcomeRecorder?: OutcomeRecorder;
   runbookProvider?: RunbookProvider;
   /** Where pipeline-generated speech is delivered (TTS bridge). */
-  deliverSpeech?: (text: string) => void;
+  deliverSpeech?: (text: string, target?: { channel: string; threadTs: string }) => void;
   /** Grounded answerer over the knowledge base. When wired, question intents
    *  are answered KB-first (cited speech, no tools); KB refusals fall through
    *  to the governed log-query path. Unwired → questions go straight to the
@@ -98,7 +98,7 @@ export class OrchestratedPipeline {
   private readonly outcomeRecorder?: OutcomeRecorder;
   private readonly episodic?: import('../understanding/memory/episodic.js').EpisodicMemory;
   private readonly runbookProvider?: RunbookProvider;
-  private readonly deliverSpeech: (text: string) => void;
+  private readonly deliverSpeech: (text: string, target?: { channel: string; threadTs: string }) => void;
   private readonly answerer?: GroundedAnswerer;
   private readonly now: () => number;
   /** approvalId → staged action awaiting (or holding) a grant. */
@@ -117,7 +117,7 @@ export class OrchestratedPipeline {
     this.outcomeRecorder = opts.outcomeRecorder;
     this.episodic = opts.episodic;
     this.runbookProvider = opts.runbookProvider;
-    this.deliverSpeech = opts.deliverSpeech ?? ((t) => void t);
+    this.deliverSpeech = opts.deliverSpeech ?? ((_t, _target) => undefined);
     this.answerer = opts.answerer;
     this.now = opts.now ?? Date.now;
   }
@@ -266,7 +266,7 @@ export class OrchestratedPipeline {
     if (subKind === 'question' && this.answerer && !liveData) {
       const grounded = await this.answerer.answer(ctx.text, { topK: 4, minScore: 0.4 });
       if (!grounded.refused) {
-        this.deliverSpeech(grounded.answer);
+        this.deliverSpeech(grounded.answer, ctx.thread ? { channel: ctx.thread.channel, threadTs: ctx.thread.ts } : undefined);
         await this.eventLog.append({
           correlationId: cid,
           ts: this.now(),

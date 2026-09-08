@@ -96,8 +96,14 @@ export interface PlatformOptions {
   };
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
-  /** Where pipeline speech is delivered (TTS bridge / console). */
-  deliverSpeech?: (text: string) => void;
+  /** Where pipeline speech is delivered (TTS bridge / console). The optional
+   *  second argument is the Slack thread to reply in when the utterance came
+   *  from one; hosts that ignore it keep the bare-text shape. */
+  deliverSpeech?: (text: string, target?: { channel: string; threadTs: string }) => void;
+  /** Injectable Slack client for thread replies (answer-back). Satisfied by
+   *  SlackBotClient in production; tests may inject a fake. When absent,
+   *  thread answers degrade to the plain deliverSpeech path. */
+  slackBot?: import('./governance/approval-gate.js').SlackLike;
   now?: () => number;
 }
 
@@ -249,12 +255,18 @@ export function createPlatform(opts: PlatformOptions): Platform {
   });
 
   const runbookProvider = new InMemoryRunbookProvider(opts.runbooks ?? []);
+  // Speech: the pipeline's deliverSpeech is the voice; meeting_interrupt (P0/P1
+  // alerts) speaks through the same channel via the ToolRunner context. When a
+  // Slack bot is wired, deliverSpeech ALSO replies in-thread — the answer lands
+  // where the question was asked, not just on the console.
+  const slackBot = opts.slackBot ?? (opts.slackBotToken ? new SlackBotClient({ botToken: opts.slackBotToken }) : undefined);
   const toolRunner = new ToolRunner({
     context: {
       ...(opts.jira ? { jiraClient: new JiraClient(opts.jira) } : {}),
       ...(opts.logProvider ? { logProvider: opts.logProvider } : {}),
       ...(opts.slack ? { slackNotifier: opts.slack } : {}),
       runbookProvider,
+      ...(opts.deliverSpeech ? { speak: (text: string) => opts.deliverSpeech!(text) } : {}),
     },
     safetyNet,
     eventLog,
@@ -300,7 +312,14 @@ export function createPlatform(opts: PlatformOptions): Platform {
     episodic,
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir, ...(now ? { now } : {}) }),
     runbookProvider,
-    ...(opts.deliverSpeech ? { deliverSpeech: opts.deliverSpeech } : {}),
+    ...(opts.deliverSpeech
+      ? {
+          deliverSpeech: (text: string, target?: { channel: string; threadTs: string }) => {
+            opts.deliverSpeech!(text, target);
+            if (target && slackBot?.postReply) void slackBot.postReply(target.channel, target.threadTs, text).catch(() => {});
+          },
+        }
+      : {}),
     answerer,
     ...(now ? { now } : {}),
   });

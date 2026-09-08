@@ -47,6 +47,7 @@ interface Opts {
   seedKb?: boolean;
   policyYaml?: string;
   classifierOverride?: IntentClassifier;
+  deliver?: (text: string, target?: { channel: string; threadTs: string }) => void;
 }
 
 async function harness(opts: Opts = {}) {
@@ -115,18 +116,42 @@ async function harness(opts: Opts = {}) {
     eventLog,
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir }),
     runbookProvider,
-    deliverSpeech: (text) => spoken.push(text),
+    deliverSpeech: (text, target) => (opts.deliver ? opts.deliver(text, target) : spoken.push(text)),
     answerer,
     now: () => 1_000_000,
   });
-  return { pipeline, eventLog, logQueries };
-}
+  return { pipeline, eventLog, logQueries };}
 
 const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => {
   const out: string[] = [];
   for await (const e of log.query({ correlationId: cid })) out.push(e.kind);
   return out;
 };
+
+describe('thread-aware speech delivery', () => {
+  it('a KB answer requested in a thread is delivered WITH the thread target', async () => {
+    const delivered: Array<{ text: string; target?: { channel: string; threadTs: string } }> = [];
+    const h = await harness({
+      seedKb: true,
+      deliver: (text, target) => delivered.push({ text, ...(target ? { target } : {}) }),
+    });
+    const r = await h.pipeline.processUtterance('U1', 'what caused the checkout incident?', 1_000, 'C-MEET', '1700000000.1');
+    expect(r.answerSource).toBe('knowledge');
+    expect(delivered.length).toBe(1);
+    expect(delivered[0]!.target).toEqual({ channel: 'C-MEET', threadTs: '1700000000.1' });
+  });
+
+  it('a KB answer without a channel keeps the bare-text delivery shape', async () => {
+    const delivered: Array<{ text: string; target?: { channel: string; threadTs: string } }> = [];
+    const h = await harness({
+      seedKb: true,
+      deliver: (text, target) => delivered.push({ text, ...(target ? { target } : {}) }),
+    });
+    await h.pipeline.processUtterance('U1', 'what caused the checkout incident?', 1_000);
+    expect(delivered.length).toBe(1);
+    expect(delivered[0]!.target).toBeUndefined();
+  });
+});
 
 describe('grounded question path', () => {
   it('live-data questions skip the KB entirely (a tangential chunk must not answer a logs question)', async () => {
