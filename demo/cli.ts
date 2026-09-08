@@ -8,6 +8,9 @@
  *  via configFromEnv()/createVoiceSession().
  */
 import { createInterface } from 'node:readline';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SupportVoiceAgent,
   ScriptedBridge,
@@ -19,6 +22,42 @@ import {
   SAMPLE_RUNBOOK_ACTIONS,
 } from '../src/index';
 import type { RunbookResult } from '../src/support-voice-agent/integrations/runbook';
+import { chunkDocument, type IngestDoc } from '../src/understanding/knowledge/chunker';
+
+/* --------------------------- knowledge corpus --------------------------- */
+
+/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the agent's
+ *  vector memory, so direct questions answer from real operational notes —
+ *  "From my notes: …" — instead of the honest no-data fallback.
+ *
+ *  Same chunking as the durable knowledge base (chunkDocument: markdown
+ *  sections, never mid-sentence), indexed as "heading\nbody" like the hybrid
+ *  KB does, with the doc's source metadata carried for provenance. */
+const KNOWLEDGE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'knowledge');
+
+async function seedKnowledge(vectors: InMemoryVectorMemory): Promise<number> {
+  let files: string[];
+  try {
+    files = readdirSync(KNOWLEDGE_DIR).filter((f) => f.endsWith('.md')).sort();
+  } catch {
+    // Missing corpus = yesterday's demo: questions fall back honestly.
+    console.log('📚 knowledge: demo/knowledge/ not found — running without notes');
+    return 0;
+  }
+  let chunks = 0;
+  for (const f of files) {
+    const doc: IngestDoc = {
+      id: f.replace(/\.md$/, ''),
+      text: readFileSync(join(KNOWLEDGE_DIR, f), 'utf8'),
+      metadata: { source: 'demo-knowledge' },
+    };
+    for (const c of chunkDocument(doc)) {
+      await vectors.add({ id: `${c.docId}#${c.index}`, text: `${c.heading}\n${c.text}`, metadata: c.metadata });
+      chunks += 1;
+    }
+  }
+  return chunks;
+}
 
 /* ---------------- offline fake servers (no network ever) ---------------- */
 
@@ -55,6 +94,7 @@ const fakeSlackFetch: typeof fetch = (input, init) => {
 const clock = { now: 1_000_000 };
 const bridge = new ScriptedBridge({ meetingId: 'demo-meeting', now: () => clock.now });
 
+const vectors = new InMemoryVectorMemory();
 const agent = new SupportVoiceAgent({
   mode: 'response',
   wakeWord: 'hey agent',
@@ -65,7 +105,7 @@ const agent = new SupportVoiceAgent({
     console.log(`   ⚙ [runbook] executing '${id}'…`);
     return { actionId: id, ok: true, output: 'pod restarted, healthz green' };
   }),
-  memory: { kv: new InMemoryKeyValueStore({ now: () => clock.now }), vectors: new InMemoryVectorMemory() },
+  memory: { kv: new InMemoryKeyValueStore({ now: () => clock.now }), vectors },
 });
 
 const session = createVoiceSession(bridge, agent);
@@ -110,14 +150,17 @@ async function scriptedScene(): Promise<void> {
   agent.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
   await new Promise((r) => setTimeout(r, 30));
   await say('U2', 'this is a P1');
+  await say('U1', 'hey agent, what do we do when the database is unreachable?');
+  await say('U1', 'hey agent, are we okay on disk space?');
   await say('U1', 'hey agent, shut up');
   await say('U2', 'what about the database?');
-  await say('U1', 'hey agent, are we okay on disk space?');
   const summary = agent.finishMeeting({ title: 'Demo war room' });
   console.log(`\n📝 meeting summary captured: ${summary.feedback.length} feedback, ${summary.jiraChanges.length} Jira changes, ${summary.alerts.length} alerts, ${summary.spokenResponseCount} spoken lines (persisted to KV, never read aloud)`);
 }
 
 async function main(): Promise<void> {
+  const chunks = await seedKnowledge(vectors);
+  console.log(`📚 knowledge: ${chunks} chunks seeded from demo/knowledge/*.md`);
   await session.start();
   console.log('=== Support Voice Agent — offline demo (fake Jira/Slack, no network) ===');
   console.log('Type lines as  speaker: text   — or: /script /summary /quit\n');
