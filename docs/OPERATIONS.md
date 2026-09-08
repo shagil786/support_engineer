@@ -87,7 +87,25 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   `RATE_LIMIT_PER_MINUTE` (default 120/credential), idempotency keys honored.
   Routes: `POST /utterance` `{ text, speakerId }`, `POST /ask`
   `{ question }`, `POST /envelope` (structured webhook deliveries), approval
-  grant/deny/execute endpoints.
+  grant/deny/execute endpoints. `GET /metrics` (same bearer auth) exposes the
+  Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
+  governed-run outcomes, policy decisions, SafetyNet vetoes, and approval
+  lifecycle counts — aggregated live from the event log.
+
+- **Monitoring**: scrape `GET /metrics` with Prometheus (bearer token in the
+  scrape config), then import `deploy/grafana/support-agent-dashboard.json`
+  (uid `support-agent-ops`) — LLM error rate, latency percentiles, token
+  burn, per-tool latency, policy decisions, vetoes, and the approval queue
+  out of the box. A contract test keeps the dashboard and the metric set
+  from drifting apart. Add
+  `deploy/prometheus/support-agent-alerts.yml` to your `rule_files` for
+  provider-saturation (early warning + open breaker), approval-queue
+  backlog, and SafetyNet veto-spike alerting — also contract-pinned.
+  Pending approvals are in-memory, but boot-time reconciliation sweeps
+  requests orphaned by a dead process (a terminal `approval_timeout` event
+  per swept id, reported as `approvalsSwept` by `/readyz`-backed readiness
+  when nonzero), so an orphaned queue self-heals on restart instead of
+  wedging the backlog alert.
 - **Slack**: `SLACK_SIGNING_SECRET` enables events; `SLACK_BOT_TOKEN` upgrades
   approvals to the reaction UX.
 

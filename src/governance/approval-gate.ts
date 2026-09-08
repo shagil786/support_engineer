@@ -285,6 +285,14 @@ export class ApprovalGate {
     const p = this.require(approvalId);
     if (p.status === 'pending') {
       p.status = 'denied';
+      void this.eventLog?.append({
+        correlationId: p.id,
+        ts: this.now(),
+        layer: 'governance',
+        source: 'slack',
+        kind: 'approval_denied',
+        approvalId: p.id,
+      }).catch(() => {});
       this.rerender(p);
     }
     return this.snapshot(p);
@@ -356,6 +364,44 @@ export class ApprovalGate {
     }
     const snap = this.sign(approvalId, mapped, event.userId);
     return { ...base, accepted: true, status: snap.status, signatures: snap.signatures };
+  }
+
+  /** Boot-time reconciliation: a pending approval lives in this process's
+   *  memory, so once the owning process dies the card can never grant and
+   *  execution stays fail-closed forever — an orphan. Sweep the event log
+   *  for requests that predate this boot and never reached a terminal event
+   *  (granted / denied / timed_out) and close them out, so the durable
+   *  metrics picture (support_agent_approvals_total backlog arithmetic)
+   *  stops counting the dead queue. Returns the swept approval ids.
+   *  Awaits the audit writes so ready() reports a fully settled spine. */
+  async sweepOrphans(): Promise<string[]> {
+    if (!this.eventLog) return [];
+    const bootTs = this.now();
+    const terminal = new Set<string>();
+    const requested = new Map<string, number>();
+    for await (const e of this.eventLog.query({})) {
+      if (e.ts >= bootTs) continue;
+      if (e.kind === 'approval_request') requested.set(e.approvalId, e.ts);
+      else if (e.kind === 'approval_granted' || e.kind === 'approval_denied' || e.kind === 'approval_timeout') {
+        terminal.add(e.approvalId);
+      }
+    }
+    const orphans = [...requested.entries()]
+      .filter(([id, ts]) => !terminal.has(id) && ts < bootTs)
+      .map(([id]) => id);
+    await Promise.all(
+      orphans.map((id) =>
+        this.eventLog!.append({
+          correlationId: id,
+          ts: bootTs,
+          layer: 'governance',
+          source: 'internal',
+          kind: 'approval_timeout',
+          approvalId: id,
+        }),
+      ),
+    );
+    return orphans;
   }
 
   /** Expire any pending approvals past their deadline; returns expired ids. */

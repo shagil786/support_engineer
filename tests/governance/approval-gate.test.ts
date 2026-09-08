@@ -101,6 +101,19 @@ describe('ApprovalGate', () => {
     expect(kinds).toContain('approval_granted');
   });
 
+  it('emits approval_denied when a pending approval is denied', async () => {
+    const slack = new FakeSlack();
+    const log = new JsonlFileEventLog({ baseDir: join(dir, 'events') });
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, eventLog: log });
+    const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
+    gate.deny(approvalId);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const kinds: string[] = [];
+    for await (const e of log.query({ correlationId: approvalId })) kinds.push(e.kind);
+    expect(kinds).toContain('approval_denied');
+  });
+
   it('rejects signing or denying an unknown approvalId', async () => {
     const slack = new FakeSlack();
     const gate = new ApprovalGate({ slack, securityChannel: '#sec' });

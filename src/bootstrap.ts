@@ -359,12 +359,16 @@ export function createPlatform(opts: PlatformOptions): Platform {
       // Boot async work: the KB re-embeds vectors and indexes on construction;
       // the durable episodic store runs its compatibility self-check. Both are
       // fire-and-forget internally — /readyz waits for them so a load balancer
-      // never routes traffic into a half-warmed agent.
+      // never routes traffic into a half-warmed agent. The approval sweep
+      // closes out requests from dead processes (no terminal event) so the
+      // durable backlog metric doesn't count a queue that can never grant.
+      const swept = await approvals.sweepOrphans();
       await Promise.all([...catalogSync.ops, knowledge.whenIndexed(), episodic.whenBootChecked()]);
       return {
         learning: learningLoop ? ('on' as const) : ('off' as const),
         procedures: library.size(),
         kb: { docs: knowledge.stats().docs },
+        ...(swept.length > 0 ? { approvalsSwept: swept.length } : {}),
       };
     },
   };

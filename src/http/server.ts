@@ -28,6 +28,7 @@ import type { ApprovalSnapshot } from '../governance/approval-gate.js';
 import type { IntentEnvelope } from '../event-log/types.js';
 import type { ToolName } from '../support-voice-agent/tools/types.js';
 import { buildEnvelope, ENVELOPE_SOURCES } from '../surface/dispatch.js';
+import { renderMetrics } from './metrics.js';
 
 export interface HttpServerOptions {
   /** Bearer tokens for /utterance and /approvals/*. Empty/missing → those
@@ -185,6 +186,11 @@ export async function createHttpServer(
     // Only VALID tokens consume budget — a 401 flood cannot mint buckets.
     routeContexts.set(res, { credential: token });
     if (limitClient('token:' + token)) return tooMany(res);
+
+    if (method === 'GET' && path === '/metrics') {
+      const metrics = await renderMetrics(platform.eventLog);
+      return reply(res, 200, metrics, 'text/plain; version=0.0.4');
+    }
 
     if (method === 'POST' && path === '/utterance') {
       return dispatchIdempotent(req, res, 'utterance', () => handleUtterance(req, res));
@@ -592,9 +598,9 @@ function sendCached(res: ServerResponse, r: CachedResponse, replay = false): voi
 
 /* ----------------------------- helpers ----------------------------- */
 
-function reply(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
+function reply(res: ServerResponse, status: number, body: unknown, contentType = 'application/json'): void {
+  res.writeHead(status, { 'content-type': contentType });
+  res.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 
 function proposeFor(envelope: IntentEnvelope): { tool: ToolName; args: Record<string, unknown> } {

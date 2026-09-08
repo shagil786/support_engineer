@@ -165,6 +165,34 @@ describe('createPlatform', () => {
     expect(r.reason).toMatch(/hop cap/);
   });
 
+  it('ready() sweeps approvals orphaned by a previous process and reports the count', async () => {
+    // Process 1: stage a destructive request, never terminate it.
+    const p1 = createPlatform({ dataDir: dir, runbooks, speakerRole: (id) => (id === 'admin1' ? 'admin' : undefined) });
+    const r1 = await p1.pipeline.processUtterance('admin1', 'agent, can you restart the checkout pod?');
+    expect(r1.approvalId).toBeTruthy();
+    await p1.stopLearning();
+    // The staged request is a fire-and-forget audit write; wait for it to
+    // hit disk before the successor process reconciles over the log.
+    await new Promise((r) => setTimeout(r, 20));
+    const stagedKinds: string[] = [];
+    for await (const e of p1.eventLog.query({ correlationId: r1.approvalId! })) stagedKinds.push(e.kind);
+    expect(stagedKinds).toContain('approval_request');
+
+    // Process 2: same data dir. The pending approval died with process 1.
+    const p2 = createPlatform({ dataDir: dir, runbooks, speakerRole: (id) => (id === 'admin1' ? 'admin' : undefined) });
+    const ready = await p2.ready();
+    expect((ready as { approvalsSwept?: number }).approvalsSwept).toBe(1);
+
+    // The spine now carries a terminal event for the orphaned request.
+    const kinds: string[] = [];
+    for await (const e of p2.eventLog.query({ correlationId: r1.approvalId! })) kinds.push(e.kind);
+    expect(kinds).toContain('approval_request');
+    expect(kinds).toContain('approval_timeout');
+    // Idempotent: ready() again sweeps nothing new.
+    expect(await p2.ready()).not.toHaveProperty('approvalsSwept');
+    await p2.stopLearning();
+  });
+
   it('ready() resolves after boot async work and reports kb/procedure/learning state', async () => {
     const p = createPlatform({ dataDir: dir, learning: { enabled: true }, logProvider, runbooks });
     const r = await p.ready();

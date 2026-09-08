@@ -1,9 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ApprovalGate, type SlackLike } from '../../src/governance/approval-gate';
+import { JsonlFileEventLog } from '../../src/event-log/log';
 import type { Decision, ProposedAction } from '../../src/governance/decision';
 
 const decision: Decision = { effect: 'require_approval', reason: 'destructive', policyIds: ['p1'] };
 const action: ProposedAction = { tool: 'execute_runbook_script', args: { script_name: 'restart-all' } };
+
+let dir: string;
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'approvalgate-lc-')); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 /** Records synchronously so fire-and-forget follow-ups are assertable. */
 class FakeSlack implements SlackLike {
@@ -102,6 +110,38 @@ describe('ApprovalGate lifecycle follow-ups', () => {
     // Give the rejected fire-and-forget promise a microtask to surface,
     // then confirm it was swallowed.
     await new Promise((r) => setTimeout(r, 10));
+  });
+
+  it('sweepOrphans closes logged requests with no terminal event', async () => {
+    const log = new JsonlFileEventLog({ baseDir: join(dir, 'events') });
+    const now = 2_000_000;
+    const gate = new ApprovalGate({ slack: new FakeSlack(), securityChannel: '#sec', approverCount: 2, eventLog: log, now: () => now });
+
+    // History in the spine: two pre-boot requests, one terminal (denied), one orphaned.
+    await log.append({ correlationId: 'old-denied', ts: 1_000_000, layer: 'governance', source: 'slack', kind: 'approval_request', approvalId: 'old-denied', policyId: 'p1', approver_count: 2 });
+    await log.append({ correlationId: 'old-denied', ts: 1_000_100, layer: 'governance', source: 'slack', kind: 'approval_denied', approvalId: 'old-denied' });
+    await log.append({ correlationId: 'old-orphan', ts: 1_500_000, layer: 'governance', source: 'slack', kind: 'approval_request', approvalId: 'old-orphan', policyId: 'p1', approver_count: 2 });
+
+    const swept = await gate.sweepOrphans();
+    expect(swept).toEqual(['old-orphan']);
+
+    const kinds: string[] = [];
+    for await (const e of log.query({ correlationId: 'old-orphan' })) kinds.push(e.kind);
+    expect(kinds).toContain('approval_timeout');
+  });
+
+  it('sweepOrphans ignores this-boot activity and returns [] without an event log', async () => {
+    const now = 2_000_000;
+    // No eventLog wired → no-op.
+    expect(await new ApprovalGate({ slack: new FakeSlack(), securityChannel: '#sec' }).sweepOrphans()).toEqual([]);
+
+    const log = new JsonlFileEventLog({ baseDir: join(dir, 'events-2') });
+    const gate = new ApprovalGate({ slack: new FakeSlack(), securityChannel: '#sec', approverCount: 2, eventLog: log, now: () => now });
+    // A post-boot request (ts >= boot) is live work, not an orphan.
+    await log.append({ correlationId: 'live', ts: now, layer: 'governance', source: 'slack', kind: 'approval_request', approvalId: 'live', policyId: 'p1', approver_count: 2 });
+    expect(await gate.sweepOrphans()).toEqual([]);
+    // Idempotent: a second sweep over the same spine sweeps nothing new.
+    expect(await gate.sweepOrphans()).toEqual([]);
   });
 
   it('granted approvals post no follow-up', async () => {

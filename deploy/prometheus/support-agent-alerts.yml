@@ -1,0 +1,102 @@
+# Support Agent — Prometheus alerting rules.
+#
+# Built on the metric families rendered by src/http/metrics.ts (GET /metrics).
+# The contract is pinned by tests/alerts.test.ts: a metric rename in the
+# renderer fails CI here instead of silently breaking production alerting.
+#
+# Load with:
+#   rule_files:
+#     - /etc/prometheus/support-agent-alerts.yml
+#
+# Alert classes:
+#   1. Provider saturation  — SupportAgentLlmSaturation (early warning:
+#      completion failures climbing) and SupportAgentLlmCircuitOpen
+#      (critical: the breaker is refusing calls, i.e. saturation survived
+#      the retry ladder — see ADR-0004).
+#   2. Approval backlog     — SupportAgentApprovalBacklog: requested minus
+#      granted minus denied minus timed_out; a pending M-of-N approval is a
+#      destructive runbook stalled mid-war-room.
+#   3. Veto spikes          — SupportAgentVetoSpike: SafetyNet vetoes
+#      clustering in a short window means either a misbehaving integration,
+#      a runaway proposal loop, or a policy that fires more than intended.
+#
+# Restart behavior: pending approvals live in gate memory, but boot-time
+# reconciliation (ApprovalGate.sweepOrphans, awaited by platform.ready())
+# closes out requests from dead processes — any request predating the boot
+# with no granted/denied/timed_out event gets a terminal approval_timeout.
+# So an orphaned queue self-heals on the next boot instead of wedging the
+# backlog alert forever; a backlog firing across a restart means the queue
+# is real (or the process keeps dying before ready() completes).
+
+groups:
+  - name: support-agent-provider
+    interval: 30s
+    rules:
+      - alert: SupportAgentLlmSaturation
+        expr: >-
+          sum by (instance) (rate(support_agent_llm_calls_total{ok="false",error_code=~"http_error|network"}[5m]))
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: support-agent
+        annotations:
+          summary: "LLM provider errors climbing ({{ $labels.instance }})"
+          description: >-
+            More than 0.1 failed completions/s for 5m (currently {{ $value | humanize }}/s).
+            The retry ladder is absorbing failures; the circuit breaker has not opened yet.
+          runbook_url: docs/OPERATIONS.md (LLM resilience / ADR-0004)
+
+      - alert: SupportAgentLlmCircuitOpen
+        expr: >-
+          sum by (instance) (rate(support_agent_llm_calls_total{ok="false",error_code="circuit_open"}[5m]))
+          > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: support-agent
+        annotations:
+          summary: "LLM circuit breaker open ({{ $labels.instance }})"
+          description: >-
+            The saturation breaker is refusing calls ({{ $value | humanize }} circuit_open/s over 5m).
+            The provider had no capacity for the full retry ladder repeatedly. Check provider
+            status/quota; the adaptive cooldown doubles each re-trip up to 2 minutes.
+          runbook_url: docs/OPERATIONS.md (LLM resilience / ADR-0004)
+
+  - name: support-agent-governance
+    interval: 30s
+    rules:
+      - alert: SupportAgentApprovalBacklog
+        expr: >-
+          sum by (instance) (support_agent_approvals_total{outcome="requested"})
+          - sum by (instance) (support_agent_approvals_total{outcome="granted"})
+          - sum by (instance) (support_agent_approvals_total{outcome="denied"})
+          - sum by (instance) (support_agent_approvals_total{outcome="timed_out"})
+          > 0
+        for: 15m
+        labels:
+          severity: warning
+          service: support-agent
+        annotations:
+          summary: "Approval queue backlog ({{ $labels.instance }})"
+          description: >-
+            {{ $value | humanize }} approval(s) open for 15m+ with no terminal event.
+            A destructive runbook is staged and waiting on M-of-N signatures — or a restart
+            orphaned the pending queue. Check the Slack approval channel.
+          runbook_url: docs/OPERATIONS.md (approval lifecycle)
+
+      - alert: SupportAgentVetoSpike
+        expr: >-
+          sum by (instance, check) (increase(support_agent_safety_net_vetoes_total[10m]))
+          > 3
+        labels:
+          severity: warning
+          service: support-agent
+        annotations:
+          summary: "SafetyNet veto spike: {{ $labels.check }} ({{ $labels.instance }})"
+          description: >-
+            {{ $value | humanize }} vetoes of check "{{ $labels.check }}" in 10m.
+            Either a proposal loop is being stopped repeatedly, an integration is
+            misbehaving, or a guardrail is tuned too tight for current traffic.
+            The event log has per-veto reasons.
+          runbook_url: docs/OPERATIONS.md (SafetyNet)
