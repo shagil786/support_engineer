@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPlatform } from '../../src/bootstrap';
@@ -119,6 +119,18 @@ describe('createPlatform', () => {
       if (e.kind === 'agent_outcome') outcome = e;
     }
     expect(outcome?.finalResult.summary).toContain('via:procedure');
+  });
+
+  it('records pipeline-routed utterances as durable per-meeting memories', async () => {
+    const p = await createPlatform({ dataDir: dir });
+    const r = await p.pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
+    expect(r.routed).toBe('pipeline');
+    const meetingsFile = join(dir, 'memory', 'meetings.json');
+    expect(existsSync(meetingsFile)).toBe(true);
+    const store = JSON.parse(readFileSync(meetingsFile, 'utf8')) as unknown;
+    const s = JSON.stringify(store);
+    expect(s).toContain('agent, can you check the error logs for the api?');
+    expect(s).toContain('meeting:u1');
   });
 
   it('wires LLM completions into the event spine as llm_call events', async () => {

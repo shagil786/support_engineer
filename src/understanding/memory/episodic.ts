@@ -23,6 +23,11 @@ export interface EpisodicMemoryOptions {
    *  restarts). Ignored when an explicit `cross` store is provided. When
    *  absent, cross scope is in-memory (per-process). */
   crossPath?: string;
+  /** File path for durable per-meeting storage (meeting context survives
+   *  restarts). TTL expiry and purgeMeeting() persist like any other
+   *  mutation. When absent, per-meeting scope is in-memory (per-process) —
+   *  the historical default. */
+  perMeetingPath?: string;
   perMeetingTtlMs?: number;
   embedder?: Embedder;
   now?: () => number;
@@ -58,7 +63,14 @@ export class EpisodicMemory {
   private readonly now: () => number;
 
   constructor(opts: EpisodicMemoryOptions = {}) {
-    this.perMeeting = opts.perMeeting ?? new InMemoryVectorMemory({ embedder: opts.embedder });
+    this.perMeeting =
+      opts.perMeeting ??
+      (opts.perMeetingPath
+        ? new FileBackedVectorMemory({
+            path: opts.perMeetingPath,
+            ...(opts.embedder ? { embedder: opts.embedder } : {}),
+          })
+        : new InMemoryVectorMemory({ embedder: opts.embedder }));
     this.cross =
       opts.cross ??
       (opts.crossPath
@@ -88,6 +100,11 @@ export class EpisodicMemory {
     };
     await this.perMeeting.purge(expired);
     return this.perMeeting.search(query, topK, minScore);
+  }
+
+  /** Number of live per-meeting records (ops/readiness surfaces; test pinning). */
+  perMeetingSize(): number {
+    return this.perMeeting.size();
   }
 
   /** Drop every per-meeting record belonging to `meetingId`. */

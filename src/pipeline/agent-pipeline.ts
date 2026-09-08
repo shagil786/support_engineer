@@ -76,6 +76,10 @@ export interface OrchestratedPipelineOptions {
    *  to the governed log-query path. Unwired → questions go straight to the
    *  governed path (previous behavior). */
   answerer?: GroundedAnswerer;
+  /** Episodic memory (optional): when wired, routed meeting utterances are
+   *  recorded as per-meeting memories and assembled with the per-meeting
+   *  scope, so the dance sees this conversation's history. */
+  episodic?: import('../understanding/memory/episodic.js').EpisodicMemory;
   now?: () => number;
 }
 
@@ -92,6 +96,7 @@ export class OrchestratedPipeline {
   private readonly toolRunner: ToolRunner;
   private readonly eventLog: EventLog;
   private readonly outcomeRecorder?: OutcomeRecorder;
+  private readonly episodic?: import('../understanding/memory/episodic.js').EpisodicMemory;
   private readonly runbookProvider?: RunbookProvider;
   private readonly deliverSpeech: (text: string) => void;
   private readonly answerer?: GroundedAnswerer;
@@ -110,6 +115,7 @@ export class OrchestratedPipeline {
     this.toolRunner = opts.toolRunner;
     this.eventLog = opts.eventLog;
     this.outcomeRecorder = opts.outcomeRecorder;
+    this.episodic = opts.episodic;
     this.runbookProvider = opts.runbookProvider;
     this.deliverSpeech = opts.deliverSpeech ?? ((t) => void t);
     this.answerer = opts.answerer;
@@ -134,7 +140,19 @@ export class OrchestratedPipeline {
         return { routed: 'legacy', correlationId: cid, legacyFallback: false };
       }
 
-      return await this.dispatch(cid, envelope, { correlationId: cid, speakerId, text });
+      // Meeting context: every routed utterance becomes a per-meeting
+      // memory (durable when the platform wires a perMeetingPath), so the
+      // next utterance's dance sees this conversation's history.
+      try {
+        await this.episodic?.record(
+          'perMeeting',
+          { id: cid, text, metadata: { speaker: speakerId } },
+          { meetingId: `meeting:${speakerId}` },
+        );
+      } catch {
+        // Memory failure must not fail the request.
+      }
+      return await this.dispatch(cid, envelope, { correlationId: cid, speakerId, text, meetingScope: true });
     } catch (e) {
       // Honest degradation: pipeline failure → legacy cascade.
       this.legacy.processUtterance(speakerId, text, ts);
@@ -192,9 +210,17 @@ export class OrchestratedPipeline {
   private async dispatch(
     cid: string,
     envelope: IntentEnvelope,
-    ctx: { correlationId: string; speakerId: string; text: string },
+    ctx: { correlationId: string; speakerId: string; text: string; meetingScope?: boolean },
   ): Promise<PipelineRouting> {
-    const bundle = await this.assembler.assemble({ envelope, recent: await this.recentEvents() });
+    // Meeting utterances assemble with the per-meeting scope: the dance sees
+    // what was said earlier in THIS conversation (spec §4.1 episodic recall),
+    // while cross-scope procedures still short-circuit via the library.
+    const bundle = await this.assembler.assemble({
+      envelope,
+      recent: await this.recentEvents(),
+      text: ctx.text,
+      ...(ctx.meetingScope ? { scope: 'perMeeting' as const } : {}),
+    });
 
     const subKind = envelope.intent.kind === 'meeting_response' ? envelope.intent.subKind : undefined;
 

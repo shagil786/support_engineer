@@ -182,7 +182,14 @@ export function createPlatform(opts: PlatformOptions): Platform {
   // but previously-learned procedures still serve (library without loop is
   // a supported mode: "serve what was learned, stop learning").
   let learningLoop: LearningLoop | undefined;
-  const episodic = new EpisodicMemory({ crossPath, ...(now ? { now } : {}) });
+  // Per-meeting scope is durable too (spec §4.1): meeting context survives
+  // restarts, TTL expiry (30d default) and purgeMeeting() persist like any
+  // other mutation.
+  const episodic = new EpisodicMemory({
+    crossPath,
+    perMeetingPath: join(dataDir, 'memory', 'meetings.json'),
+    ...(now ? { now } : {}),
+  });
   if (learningEnabled) {
     learningLoop = new LearningLoop({
       eventLog,
@@ -290,6 +297,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     supervisor,
     toolRunner,
     eventLog,
+    episodic,
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir, ...(now ? { now } : {}) }),
     runbookProvider,
     ...(opts.deliverSpeech ? { deliverSpeech: opts.deliverSpeech } : {}),

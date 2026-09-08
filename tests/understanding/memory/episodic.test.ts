@@ -1,6 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { EpisodicMemory } from '../../../src/understanding/memory/episodic';
 import { InMemoryVectorMemory, cosine } from '../../../src/understanding/memory/vector';
+import type { MemoryRecord } from '../../../src/understanding/memory/vector';
+
+let dir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'epi-'));
+});
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
 
 describe('cosine (the score under every vector search)', () => {
   it('refuses mismatched dimensions instead of silently zero-padding into garbage', () => {
@@ -19,6 +31,49 @@ describe('cosine (the score under every vector search)', () => {
 });
 
 describe('EpisodicMemory', () => {
+  describe('durable per-meeting scope (perMeetingPath)', () => {
+    const mem = (i: number): MemoryRecord => ({ id: `m${i}`, text: `checkout pod unstable warning ${i}`, metadata: {} });
+
+    it('meeting memories survive a restart', async () => {
+      const path = join(dir, 'meetings.json');
+      const a = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 });
+      await a.record('perMeeting', mem(1), { meetingId: 'mtg-1' });
+      const b = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 });
+      const hits = await b.recall('perMeeting', 'checkout pod unstable', 3);
+      expect(hits.length).toBe(1);
+      expect(hits[0]!.id).toBe('m1');
+    });
+
+    it('TTL expiry survives restart (expired entries are dropped on load-path recall)', async () => {
+      const path = join(dir, 'meetings-ttl.json');
+      const a = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 });
+      await a.record('perMeeting', mem(1), { meetingId: 'mtg-1' });
+      // A fresh process at now=31 days: the record is past the 30-day TTL.
+      const b = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 + 31 * 24 * 3600_000 });
+      const hits = await b.recall('perMeeting', 'checkout pod unstable', 3);
+      expect(hits.length).toBe(0);
+      // And the drop is persisted, not just filtered.
+      const c = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 + 31 * 24 * 3600_000 });
+      expect(c.perMeetingSize()).toBe(0);
+    });
+
+    it('purgeMeeting persists across restarts', async () => {
+      const path = join(dir, 'meetings-purge.json');
+      const a = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 });
+      await a.record('perMeeting', mem(1), { meetingId: 'mtg-1' });
+      await a.purgeMeeting('mtg-1');
+      const b = new EpisodicMemory({ perMeetingPath: path, now: () => 1_000 });
+      expect(b.perMeetingSize()).toBe(0);
+    });
+
+    it('default (no path) stays in-memory — nothing written', async () => {
+      const a = new EpisodicMemory({ now: () => 1_000 });
+      await a.record('perMeeting', mem(1), { meetingId: 'mtg-1' });
+      const b = new EpisodicMemory({ now: () => 1_000 });
+      expect(b.perMeetingSize()).toBe(0);
+    });
+  });
+
   it('records and recalls from a single scope', async () => {
     const mem = new EpisodicMemory({ cross: new InMemoryVectorMemory() });
     await mem.record('cross', { id: '1', text: 'restart-checkout-pod restarts the checkout pod', metadata: { kind: 'procedure' } });
