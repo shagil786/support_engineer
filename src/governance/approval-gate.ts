@@ -1,10 +1,15 @@
 /**
- * ApprovalGate (spec §5.3): stages a human approval for consequential
- * actions over Slack and tracks M-of-N signatures.
+ * ApprovalGate (spec §5.3): the approval STATE MACHINE — staging, M-of-N
+ * signature counting, terminal transitions, orphan sweeping, and the
+ * queue/listing view. This file owns approval state and nothing else:
  *
- * The Slack notifier is injected (never speaks HTTP directly), so tests and
- * other surfaces can satisfy the same one-method port. Every state change
- * (request, grant, timeout) is emitted to the EventLog when one is wired.
+ *  - Slack presentation (port, card renderers, delivery/update ladder)
+ *    lives in ./approval-slack — stateless, failure-isolated;
+ *  - Slack intake (reaction/click correlation, emoji map, privilege
+ *    checks) lives in ./approval-intake — it delegates transitions back
+ *    here through a minimal backend port;
+ *  - the signer trust rule (ranks, roleSatisfies, SignerRoleError) lives
+ *    in ./approval-roles — one definition for reactions, clicks, and REST.
  *
  * Signature counting: with `signerId` supplied, signatures dedupe by signer
  * (one human, one vote). Without it, each call counts as one signature —
@@ -14,42 +19,25 @@ import { correlationId } from '../event-log/correlation.js';
 import type { EventLog } from '../event-log/log.js';
 import type { Decision, ProposedAction } from './decision.js';
 import type { SpeakerRole, SpeakerRegistry } from './safety-net/rbac.js';
+import { SignerRoleError, roleSatisfies, type ApprovalStatus } from './approval-roles.js';
+import { ApprovalIntake, type ReactionEvent, type ReactionResult, type ActionEvent } from './approval-intake.js';
+import {
+  deliverRequestCard,
+  renderApprovalCard,
+  renderApprovalText,
+  renderLifecycleUpdate,
+  type ApprovalCardView,
+  type SlackLike,
+} from './approval-slack.js';
 
-/** Minimal Slack port satisfied by SlackNotifier and test fakes alike.
- *  Everything past `postMessage` is OPTIONAL — capability probing, never
- *  requirement: `postMessageWithRef` (bot tokens) enables reaction
- *  correlation, `postRichMessage`/`updateRichMessage` enable Block Kit
- *  cards, `updateMessage`/`postReply` enable in-place lifecycle edits. */
-export interface SlackLike {
-  postMessage(channel: string, text: string): Promise<void>;
-  /** Post in-thread under an existing message (chat.postMessage with
-   *  thread_ts) and resolve the reply's ref. Present on bot-token clients;
-  *  enables meeting-thread approval cards. */
-  postThreadMessage?(channel: string, threadTs: string, text: string): Promise<{ channel: string; ts: string }>;
-  /** Rich variant of postThreadMessage (Block Kit card in-thread). */
-  postRichThreadMessage?(channel: string, threadTs: string, message: RichMessage): Promise<{ channel: string; ts: string }>;
-  postMessageWithRef?(channel: string, text: string): Promise<{ channel: string; ts: string }>;
-  /** Edit the original message in place (chat.update). Present on bot-token
-   *  clients; preferred for grant/deny/timeout so the message is the record. */
-  updateMessage?(channel: string, ts: string, text: string): Promise<void>;
-  /** Reply in-thread under the original message (chat.postMessage with
-   *  thread_ts). Middle rung of the lifecycle-update ladder. */
-  postReply?(channel: string, ts: string, text: string): Promise<void>;
-  /** Post a rich Block Kit message (cards). Returns the ref so interactive
-   *  elements can be updated in place later. */
-  postRichMessage?(channel: string, message: RichMessage): Promise<{ channel: string; ts: string }>;
-  /** Re-render a posted rich message (chat.update with blocks/attachments). */
-  updateRichMessage?(channel: string, ts: string, message: RichMessage): Promise<void>;
-}
-
-/** Slack message with optional Block Kit payload. `text` is the fallback
- *  (notifications, plain clients); `attachments`/`blocks` are Slack's JSON
- *  shapes, left structural so this port stays dependency-free. */
-export interface RichMessage {
-  text: string;
-  attachments?: unknown[];
-  blocks?: unknown[];
-}
+// Public surface re-exports: everything importers used to get from this
+// module keeps its import path (the barrel and HTTP/Slack modules rely on
+// it); the definitions now live next to the code that owns them.
+export { SignerRoleError, ROLE_RANK, roleSatisfies } from './approval-roles.js';
+export type { ApprovalStatus } from './approval-roles.js';
+export type { SlackLike, RichMessage } from './approval-slack.js';
+export type { ReactionEvent, ReactionResult, ActionEvent } from './approval-intake.js';
+export type ActionResult = ReactionResult;
 
 export interface ApprovalRequestInput {
   policyId: string;
@@ -61,23 +49,6 @@ export interface ApprovalRequestInput {
    *  channel. Lifecycle updates and reaction correlation follow the same
    *  ref, so the thread stays the single record of the decision. */
   thread?: { channel: string; ts: string };
-}
-
-export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'timeout' | 'executed';
-
-/** Thrown when a signature is attempted with a role the server-resolved
- *  identity does not hold. Distinct from the unknown-id 404 so HTTP surfaces
- *  can answer 403 (authenticated, not allowed) honestly. */
-export class SignerRoleError extends Error {}
-
-/** Shared signature-privilege rule: a signer may contribute `wanted` only if
- *  their resolved role outranks or equals it. One rule for reactions AND the
- *  REST surface — the trust boundary lives here, next to the ranks. */
-export const ROLE_RANK: Record<SpeakerRole, number> = { admin: 0, engineer: 1, viewer: 2, guest: 3 };
-
-export function roleSatisfies(resolved: SpeakerRole | undefined, wanted: SpeakerRole): boolean {
-  if (!resolved) return false;
-  return ROLE_RANK[resolved] <= ROLE_RANK[wanted];
 }
 
 export interface ApprovalSnapshot {
@@ -110,38 +81,6 @@ export interface ApprovalGateOptions {
   approverRoles?: SpeakerRole[];
 }
 
-export interface ReactionEvent {
-  type: 'reaction_added' | 'reaction_removed';
-  /** Slack reaction name, e.g. 'raised_hands' or the emoji itself. */
-  reaction: string;
-  userId: string;
-  /** Resolved server-side (NEVER client-asserted as privilege — see below). */
-  userRole?: SpeakerRole;
-  channel?: string;
-  ts?: string;
-}
-
-export interface ReactionResult {
-  matched: boolean;
-  accepted?: boolean;
-  approvalId?: string;
-  status?: ApprovalStatus;
-  signatures?: number;
-  reason?: string;
-}
-
-/** A Slack interactive-element click (block_actions). The approval id rides
- *  INSIDE the action_id (`approval:approve:<id>`), so correlation never
- *  depends on which message the button lived on. */
-export interface ActionEvent {
-  actionId: string;
-  userId: string;
-  /** Resolved server-side by the host — a click proves identity, not role. */
-  userRole?: SpeakerRole;
-}
-
-export type ActionResult = ReactionResult;
-
 interface PendingApproval {
   id: string;
   policyId: string;
@@ -160,22 +99,6 @@ interface PendingApproval {
 
 const DEFAULT_APPROVER_COUNT = 2;
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
-/** Emoji → contribution. A reaction is a claim: it only counts when the
- *  reactor's resolved role is at least the mapped role. ❌ always denies.
- *  Keys cover both the emoji itself and Slack's reaction *name* for it
- *  (the Events API reports 'white_check_mark', not '✅'). */
-const DEFAULT_REACTION_ROLES: Record<string, SpeakerRole | 'deny'> = {
-  '🛡️': 'admin',
-  'shield': 'admin',
-  '🔧': 'engineer',
-  'wrench': 'engineer',
-  '👀': 'viewer',
-  'eyes': 'viewer',
-  '✅': 'viewer',
-  'white_check_mark': 'viewer',
-  '❌': 'deny',
-  'x': 'deny',
-};
 
 export class ApprovalGate {
   private readonly slack: SlackLike;
@@ -185,12 +108,11 @@ export class ApprovalGate {
   private readonly eventLog: EventLog | undefined;
   private readonly now: () => number;
   private readonly pending = new Map<string, PendingApproval>();
-  private readonly reactionRoles: Record<string, SpeakerRole | 'deny'>;
   private readonly resolveSignerRole: SpeakerRegistry | undefined;
   private readonly approverRoles: readonly SpeakerRole[];
-  /** 'channel:ts' of posted approval messages → approvalId (bot-token only;
-   *  webhook posters have no ref and rely on the single-pending fallback). */
-  private readonly deliveries = new Map<string, string>();
+  /** Slack intake: correlation + emoji privilege checks, delegating
+   *  transitions back into this gate through the minimal backend port. */
+  private readonly intake: ApprovalIntake;
   /** Queue-change listeners (SSE surfaces). Fired after every mutation that
    *  affects the queue listing; listeners receive no payload and re-read via
    *  listPending(), so the notification carries no data to leak. */
@@ -203,9 +125,20 @@ export class ApprovalGate {
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.eventLog = opts.eventLog;
     this.now = opts.now ?? Date.now;
-    this.reactionRoles = opts.reactionRoleMap ?? DEFAULT_REACTION_ROLES;
     this.resolveSignerRole = opts.resolveSignerRole;
     this.approverRoles = opts.approverRoles ?? ['admin'];
+    this.intake = new ApprovalIntake(
+      {
+        find: (approvalId) => {
+          const p = this.pending.get(approvalId);
+          return p ? { status: p.status, signatures: p.signatures.size } : undefined;
+        },
+        pendingIds: () => [...this.pending.values()].filter((p) => p.status === 'pending').map((p) => p.id),
+        sign: (approvalId, role, signerId) => this.sign(approvalId, role, signerId),
+        deny: (approvalId) => this.deny(approvalId),
+      },
+      opts.reactionRoleMap,
+    );
   }
 
   /** Subscribe to queue mutations (request/grant/deny/timeout/execute).
@@ -240,57 +173,14 @@ export class ApprovalGate {
     };
     this.pending.set(id, p);
     this.notify();
-    const text = this.renderMessage(p);
+    const view = this.view(p);
+    const text = renderApprovalText(view);
     p.originalText = text;
-    let delivered = false;
     const target = input.thread ?? { channel: this.channel };
-    if (input.thread && this.slack.postRichThreadMessage) {
-      // Richest path: Block Kit card with state color + buttons, in-thread.
-      try {
-        const ref = await this.slack.postRichThreadMessage(target.channel, input.thread.ts, this.renderRich(p));
-        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
-        p.ref = { channel: ref.channel, ts: ref.ts };
-        delivered = true;
-      } catch {
-        /* fall through to the text ladder */
-      }
-    }
-    if (!delivered && this.slack.postRichMessage) {
-      // Richest path: Block Kit card with state color + buttons.
-      try {
-        const ref = await this.slack.postRichMessage(target.channel, this.renderRich(p));
-        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
-        p.ref = { channel: ref.channel, ts: ref.ts };
-        delivered = true;
-      } catch {
-        /* fall through to the text ladder */
-      }
-    }
-    if (!delivered && input.thread && this.slack.postThreadMessage) {
-      // Bot-token path in-thread: record the ref so reactions correlate.
-      try {
-        const ref = await this.slack.postThreadMessage(target.channel, input.thread.ts, text);
-        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
-        p.ref = { channel: ref.channel, ts: ref.ts };
-        delivered = true;
-      } catch {
-        await this.slack.postMessage(this.channel, text);
-      }
-    }
-    if (!delivered && this.slack.postMessageWithRef) {
-      // Bot-token path: record the message ref so reactions correlate to
-      // THIS approval even with several pending at once.
-      try {
-        const ref = await this.slack.postMessageWithRef(this.channel, text);
-        this.deliveries.set(`${ref.channel}:${ref.ts}`, id);
-        p.ref = { channel: ref.channel, ts: ref.ts };
-        delivered = true;
-      } catch {
-        await this.slack.postMessage(this.channel, text);
-      }
-    }
-    if (!delivered) {
-      await this.slack.postMessage(this.channel, text);
+    const ref = await deliverRequestCard(this.slack, { channel: target.channel, ...(input.thread ? { threadTs: input.thread.ts } : {}) }, this.channel, text, renderApprovalCard(view));
+    if (ref) {
+      this.intake.trackDelivery(ref, id);
+      p.ref = ref;
     }
     void this.eventLog?.append({
       correlationId: id,
@@ -394,72 +284,16 @@ export class ApprovalGate {
     return this.snapshot(p);
   }
 
-  /** Handle a Slack reaction event against the approval messages this gate
-   *  posted. Correlation: exact message ref first, then the single pending
-   *  approval (ambiguous with several pending → not matched, fail safe). */
-  async handleReaction(event: ReactionEvent): Promise<ReactionResult> {
-    if (event.type === 'reaction_removed') {
-      return { matched: false, reason: 'reaction removals never change approval state' };
-    }
-    let approvalId: string | undefined = event.channel && event.ts ? this.deliveries.get(`${event.channel}:${event.ts}`) : undefined;
-    if (!approvalId) {
-      const pendings = [...this.pending.values()].filter((p) => p.status === 'pending');
-      const only = pendings.length === 1 ? pendings[0] : undefined;
-      if (pendings.length > 1) {
-        return { matched: false, reason: `ambiguous: ${pendings.length} pending approvals and the message ref is unknown` };
-      }
-      if (!only) return { matched: false, reason: 'no pending approval' };
-      approvalId = only.id;
-    }
-    const p = this.require(approvalId);
-    const matched: ReactionResult = { matched: true, approvalId };
-    if (p.status !== 'pending') {
-      return { ...matched, accepted: false, status: p.status, signatures: p.signatures.size, reason: `approval already ${p.status}` };
-    }
-    const mapped = this.reactionRoles[event.reaction];
-    if (!mapped) {
-      return { ...matched, accepted: false, reason: `reaction ${event.reaction} is not an approval signal` };
-    }
-    if (mapped === 'deny') {
-      this.deny(approvalId);
-      return { ...matched, accepted: true, status: 'denied', signatures: p.signatures.size };
-    }
-    // Privilege gate: the reaction claims `mapped`; the reactor must hold it.
-    // userRole comes from the host's server-side resolver, never the client.
-    if (!event.userRole || ROLE_RANK[event.userRole] > ROLE_RANK[mapped]) {
-      return { ...matched, accepted: false, reason: `role ${event.userRole ?? 'unknown'} cannot contribute a ${mapped} signature` };
-    }
-    const snap = this.sign(approvalId, mapped, event.userId);
-    return { ...matched, accepted: true, status: snap.status, signatures: snap.signatures };
+  /** Slack reaction events (emoji sign-off) — correlation, mapping, and
+   *  privilege checks live in the intake; transitions land here. */
+  handleReaction(event: ReactionEvent): Promise<ReactionResult> {
+    return this.intake.handleReaction(event);
   }
 
-  /** Handle a Slack interactive-element click (block_actions). The approval
-   *  id is embedded in the action_id, so clicks correlate unambiguously even
-   *  with several pending approvals. Shares the role gate and dedupe with
-   *  reactions. */
-  async handleAction(event: ActionEvent): Promise<ActionResult> {
-    const m = /^approval:(approve|deny):(.+)$/.exec(event.actionId);
-    const verb = m?.[1];
-    const approvalId = m?.[2];
-    if (!verb || !approvalId) return { matched: false, reason: 'not an approval action' };
-    const p = this.tryGet(approvalId);
-    if (!p) return { matched: false, reason: `unknown approvalId: ${approvalId}` };
-    const base: ActionResult = { matched: true, approvalId };
-    if (p.status !== 'pending') {
-      return { ...base, accepted: false, status: p.status, signatures: p.signatures.size, reason: `approval already ${p.status}` };
-    }
-    if (verb === 'deny') {
-      this.deny(approvalId);
-      return { ...base, accepted: true, status: 'denied', signatures: p.signatures.size };
-    }
-    // Approve: same privilege rule as reactions — a click proves identity,
-    // the server-resolved role decides what it is worth.
-    const mapped = 'admin' as SpeakerRole;
-    if (!event.userRole || ROLE_RANK[event.userRole] > ROLE_RANK[mapped]) {
-      return { ...base, accepted: false, reason: `role ${event.userRole ?? 'unknown'} cannot contribute a ${mapped} signature` };
-    }
-    const snap = this.sign(approvalId, mapped, event.userId);
-    return { ...base, accepted: true, status: snap.status, signatures: snap.signatures };
+  /** Slack interactive-element clicks (Block Kit buttons) — same intake,
+   *  same privilege rule, unambiguous correlation via the action_id. */
+  handleAction(event: ActionEvent): Promise<ReactionResult> {
+    return this.intake.handleAction(event);
   }
 
   /** Boot-time reconciliation: a pending approval lives in this process's
@@ -580,106 +414,30 @@ export class ApprovalGate {
     return p;
   }
 
-  private tryGet(approvalId: string): PendingApproval | undefined {
-    return this.pending.get(approvalId);
-  }
-
-  /** The Block Kit card. Color encodes state: ⚠️ warning pending, 🟢 good
-   *  granted, 🔴 danger denied, 🟠 warning timeout; buttons vanish once the
-   *  approval resolves. `text` mirrors the state for notifications and
-   *  plain-text fallback. */
-  private renderRich(p: PendingApproval): RichMessage {
-    const state =
-      p.status === 'granted'
-        ? { color: 'good', head: '*Approval GRANTED*', sub: `Signatures: ${p.signatures.size}/${this.approverCount}. Executing.` }
-        : p.status === 'executed'
-          ? { color: 'good', head: '*Approval EXECUTED*', sub: `Action \`${p.action.tool}\` has run under governance.` }
-          : p.status === 'denied'
-          ? { color: 'danger', head: '*Approval DENIED*', sub: `Action \`${p.action.tool}\` will not execute.` }
-          : p.status === 'timeout'
-            ? { color: 'warning', head: '*Approval TIMED OUT*', sub: `Action \`${p.action.tool}\` was not approved in time.` }
-            : { color: 'warning', head: '*Approval needed*', sub: `Signatures: ${p.signatures.size}/${this.approverCount}.` };
-    const detail = [
-      `*${state.head}* (${p.policyId}) — ${p.decision.reason}`,
-      `Action: \`${p.action.tool}\`  ·  Args: \`${JSON.stringify(p.action.args)}\`  ·  ${state.sub}`,
-    ].join('\n');
-    const blocks: unknown[] = [
-      { type: 'section', text: { type: 'mrkdwn', text: detail } },
-    ];
-    if (p.status === 'pending') {
-      blocks.push({
-        type: 'actions',
-        elements: [
-          { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Approve', emoji: true }, action_id: `approval:approve:${p.id}` },
-          { type: 'button', style: 'danger', text: { type: 'plain_text', text: 'Deny', emoji: true }, action_id: `approval:deny:${p.id}` },
-        ],
-      });
-    }
-    const messageText = `${state.head} (${p.policyId}) — ${p.action.tool} — ${state.sub}`;
+  /** The card/line data for one approval — exactly what the presentation
+   *  module renders from; no gate bookkeeping leaks outward. */
+  private view(p: PendingApproval): ApprovalCardView {
     return {
-      text: messageText,
-      attachments: [{ color: state.color, blocks }],
+      approvalId: p.id,
+      policyId: p.policyId,
+      reason: p.decision.reason,
+      tool: p.action.tool,
+      args: p.action.args,
+      status: p.status,
+      signatures: p.signatures.size,
+      required: this.approverCount,
     };
   }
 
-  /** Lifecycle re-render on the rich ladder: full card update in place when
-   *  the client can, else the text ladder (announce), else standalone. */
   private rerender(p: PendingApproval): void {
-    const ref = p.ref;
-    const textLine =
-      p.status === 'granted'
-        ? `*Approval GRANTED* (${p.policyId}) — ${p.signatures.size}/${this.approverCount} signatures. Executing.`
-        : p.status === 'executed'
-          ? `*Approval EXECUTED* (${p.policyId}) — action \`${p.action.tool}\` has run under governance.`
-          : p.status === 'denied'
-          ? `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`
-          : p.status === 'timeout'
-            ? `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`
-            : `Signatures: ${p.signatures.size}/${this.approverCount} — pending.`;
-    if (ref && this.slack.updateRichMessage) {
-      void this.slack.updateRichMessage(ref.channel, ref.ts, this.renderRich(p)).catch(() => this.announce(p, textLine));
-      return;
-    }
-    this.announce(p, textLine, p.status === 'granted' || p.status === 'executed' || p.status === 'pending' ? 'threaded' : 'ladder');
-  }
-
-  /** Fire-and-forget follow-up (deny/timeout): sync callers must never block
-   *  on Slack, and a delivery failure must never break the governance path. */
-  private postFollowUp(p: PendingApproval, text: string): void {
-    void this.slack.postMessage(this.channel, text).catch(() => {});
-  }
-
-  /** Announce a lifecycle change on the ORIGINAL message: update in place
-   *  when the client can, reply in-thread otherwise. 'ladder' mode (deny/
-   *  timeout) falls back to a standalone channel post; 'threaded' mode
-   *  (grant/progress) stays silent without a thread — never spams the
-   *  channel. Always fire-and-forget (see postFollowUp). */
-  private announce(p: PendingApproval, line: string, mode: 'ladder' | 'threaded' = 'ladder'): void {
-    const ref = p.ref;
-    const fallback = mode === 'ladder' ? () => this.postFollowUp(p, line) : undefined;
-    if (ref && this.slack.updateMessage) {
-      void this.slack
-        .updateMessage(ref.channel, ref.ts, `${p.originalText ?? ''}\n\n${line}`)
-        .catch(() => fallback?.());
-      return;
-    }
-    if (ref && this.slack.postReply) {
-      void this.slack.postReply(ref.channel, ref.ts, line).catch(() => fallback?.());
-      return;
-    }
-    fallback?.();
+    renderLifecycleUpdate(this.slack, this.view(p), {
+      ...(p.ref ? { ref: p.ref } : {}),
+      ...(p.originalText !== undefined ? { originalText: p.originalText } : {}),
+      securityChannel: this.channel,
+    });
   }
 
   private snapshot(p: PendingApproval): ApprovalSnapshot {
     return { status: p.status, signatures: p.signatures.size, required: this.approverCount };
-  }
-
-  private renderMessage(p: PendingApproval): string {
-    return [
-      `*Approval needed* (${p.policyId}) — ${p.decision.reason}`,
-      `Action: \`${p.action.tool}\``,
-      `Args: \`${JSON.stringify(p.action.args)}\``,
-      `Signatures required: ${this.approverCount} (M-of-N). React ✅ to approve, ❌ to deny.`,
-    ].join('\n');
   }
 }

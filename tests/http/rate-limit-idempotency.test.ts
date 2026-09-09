@@ -175,8 +175,8 @@ describe('approval execute double-click protection', () => {
     handles.push(h);
 
     const staged = await p.pipeline.processUtterance('admin1', 'agent, can you restart the checkout pod?', 500);
-    p.pipeline.signApproval(staged.approvalId!, 'admin', 'h1');
-    p.pipeline.signApproval(staged.approvalId!, 'admin', 'h2');
+    p.pipeline.signApprovalAs(staged.approvalId!, 'admin1');
+    p.pipeline.signApprovalAs(staged.approvalId!, 'approver');
 
     const exec = () =>
       fetch(h.url + '/approvals/' + staged.approvalId + '/execute', {
@@ -208,8 +208,8 @@ describe('approval execute double-click protection', () => {
     handles.push(h);
 
     const staged = await p.pipeline.processUtterance('admin1', 'agent, can you restart the checkout pod?', 500);
-    p.pipeline.signApproval(staged.approvalId!, 'admin', 'h1');
-    p.pipeline.signApproval(staged.approvalId!, 'admin', 'h2');
+    p.pipeline.signApprovalAs(staged.approvalId!, 'admin1');
+    p.pipeline.signApprovalAs(staged.approvalId!, 'approver');
     const exec = () =>
       fetch(h.url + '/approvals/' + staged.approvalId + '/execute', {
         method: 'POST',

@@ -320,12 +320,6 @@ export class OrchestratedPipeline {
   stagedCorrelation(approvalId: string): string | undefined {
     return this.governed.stagedCorrelation(approvalId);
   }
-  /** Record a signature on a pending approval. Legacy trust-the-caller form
-   *  (no identity resolver wired). */
-  signApproval(approvalId: string, signerRole: string, signerId?: string): ApprovalSnapshot {
-    return this.approvals.sign(approvalId, signerRole, signerId);
-  }
-
   /** Record a signature with server-side identity resolution — the gate
    *  resolves the signer's role from the platform registry, rank-checks it,
    *  and throws SignerRoleError on insufficient privilege. */

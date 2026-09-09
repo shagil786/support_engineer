@@ -15,6 +15,15 @@ export {
   type ApprovalSnapshot,
   type SlackLike,
 } from './approval-gate.js';
+export { roleSatisfies, ROLE_RANK, SignerRoleError } from './approval-roles.js';
+export { ApprovalIntake, type IntakeBackend, DEFAULT_REACTION_ROLES } from './approval-intake.js';
+export {
+  renderApprovalCard,
+  renderApprovalText,
+  renderLifecycleLine,
+  deliverRequestCard,
+  type ApprovalCardView,
+} from './approval-slack.js';
 export { SafetyNet, type SafetyNetOptions, type RunAllInput, type RunAllResult } from './safety-net/index.js';
 export { Rbac } from './safety-net/rbac.js';
 export { Injection } from './safety-net/injection.js';

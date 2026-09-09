@@ -343,7 +343,7 @@ describe('createHttpServer: POST /slack/events', () => {
     expect(await reaction.json()).toMatchObject({ ok: true, matched: true, accepted: true, status: 'pending', signatures: 1 });
 
     // Second signature grants; then the staged action executes over HTTP.
-    await p.pipeline.signApproval(staged.approvalId!, 'admin', 'human-2');
+    await p.pipeline.signApprovalAs(staged.approvalId!, 'approver');
     const exec = await post(h.url, '/approvals/' + staged.approvalId + '/execute', {
       method: 'POST',
       headers: authed(),
@@ -383,7 +383,7 @@ describe('createHttpServer: POST /slack/events', () => {
     expect(body.results?.[0]).toMatchObject({ matched: true, accepted: true, status: 'pending', signatures: 1 });
 
     // Second signature (API path) completes M-of-N; then execute over HTTP.
-    await p.pipeline.signApproval(staged.approvalId!, 'admin', 'human-2');
+    await p.pipeline.signApprovalAs(staged.approvalId!, 'approver');
     const exec = await post(h.url, '/approvals/' + staged.approvalId + '/execute', {
       method: 'POST',
       headers: authed(),
