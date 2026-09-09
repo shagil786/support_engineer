@@ -93,6 +93,15 @@ The KB re-embeds on boot under the configured embedding backend, so changing
 ## Surfaces
 
 - **Console** (serve's stdin): utterances, `:learning tick`, `:quit`.
+- **Web console**: `GET /console` — a single static page (no external assets,
+  served without a token since it embeds no data). Paste a bearer token and a
+  speaker id (RBAC is keyed on the speaker id, so use the id your role
+  resolver maps to admin/engineer), then chat with the pipeline: answers show
+  their provenance (knowledge-base citation, Jira lookup, live logs), staged
+  approvals appear in the queue panel, and two admin signatures enable
+  Execute. The queue lists pending AND granted-but-unexecuted approvals, so a
+  granted action is never stranded; the panel refreshes after every action
+  and on a short poll.
 - **HTTP** (starts only when a token exists): `HTTP_TOKENS=tok1,tok2`
   `HTTP_PORT` (default 8787) `HTTP_HOST` (default 127.0.0.1),
   `RATE_LIMIT_PER_MINUTE` (default 120/credential), idempotency keys honored.

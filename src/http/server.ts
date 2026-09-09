@@ -20,6 +20,9 @@
  * see vetoes, denials, staged approvals, and legacy fallbacks honestly.
  */
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Platform } from '../bootstrap.js';
@@ -146,6 +149,15 @@ export async function createHttpServer(
       return reply(res, 200, { ok: true });
     }
 
+    // Operator console: a static single-page shell served WITHOUT the bearer
+    // token (it contains no data); the page's JS then authenticates to the
+    // same JSON surface as any API client and stores its token in
+    // sessionStorage. The token is therefore never sent to a third party and
+    // never rendered anywhere but in the credential input.
+    if (method === 'GET' && path === '/console') {
+      return reply(res, 200, CONSOLE_HTML, 'text/html; charset=utf-8');
+    }
+
     // Readiness: unauthenticated like /healthz, but honest — 503 while boot
     // async work is pending, 200 with platform details once settled. The
     // probe FAILS FAST: awaiting a pending ready() would hang the LB probe,
@@ -186,6 +198,16 @@ export async function createHttpServer(
     // Only VALID tokens consume budget — a 401 flood cannot mint buckets.
     routeContexts.set(res, { credential: token });
     if (limitClient('token:' + token)) return tooMany(res);
+
+    if (method === 'GET' && path === '/approvals') {
+      const approvals = platform.pipeline.listPendingApprovals().map((a) => ({
+        ...a,
+        // The correlation id executeApproved needs, resolved server-side from
+        // the staged map — the client never assembles one.
+        correlationId: platform.pipeline.stagedCorrelation(a.approvalId),
+      }));
+      return reply(res, 200, { approvals });
+    }
 
     if (method === 'GET' && path === '/metrics') {
       const metrics = await renderMetrics(platform.eventLog);
@@ -597,6 +619,11 @@ function sendCached(res: ServerResponse, r: CachedResponse, replay = false): voi
 }
 
 /* ----------------------------- helpers ----------------------------- */
+
+/** The operator console shell (served at GET /console). Loaded once from
+ *  src/http/console.html at module init — the file ships in the repo, and
+ *  containers copy the full tree, so the read cannot fail at runtime. */
+const CONSOLE_HTML = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'console.html'), 'utf8');
 
 function reply(res: ServerResponse, status: number, body: unknown, contentType = 'application/json'): void {
   res.writeHead(status, { 'content-type': contentType });
