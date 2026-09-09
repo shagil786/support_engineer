@@ -64,6 +64,32 @@ describe('LegacyClassifierAdapter parity', () => {
     expect(env.entities.runbookIds).toBeUndefined();
   });
 
+  it('claims the widened operator-verb family as runbook offers (LLM-less availability)', () => {
+    // Each of these verbs appears in real catalogs (the shipped example has
+    // "fail the database over to the standby replica"); a missed claim costs
+    // availability, while a false claim is cheap — the KB resolver refuses
+    // without a confident match and destructive candidates stage anyway.
+    const verbs = [
+      'please restart the pod',
+      'please fail the database over to the standby replica',
+      'can you promote the standby to primary',
+      'could you drain the connection pool',
+      'please rotate the TLS cert',
+      'would you flush the redis cache',
+      'please scale the worker pool up',
+      'can you redeploy the web frontend',
+      'please roll back the last deploy',
+    ];
+    for (const text of verbs) {
+      const env = a.classify({ text, source: 'meeting', ts: 1 });
+      expect(env.intent, text).toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });
+    }
+    // Chatter that merely mentions a verb is NOT an offer: the politeness
+    // prefix guards the claim.
+    const mention = a.classify({ text: 'the failover last night was rough', source: 'meeting', ts: 1 });
+    expect(mention.intent).not.toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });
+  });
+
   it('carries the speakerId into entities when provided', () => {
     const env = a.classify({ text: 'something is broken', source: 'meeting', ts: 1, speakerId: 'alice' });
     expect(env.entities.speakerId).toBe('alice');

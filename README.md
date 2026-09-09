@@ -127,14 +127,17 @@ guessing.
 `db-failover` is destructive: policy requires two admin signatures before it
 runs. One utterance exercises the whole chain:
 
-1. **As `guest`**, send: *please restart the primary database now.* The
-   SafetyNet vetoes it — a guest cannot approve a destructive action.
+1. **As `guest`**, send: *please fail the database over to the standby
+   replica now.* The SafetyNet vetoes it — a guest cannot approve a
+   destructive action.
 2. **As `alice`** (an `APPROVERS` id), send it again. It stages:
    `{"routed":"pipeline","approvalId":"…","approvalStatus":"pending"}`.
-   Note what happened: the catalog has no database-restart action, and the
-   KB resolver still matched the utterance to `db-failover` through the
-   hybrid scorer — destructive, so it goes to humans either way, and
-   resolution provenance lands on the audit spine.
+   Note what happened: the utterance names no action id, and the KB resolver
+   still matched it to `db-failover` through the hybrid scorer —
+   destructive, so it goes to humans either way, and resolution provenance
+   lands on the audit spine. This works with no LLM configured: the
+   deterministic classifier claims the failover verb, then retrieval does
+   the rest.
 3. **Grant.** The approval card sits in the console's queue (with a Slack
    bot token wired it posts there instead; reactions and clicks work as
    signatures). Signatures dedupe by identity and two are required, so cast
@@ -161,11 +164,12 @@ returns the replayed result instead of running it twice.
 
 ### 4. Where to go next
 
-- Wire `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` for full natural
-  language (*fail the database over to the standby*). Everything above works
-  with zero keys: without an LLM the deterministic classifier claims only
-  common action verbs (restart, deploy, clear, rollback, …), and provider
-  saturation degrades to it rather than failing requests (ADR-0004).
+- Wire `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` for free-form
+  classification beyond the deterministic floor's verb family (restart,
+  deploy, rollback, fail over, promote, drain, rotate, flush, scale, …).
+  Everything above works with zero keys — including the destructive
+  click-through — and provider saturation degrades to the floor rather than
+  failing requests (ADR-0004).
 - Replace `examples/` with your team's catalog and corpus — same binary,
   your operational knowledge (ADR-0003).
 - Point Prometheus at `/metrics` and import the Grafana dashboard; load the

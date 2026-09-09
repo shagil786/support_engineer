@@ -28,8 +28,16 @@ export interface ClassifyInput {
   payload?: unknown;
 }
 
+/** Verbs whose polite imperative is plausibly an action request. A false
+ *  claim here is cheap (the KB resolver refuses without a confident match,
+ *  and a destructive candidate always stages for approval), while a missed
+ *  one costs availability — so the list covers the verbs operators actually
+ *  say (fail over, promote, drain, rotate, flush, scale), not just the demo
+ *  catalog's restart/clear/deploy family. Phrasal verbs split in speech
+ *  ("fail the database over"), hence the bounded noun gap in the failover
+ *  alternative. */
 function containsRunbookOffer(text: string): boolean {
-  return /\b(can you|please|could you|would you)\b.*\b(restart|reboot|clear|rerun|deploy|roll\s*back|redeploy)\b/i.test(text);
+  return /\b(can you|please|could you|would you)\b.*\b(restart|reboot|clear|rerun|deploy|roll\s*back|redeploy|fail(?:\s+\w+){0,3}\s+over|promote|drain|rotate|flush|scale)\b/i.test(text);
 }
 
 function pickIntent(text: string): IntentEnvelope['intent'] {

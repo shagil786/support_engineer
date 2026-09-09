@@ -201,10 +201,11 @@ keep working, with reduced classification fidelity, and the emitted
 `understanding` event records the real reason (`contextBundleRef: via:<code>`
 — `http_error`, `circuit_open`, `network`) joined to the request's
 correlation id, so degraded periods are visible on the spine rather than
-silent. Two caveats: the floor's regex claims action requests only for
-common verbs (restart/reboot/clear/rerun/deploy/rollback/redeploy) — an
-imperative naming a runbook id directly needs the LLM, so during saturation
-it routes as a question rather than staging an approval — and
+silent. Two caveats: the floor claims action requests only for a family of common
+operational verbs (restart/reboot/clear/rerun/deploy/rollback/redeploy, plus
+fail over/promote/drain/rotate/flush/scale) — a request built from unusual
+phrasing (or naming a runbook id directly) needs the LLM, so during
+saturation it routes as a question rather than staging an approval — and
 `support_agent_llm_calls_total{ok="false"}` counts these events. `/ask`
 (KB-direct) is unaffected either way. The same ladder covers the execution
 layer: the supervisor's LLM agents (triage/investigator/executor/reviewer)

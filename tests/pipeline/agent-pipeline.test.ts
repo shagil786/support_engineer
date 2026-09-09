@@ -82,6 +82,7 @@ function harness(opts: HarnessOptions = {}) {
   const runbookActions = [
     { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
     { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
+    { id: 'db-failover', name: 'Database failover', description: 'fail the database over to the standby replica', destructive: true },
   ];
   const runbookProvider = new InMemoryRunbookProvider(runbookActions, async (actionId) => {
     runbookRuns.push(actionId);
@@ -237,6 +238,22 @@ describe('OrchestratedPipeline', () => {
       if (e.kind === 'understanding') understanding = e as unknown as { contextBundleRef?: string };
     }
     expect(understanding?.contextBundleRef).toBe('via:http_error');
+  });
+
+  it('stages a failover phrasing through the LLM-less floor (widened verb family)', async () => {
+    // The no-LLM walkthrough path: "fail ... over" is floor-reachable, and
+    // the KB resolver maps it to a destructive action — which must stage
+    // for approval, never execute.
+    const { pipeline, runbookRuns } = harness();
+    const r = await pipeline.processUtterance(
+      'u1',
+      'agent, please fail the primary database over to the standby now',
+      500,
+    );
+    expect(r.routed, JSON.stringify(r)).toBe('pipeline');
+    expect(r.approvalId, JSON.stringify(r)).toBeDefined();
+    expect(r.approvalStatus).toBe('pending');
+    expect(runbookRuns).toEqual([]);
   });
 
   it('still speaks an honest failure when a genuine (non-provider) bug breaks the pipeline', async () => {
