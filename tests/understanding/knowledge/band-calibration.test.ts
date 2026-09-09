@@ -29,14 +29,22 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** Five-action catalog shaped like a real one: sibling pod restarts (the
- *  mix-up family), a destructive drill, a cache flush, a frontend rollout. */
+/** Ten-action catalog shaped like a real one: sibling pod restarts (the
+ *  mix-up family), a destructive drill, a cache flush, a frontend rollout,
+ *  plus one action per verb the deterministic classifier now claims
+ *  (promote/drain/rotate/flush/scale) — the band pin travels with the
+ *  floor's claim surface. */
 const CATALOG: RunbookAction[] = [
   { id: 'restart-checkout-pod', name: 'Checkout pod restart', description: 'restart the checkout pod', destructive: false },
   { id: 'restart-payment-pod', name: 'Payment pod restart', description: 'restart the payment pod', destructive: false },
   { id: 'db-restart-drill', name: 'Database restart drill', description: 'restart the primary database', destructive: true },
   { id: 'clear-api-cache', name: 'API cache flush', description: 'clear the api cache', destructive: false },
   { id: 'redeploy-web-frontend', name: 'Web frontend rollout', description: 'redeploy the web frontend', destructive: false },
+  { id: 'promote-db-replica', name: 'Database replica promotion', description: 'promote the standby replica to primary', destructive: true },
+  { id: 'drain-conn-pool', name: 'Connection pool drain', description: 'drain and restart the connection pool', destructive: true },
+  { id: 'rotate-tls-cert', name: 'TLS cert rotation', description: 'rotate the TLS certificate on the gateway', destructive: false },
+  { id: 'flush-session-cache', name: 'Session cache flush', description: 'flush the user session cache', destructive: false },
+  { id: 'scale-worker-pool', name: 'Worker pool scale-up', description: 'scale the worker pool up to the next tier', destructive: false },
 ];
 
 const whereRunbooks = { source: 'runbooks' } as const;
@@ -54,8 +62,13 @@ const CASES: BandCase[] = [
   // WRONG winners: near-miss phrasings — the top hit must stay below the
   // strong band (fail-safe bands decide, never auto-execution).
   { id: 'wrong-staging-pod', query: 'please restart the staging pod now', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
-  { id: 'wrong-session-cache', query: 'please clear the user session cache now', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
   { id: 'wrong-billing-frontend', query: 'please redeploy the billing frontend now', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  // A synonym-verb match, pinned as TRUE: with flush-session-cache in the
+  // catalog, "clear the user session cache" scores 1.138 against it (clear ≈
+  // flush, same noun phrase) — confident resolution of a non-destructive
+  // action is the designed behavior. Without that action in the catalog the
+  // same query measures 0.82 and refuses; the pin travels with the catalog.
+  { id: 'true-clear-synonym', query: 'please clear the user session cache now', targetDocId: 'runbook:flush-session-cache', min: RUNBOOK_BANDS.strong, where: whereRunbooks },
   // UNRELATED chatter: the top hit must stay below the floor — no least-bad
   // guess.
   { id: 'unrelated-ticket', query: 'what is the status of SUPPORT-7', max: RUNBOOK_BANDS.floor, where: whereRunbooks },
@@ -64,6 +77,21 @@ const CASES: BandCase[] = [
   // Sub-strong destructive: must stay at-or-above the floor so the
   // destructive staging rung still catches it (the gate decides).
   { id: 'substrong-failover', query: 'please failover the database now', targetDocId: 'runbook:db-restart-drill', min: RUNBOOK_BANDS.floor, where: whereRunbooks },
+  // New verb family (floor now claims promote/drain/rotate/flush/scale).
+  // Measured on the live engine: rotate/flush/scale clear the strong band;
+  // drain clears it; promote measures 1.044 — below strong, overlapping the
+  // wrong-winner band — so it is pinned as the destructive staging rung's
+  // living case: sub-strong + destructive top candidate resolves into
+  // approval, never auto-execution.
+  { id: 'true-rotate', query: 'please rotate the TLS cert', targetDocId: 'runbook:rotate-tls-cert', min: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'true-flush', query: 'would you flush the user session cache', targetDocId: 'runbook:flush-session-cache', min: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'true-scale', query: 'please scale the worker pool up', targetDocId: 'runbook:scale-worker-pool', min: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'true-drain', query: 'could you drain the connection pool', targetDocId: 'runbook:drain-conn-pool', min: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'substrong-destructive-promote', query: 'can you promote the standby to primary', targetDocId: 'runbook:promote-db-replica', min: RUNBOOK_BANDS.floor, max: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  // Wrong winners for the new family: near-miss phrasings stay sub-strong.
+  { id: 'wrong-billing-drain', query: 'could you drain the billing pool', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'wrong-app-cert-rotate', query: 'please rotate the app signing cert', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
+  { id: 'wrong-batch-scale', query: 'please scale the batch workers up', max: RUNBOOK_BANDS.strong, where: whereRunbooks },
 ];
 
 describe('runbook band calibration (ADR-0006)', () => {
