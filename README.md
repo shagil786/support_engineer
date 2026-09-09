@@ -74,7 +74,103 @@ Integrations are dependency-free ports you wire in:
 npm install
 npm run typecheck
 npm test
+npm run check:boot
 ```
+
+`check:boot` is the five-minute tour as a script: it boots the real server on
+a temp data dir and verifies fail-closed auth, a cited `/ask` answer, RBAC
+vetoes on a guest's destructive request, approval staging, and metrics. To
+drive the same things by hand — including the full approval click-through in
+the web console — read on.
+
+### 1. Boot with the example corpus (no API keys needed)
+
+```bash
+HTTP_TOKEN=dev-token \
+RUNBOOKS_FILE=examples/runbooks.json \
+KNOWLEDGE_SEED_DIR=examples/knowledge \
+APPROVERS=alice,bob \
+SERVE_KEEP_ALIVE=1 \
+npx tsx scripts/serve.ts
+```
+
+- `HTTP_TOKEN` turns the HTTP surface on. Fail-closed: no token, no server.
+- `RUNBOOKS_FILE` is the action catalog. Every action is ingested into the
+  knowledge base at boot, so `/ask` can cite the executable surface.
+- `KNOWLEDGE_SEED_DIR` ingests every `.md` file as a KB document (four ship
+  in `examples/knowledge`: two runbooks, a postmortem note, an on-call
+  handbook).
+- `APPROVERS` names the admin identities. Everyone else is a guest.
+- `SERVE_KEEP_ALIVE=1` keeps the server alive when started from a script;
+  in an interactive terminal Ctrl-C stops it either way.
+
+The web console is at **http://127.0.0.1:8787/console**. Paste `dev-token`
+as the token and set the speaker field — start with `guest`.
+
+### 2. Ask something (KB-first, cited)
+
+In the console, ask: **how do I fail the database over?** Or via curl:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer dev-token" -H 'content-type: application/json' \
+  -d '{"question":"how do I fail the database over?"}' \
+  http://127.0.0.1:8787/ask
+```
+
+The answer is extracted from the knowledge base with a citation to
+`runbook:db-failover`. No LLM is configured, so this is the deterministic
+extractive path. A question the corpus cannot ground refuses instead of
+guessing.
+
+### 3. Drive one governed destructive action, end to end
+
+`db-failover` is destructive: policy requires two admin signatures before it
+runs. One utterance exercises the whole chain:
+
+1. **As `guest`**, send: *please restart the primary database now.* The
+   SafetyNet vetoes it — a guest cannot approve a destructive action.
+2. **As `alice`** (an `APPROVERS` id), send it again. It stages:
+   `{"routed":"pipeline","approvalId":"…","approvalStatus":"pending"}`.
+   Note what happened: the catalog has no database-restart action, and the
+   KB resolver still matched the utterance to `db-failover` through the
+   hybrid scorer — destructive, so it goes to humans either way, and
+   resolution provenance lands on the audit spine.
+3. **Grant.** The approval card sits in the console's queue (with a Slack
+   bot token wired it posts there instead; reactions and clicks work as
+   signatures). Signatures dedupe by identity and two are required, so cast
+   the second as `bob` — switch the speaker field, or use the REST API:
+
+   ```bash
+curl -s -X POST -H "Authorization: Bearer dev-token" -H 'content-type: application/json' \
+  -d '{"signerId":"bob"}' \
+  http://127.0.0.1:8787/approvals/$APPROVAL_ID/sign
+   ```
+
+4. **Execute** — the console's Execute button (live over SSE) or:
+
+   ```bash
+curl -s -X POST -H "Authorization: Bearer dev-token" -H 'content-type: application/json' \
+  -d "{\"correlationId\":\"$CORRELATION_ID\"}" \
+  http://127.0.0.1:8787/approvals/$APPROVAL_ID/execute
+   ```
+
+`{"routed":"pipeline","ok":true}` — the runbook ran only after the full
+human chain, and staging, both signatures with signer ids, and execution are
+all on the event spine. Sign out of band on a stale approval and execute
+returns the replayed result instead of running it twice.
+
+### 4. Where to go next
+
+- Wire `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` for full natural
+  language (*fail the database over to the standby*). Everything above works
+  with zero keys: without an LLM the deterministic classifier claims only
+  common action verbs (restart, deploy, clear, rollback, …), and provider
+  saturation degrades to it rather than failing requests (ADR-0004).
+- Replace `examples/` with your team's catalog and corpus — same binary,
+  your operational knowledge (ADR-0003).
+- Point Prometheus at `/metrics` and import the Grafana dashboard; load the
+  alert rules. The go-live checklist in `docs/OPERATIONS.md` walks the rest,
+  including the scheduled chaos probe.
 
 ## Environment variables
 
