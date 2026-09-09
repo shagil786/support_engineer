@@ -59,11 +59,22 @@ npx tsx scripts/knowledge-cli.ts runbooks /path/to/runbooks.json
 ```
 
 Telemetry requests ("check the error logs", "any fresh errors?") always go to
-live log data, never to the static KB — including without an LLM. The
+live log data, never to the static KB — including without an LLM. Ticket-status
+questions ("what's the status of SUPPORT-7?") go to the read-only
+`jira_get_issue` tool when Jira is wired (policy treats it as read-only; the
+lookup is audited on the event spine like every governed action). The
 KB-first-before-governance ordering and its gates are specified in
 [ADR-0001](../docs/adr/0001-kb-first-before-governance.md); the retrieval
 stack in [ADR-0002](../docs/adr/0002-hybrid-retrieval.md); the catalog sync
 semantics in [ADR-0003](../docs/adr/0003-runbook-catalog-ingest-on-boot.md).
+
+**First-run seed** — `KNOWLEDGE_SEED_DIR=/path/to/markdown/` ingests every
+`*.md` file into the KB during ready() (ids are filename stems, ingested docs
+mirror the directory: remove a file and its doc is evicted on the next boot).
+A fresh deployment with no corpus and no seed answers everything with an
+honest refusal — that is correct behavior, but nobody wants it on day one;
+the container image presets the seed to the shipped `examples/` corpus
+(see `examples/README.md`).
 
 The KB re-embeds on boot under the configured embedding backend, so changing
 `EMBEDDINGS_*` only requires a restart (and, if the model identity changed, a
@@ -166,15 +177,48 @@ docker build -t support-agent .
 docker run --rm -p 8787:8787 --env-file .env -v agent-data:/data support-agent
 ```
 
-The image (node:22-slim, non-root) carries sources, `policies/`, and the
-probed native `better-sqlite3` binary; a prebuild/ABI failure fails the
-*build*, not a runtime request — the same contract CI enforces on the runner.
-All state lives under the `/data` volume (`DATA_DIR`); HTTP binds
-`0.0.0.0:8787`; the container runs with `SERVE_KEEP_ALIVE=1` because a
-detached container has no stdin (without it the console loop would exit and
-take the server down). `npm run smoke:container` builds, boots, and probes
-health/readiness/fail-closed auth/cited answering; it skips cleanly when no
-Docker daemon is present.
+The image (node:22-slim, non-root) carries sources, `policies/`, the example
+corpus (`examples/`, preset as the first-run knowledge seed and runbook
+catalog), and the probed native `better-sqlite3` binary; a prebuild/ABI
+failure fails the *build*, not a runtime request — the same contract CI
+enforces on the runner. All state lives under the `/data` volume (`DATA_DIR`);
+HTTP binds `0.0.0.0:8787`; the container runs with `SERVE_KEEP_ALIVE=1`
+because a detached container has no stdin (without it the console loop would
+exit and take the server down). `npm run smoke:container` builds, boots, and
+probes health/readiness/fail-closed auth/cited answering from the seeded
+corpus; it skips cleanly when no Docker daemon is present.
+
+## Go-live checklist
+
+Run each step against the real deployment (not a fake) before routing humans
+to the agent. Every step below maps to a probe the suite exercises against
+fakes — this is the pass that proves the real surfaces agree.
+
+1. **Knowledge answers.** `GET /readyz` shows `kb.docs` > 0. `POST /ask` with
+   a corpus question returns a cited answer; a nonsense question returns
+   `refused: true` — the refusal is the product, verify it on purpose.
+2. **Runbook catalog.** With `RUNBOOKS_FILE` set, asking "how do I restart X?"
+   cites the catalog (auto-ingested), and `/readyz` procedures reflect it.
+3. **Governance dry run.** From a non-admin identity, request a destructive
+   action → expect a SafetyNet veto. From an admin → expect a staged approval,
+   a Slack card in `APPROVAL_CHANNEL`, and execution only after the human
+   grant (emoji sign-off or card button). Check the audit trail on the event
+   spine for every step.
+4. **Real Slack card click-through.** The card flow is contract-tested against
+   a local fake; do one pass against a real workspace: wire `SLACK_BOT_TOKEN`
+   + `SLACK_SIGNING_SECRET`, stage a destructive action, click Approve in the
+   real client, and confirm the in-place status update and thread reply.
+5. **Live LLM smoke.** The retry ladder and saturation breaker are pinned by
+   unit tests, not by live providers. Before real traffic: wire
+   `LLM_BASE_URL/KEY/MODEL`, ask a live-data question through `/utterance`,
+   confirm `llm_call` events appear and `/metrics` reports calls and latency,
+   and confirm a nonsense question refuses instead of hallucinating.
+6. **Observability live.** Point Prometheus at `/metrics` (same bearer auth),
+   import the dashboard, load the alert rules, and trigger one approval so the
+   approval metrics visibly move.
+7. **Auth posture.** No token → 401 everywhere; wrong token → 401; hammering
+   a route → 429 with `Retry-After`. Rotate `HTTP_TOKENS` once before go-live
+   so the launch tokens were never in a chat message.
 
 ## Minimal production example
 

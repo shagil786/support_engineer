@@ -22,14 +22,15 @@ import type { IngestDoc } from '../src/understanding/knowledge/chunker';
 
 /* --------------------------- knowledge corpus --------------------------- */
 
-/** Seed the demo knowledge corpus (demo/knowledge/*.md) into the platform's
+/** Seed the demo knowledge corpus (examples/knowledge/*.md — the canonical
+ *  first-run set, shared with container deployments) into the platform's
  *  durable hybrid knowledge base — BM25 + vector hybrid retrieval, markdown-
  *  section chunking, provenance metadata. Ingest is replace-by-doc-id, so a
  *  doc removed from the corpus is evicted explicitly — the KB never answers
  *  from a stale demo file. The snapshot persists under demo/.demo-kb/
  *  (gitignored), so a second boot reloads instead of re-chunking. */
 const DEMO_ROOT = dirname(fileURLToPath(import.meta.url));
-const KNOWLEDGE_DIR = join(DEMO_ROOT, 'knowledge');
+const KNOWLEDGE_DIR = join(DEMO_ROOT, '..', 'examples', 'knowledge');
 const DEMO_KB_PATH = join(DEMO_ROOT, '.demo-kb', 'kb.json');
 const DEMO_DATA_DIR = join(DEMO_ROOT, '.demo-data');
 
@@ -38,7 +39,7 @@ async function seedKnowledge(kb: FileBackedKnowledgeBase): Promise<number> {
   try {
     files = readdirSync(KNOWLEDGE_DIR).filter((f) => f.endsWith('.md')).sort();
   } catch {
-    console.log('📚 knowledge: demo/knowledge/ not found — running without notes');
+    console.log('📚 knowledge: examples/knowledge/ not found — running without notes');
   }
   // The KB mirrors the corpus: docs that left it (or all of them, when the
   // corpus directory is gone) are evicted — the durable snapshot must never
@@ -52,7 +53,7 @@ async function seedKnowledge(kb: FileBackedKnowledgeBase): Promise<number> {
     const doc: IngestDoc = {
       id: f.replace(/\.md$/, ''),
       text: readFileSync(join(KNOWLEDGE_DIR, f), 'utf8'),
-      metadata: { source: 'demo-knowledge' },
+      metadata: { source: 'examples-knowledge' },
     };
     await kb.ingest(doc);
   }
@@ -118,6 +119,7 @@ async function scriptedScene(): Promise<void> {
   await say('U1', 'Users hate the new onboarding flow, it takes forever');
   await say('U2', 'yeah make it a high priority bug');
   await say('U1', 'hey agent, what did the cache incident postmortem conclude?');
+  await say('U2', 'hey agent, what is the status of SUPPORT-7?');
   await say('U2', 'hey agent, can you restart the checkout pod?');
   console.log('\n🚨 [monitor] CloudWatch P1: payment-api returning 500s');
   platform.urgency.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
@@ -134,7 +136,7 @@ async function scriptedScene(): Promise<void> {
 
 async function main(): Promise<void> {
   const chunks = await seedKnowledge(platform.knowledge);
-  console.log(`📚 knowledge: ${chunks} chunks seeded from demo/knowledge/*.md`);
+  console.log(`📚 knowledge: ${chunks} chunks seeded from examples/knowledge/*.md`);
   await platform.ready();
   console.log('=== Support Voice Agent — offline demo (one pipeline brain, fake Jira/Slack, no network) ===');
   console.log('Type lines as  speaker: text   — or: /script /summary /quit\n');

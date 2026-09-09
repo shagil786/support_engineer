@@ -52,6 +52,33 @@ describe('createPlatform', () => {
     expect(p.knowledge).toBeDefined();
   });
 
+  it('seedDocs: first-run corpus is ingested during ready(); leaving the seed evicts; runbook: namespace survives', async () => {
+    const p = createPlatform({
+      dataDir: dir,
+      seedDocs: [
+        { id: 'seed-handbook', text: '# On-call handbook\nRotate logs weekly.' },
+        { id: 'seed-postmortem', text: '# Postmortem\nRoot cause was pool exhaustion.' },
+      ],
+    });
+    expect(p.knowledge.docIds()).toEqual([]); // seeding happens in ready(), not the constructor
+    await p.ready();
+    expect(p.knowledge.docIds().sort()).toEqual(['seed-handbook', 'seed-postmortem']);
+    const hits = await p.knowledge.search('pool exhaustion root cause');
+    expect(hits[0]?.docId).toBe('seed-postmortem');
+
+    // Second boot with a shrunken seed AND a catalog: the removed seed doc is
+    // evicted (mirror), while the catalog-owned runbook: doc survives — the
+    // seed never evicts that namespace (the catalog sync owns it; without the
+    // exemption the two mirrors would fight over runbook docs each boot).
+    const p2 = createPlatform({
+      dataDir: dir,
+      seedDocs: [{ id: 'seed-handbook', text: '# On-call handbook\nRotate logs weekly.' }],
+      runbooks: [{ id: 'restart-x', name: 'Restart x', description: 'restart x', destructive: false }],
+    });
+    await p2.ready();
+    expect(p2.knowledge.docIds().sort()).toEqual(['runbook:restart-x', 'seed-handbook']);
+  });
+
   it('knowledge base: ingest → provenance-tagged retrieval through the pipeline assembler', async () => {
     const p = createPlatform({ dataDir: dir, runbooks });
     await p.knowledge.ingest({

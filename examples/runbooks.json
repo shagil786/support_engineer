@@ -1,0 +1,7 @@
+[
+  { "id": "restart-checkout-pod", "name": "Restart checkout pod", "description": "restart the checkout pod", "destructive": false },
+  { "id": "restart-payment-pod", "name": "Restart payment pod", "description": "restart the payment pod", "destructive": false },
+  { "id": "restart-cache-pod", "name": "Restart cache pod", "description": "restart the cache pod", "destructive": false },
+  { "id": "clear-cache", "name": "Clear Redis cache", "description": "clear Redis cache", "destructive": false },
+  { "id": "db-failover", "name": "Database failover", "description": "fail the database over to the standby replica", "destructive": true }
+]

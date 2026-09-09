@@ -47,10 +47,11 @@ probe "healthz"        "true" "$(curl -sf "$BASE/healthz" | node -pe 'JSON.parse
 probe "readyz"         "true" "$(curl -sf "$BASE/readyz" | node -pe 'JSON.parse(require("fs").readFileSync(0)).ready')"
 probe "auth is closed" "401"  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ask" -H 'content-type: application/json' -d '{"question":"x"}')"
 probe "bad token 401"  "401"  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ask" -H 'authorization: Bearer wrong' -H 'content-type: application/json' -d '{"question":"x"}')"
-probe "cited ask"      "false" "$(curl -sf -X POST "$BASE/ask" -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
+probe "cited ask (seeded corpus)" "false" "$(curl -sf -X POST "$BASE/ask" -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
   -d '{"question":"how do I restart the checkout pod"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).refused')"
 probe "KB-first utterance" "knowledge" "$(curl -sf -X POST "$BASE/utterance" -H "authorization: Bearer ${TOKEN}" -H 'content-type: application/json' \
   -d '{"speakerId":"u1","text":"hey agent, how do I restart the checkout pod?"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).answerSource')"
+probe "seeded KB in readyz" "false" "$(curl -sf "$BASE/readyz" | node -pe 'JSON.parse(require("fs").readFileSync(0)).kb.docs < 4')"
 
 echo "== data dir is on the volume"
 docker exec "$NAME" ls /data/events >/dev/null || { echo "FAIL: no events dir under /data"; exit 1; }

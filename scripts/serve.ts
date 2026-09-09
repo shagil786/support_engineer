@@ -32,7 +32,9 @@
  */
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import type { IngestDoc } from '../src/understanding/knowledge/chunker.js';
 import { createPlatform, type Platform, type PlatformOptions } from '../src/bootstrap.js';
 import { createHttpServer, type HttpServerHandle } from '../src/http/server.js';
 import { configFromEnv, runbooksFromFile } from '../src/config.js';
@@ -78,6 +80,28 @@ async function main(): Promise<void> {
   const runbooksFile = wired.runbooksFile;
   const runbooks = runbooksFile ? runbooksFromFile(runbooksFile) : [];
 
+  // First-run knowledge seed (KNOWLEDGE_SEED_DIR): every *.md file becomes a
+  // KB doc (id = filename stem). Ingested during ready(), so readiness gates
+  // on it. Missing dir = silent no-seed (an operator may manage the KB via
+  // knowledge-cli instead); unreadable files are loud.
+  const seedDir = env['KNOWLEDGE_SEED_DIR'];
+  let seedDocs: IngestDoc[] | undefined;
+  if (seedDir) {
+    try {
+      seedDocs = readdirSync(seedDir)
+        .filter((f) => f.endsWith('.md'))
+        .sort()
+        .map((f) => ({
+          id: f.replace(/\.md$/, ''),
+          text: readFileSync(join(seedDir, f), 'utf8'),
+          metadata: { source: 'seed' },
+        }));
+      console.log(`knowledge seed: ${seedDocs.length} doc(s) from ${seedDir}`);
+    } catch (e) {
+      throw new Error(`KNOWLEDGE_SEED_DIR ${seedDir} is unreadable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   const rt = createServeRuntime({
     dataDir: resolve(wired.dataDir ?? 'var'),
     ...(wired.jira ? { jira: wired.jira } : {}),
@@ -85,6 +109,7 @@ async function main(): Promise<void> {
     ...(wired.slack ? { slack: wired.slack } : {}),
     ...(wired.llm ? { llm: wired.llm } : {}),
     ...(runbooks.length > 0 ? { runbooks } : {}),
+    ...(seedDocs && seedDocs.length > 0 ? { seedDocs } : {}),
     ...(wired.approvalChannel ? { approvalChannel: wired.approvalChannel } : {}),
     // Bot token upgrades the approval channel: messages become reaction-
     // correlated, enabling M-of-N sign-off by emoji on the security channel.

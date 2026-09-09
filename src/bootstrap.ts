@@ -25,6 +25,7 @@ import { IntentClassifier } from './understanding/intent-classifier.js';
 import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
 import { FileBackedKnowledgeBase } from './understanding/knowledge/knowledge-base.js';
+import type { IngestDoc } from './understanding/knowledge/chunker.js';
 import { syncRunbooksToKnowledge } from './bootstrap/runbooks-kb.js';
 import { embedderFromConfig, type EmbeddingsConfig } from './understanding/memory/embedders/factory.js';
 import { GroundedAnswerer } from './understanding/grounded-answerer.js';
@@ -77,6 +78,13 @@ export interface PlatformOptions {
    *  (re-synced on every boot) so KB-first answers cover the executable
    *  catalog. */
   runbooks?: RunbookAction[];
+  /** First-run knowledge seed (KNOWLEDGE_SEED_DIR in env-wired hosts): each
+   *  doc is ingested into the durable KB during ready(), so a fresh
+   *  deployment answers from real corpus instead of refusing everything.
+   *  Seeding mirrors the corpus — docs that left the seed are evicted on the
+   *  next ready(); the reserved `runbook:` namespace is exempt (the catalog
+   *  sync owns it). */
+  seedDocs?: IngestDoc[];
   llm?: LlmConfig;
   /** Policy bundle path; defaults to ./policies/default.yaml. */
   policyPath?: string;
@@ -368,6 +376,17 @@ export function createPlatform(opts: PlatformOptions): Platform {
       // closes out requests from dead processes (no terminal event) so the
       // durable backlog metric doesn't count a queue that can never grant.
       const swept = await approvals.sweepOrphans();
+      // First-run seed: mirror the host-provided corpus into the durable KB
+      // (inside ready() so a readiness surface never reports an unseeded
+      // agent). The runbook: namespace is exempt — the catalog sync owns it.
+      if (opts.seedDocs) {
+        const wanted = new Set(opts.seedDocs.map((d) => d.id));
+        for (const docId of knowledge.docIds()) {
+          if (docId.startsWith('runbook:')) continue;
+          if (!wanted.has(docId)) await knowledge.deleteDoc(docId);
+        }
+        for (const doc of opts.seedDocs) await knowledge.ingest(doc);
+      }
       await Promise.all([...catalogSync.ops, knowledge.whenIndexed(), episodic.whenBootChecked()]);
       return {
         learning: learningLoop ? ('on' as const) : ('off' as const),

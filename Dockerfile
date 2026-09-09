@@ -34,15 +34,21 @@ COPY --chown=app:app package.json ./
 COPY --chown=app:app src ./src
 COPY --chown=app:app scripts ./scripts
 COPY --chown=app:app policies ./policies
+COPY --chown=app:app examples ./examples
 
-# Container defaults: state under the volume, HTTP on all interfaces, and the
+# Container defaults: state under the volume, HTTP on all interfaces, the
 # detached-mode keep-alive (stdin is closed in a container; without this the
-# REPL would exit and kill the server immediately).
+# REPL would exit and kill the server immediately), and the first-run
+# knowledge seed so a fresh deployment answers from the example corpus
+# instead of refusing everything (see examples/README.md; replace the corpus
+# for production by pointing KNOWLEDGE_SEED_DIR/RUNBOOKS_FILE elsewhere).
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     HTTP_HOST=0.0.0.0 \
     HTTP_PORT=8787 \
-    SERVE_KEEP_ALIVE=1
+    SERVE_KEEP_ALIVE=1 \
+    KNOWLEDGE_SEED_DIR=/app/examples/knowledge \
+    RUNBOOKS_FILE=/app/examples/runbooks.json
 VOLUME /data
 
 # tsx from node_modules (devDependency — it is the runtime runner); tsconfig
