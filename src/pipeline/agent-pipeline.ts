@@ -22,6 +22,9 @@
  *  - `GovernedDispatch` — the single policy → safety → approval → supervisor
  *    path shared by questions, runbook offers, envelopes, and approved
  *    re-dispatches
+ *  - `DispatchCore` — the post-ingress dispatch core: assembly, KB-first
+ *    offering, runbook resolution, and governed execution
+ *  - `FeedbackFilingFlow` — confirmed verbal feedback → governed Jira filing
  *
  * Surface envelopes (Jira/Slack/cron webhooks, proactive anomalies) enter
  * through processEnvelope() with the same governance guarantees.
@@ -42,15 +45,16 @@ import { ApprovalGate, type ApprovalSnapshot } from '../governance/approval-gate
 import type { SupervisorAgent } from '../execution/supervisor.js';
 import type { ToolRunner } from '../execution/tool-runner.js';
 import type { OutcomeRecorder } from '../learning/outcome-recorder.js';
-import { GovernedDispatch, recentEvents } from './governed-dispatch.js';
+import { GovernedDispatch } from './governed-dispatch.js';
 import { GroundedQuestionStage } from './grounded-question.js';
 import { RunbookResolver } from './runbook-resolver.js';
 import { routeIntent } from './route.js';
 import { EtiquetteGate } from './etiquette-gate.js';
-import { ActionEtiquetteStage, type PendingFiling } from './action-etiquette.js';
+import { ActionEtiquetteStage } from './action-etiquette.js';
 import { UrgencyStage } from './urgency-stage.js';
+import { DispatchCore } from './dispatch-core.js';
+import { FeedbackFilingFlow } from './feedback-filing.js';
 import type { MeetingNotes } from '../meeting/notes.js';
-import { runbookProposal, shapeProposal } from './proposal.js';
 import type { DispatchContext, PipelineRouting } from './types.js';
 
 export type { ApprovedAction, PipelineRouting } from './types.js';
@@ -103,6 +107,8 @@ export class OrchestratedPipeline {
   private readonly runbooks: RunbookResolver;
   private readonly etiquette: EtiquetteGate;
   private readonly actionEtiquette: ActionEtiquetteStage;
+  private readonly core: DispatchCore;
+  private readonly filings: FeedbackFilingFlow;
 
   constructor(opts: OrchestratedPipelineOptions) {
     this.notes = opts.notes;
@@ -148,85 +154,24 @@ export class OrchestratedPipeline {
       },
       deliverSpeech: (text) => this.deliverSpeech(text),
     });
-  }
-
-  /** A confirmed verbal-feedback filing, dispatched under governance: the
-   *  same bug the legacy cascade filed directly (no policy, no audit), now
-   *  policy-evaluated, SafetyNet-checked, and audited. Extracts the issue
-   *  key from the tool_call audit event (deterministic), not from the
-   *  supervisor's free-text summary. */
-  private async dispatchFeedbackFiling(
-    cid: string,
-    filing: PendingFiling,
-    speakerId: string,
-    meetingChannel?: string,
-    threadTs?: string,
-  ): Promise<PipelineRouting> {
-    const action = ActionEtiquetteStage.filingAction(filing);
-    const envelope: IntentEnvelope = {
-      intent: { kind: 'meeting_response', subKind: 'feedback' },
-      confidence: 1,
-      entities: { speakerId },
-      rawContext: { source: 'internal', ts: this.now(), payload: { synthetic: 'feedback_filing' } },
-    };
-    const meetingId = meetingChannel ? `channel:${meetingChannel}` : `meeting:${speakerId}`;
-    void meetingId;
-    const bundle = await this.assembler.assemble({ envelope, recent: await recentEvents(this.eventLog, this.now) });
-    const outcome = await this.governed.run({
-      cid,
-      speakerId,
-      envelope,
-      action,
-      bundle,
-      ...(meetingChannel ? { thread: { channel: meetingChannel, ts: threadTs ?? String(this.now()) } } : {}),
+    this.core = new DispatchCore({
+      governed: this.governed,
+      questions: this.questions,
+      runbooks: this.runbooks,
+      assembler: this.assembler,
+      eventLog: this.eventLog,
+      deliverSpeech: (text, target) => this.deliverSpeech(text, target),
+      now: this.now,
     });
-
-    // Terminal note for the summary sink. On execution, the key comes from
-    // the tool_call event's data payload (deterministic extraction).
-    let jiraKey: string | undefined;
-    let ok = false;
-    let reason: string | undefined;
-    if (outcome.kind === 'executed') {
-      ok = outcome.routing.ok === true;
-      reason = outcome.routing.reason;
-      if (ok) {
-        for await (const e of this.eventLog.query({ correlationId: cid })) {
-          if (e.kind === 'tool_call' && e.tool === 'jira_create_issue' && e.result.ok) {
-            const data = e.result.data as { ticket_id?: string } | undefined;
-            jiraKey = data?.ticket_id;
-          }
-        }
-      }
-    } else if (outcome.kind === 'staged') {
-      ok = true;
-      reason = `approval staged: ${outcome.routing.approvalId ?? ''}`;
-    } else {
-      ok = false;
-      reason = outcome.routing.reason;
-    }
-
-    // Record in the sink at the terminal point (cascade parity), speak the
-    // outcome, and return the routing (approvalId included when staged).
-    this.actionEtiquette.completeFiling(filing, { jiraKey });
-    if (jiraKey !== undefined) {
-      // The summary's Jira-change record: the audit spine stays the source of
-      // truth, this is the meeting-facing view.
-      this.notes.recordJiraChange('created', jiraKey, `Bug filed from verbal feedback (${filing.severity})`);
-      this.deliverSpeech?.(`Filed ${jiraKey} (${filing.severity}).`);
-    } else if (ok) {
-      this.deliverSpeech?.(`Feedback noted for filing (${filing.severity}) — approval staged.`);
-    } else {
-      this.deliverSpeech?.("I couldn't file that just now.");
-    }
-    return {
-      routed: 'pipeline',
-      correlationId: cid,
-      ok,
-      ...(reason ? { reason } : {}),
-      ...(outcome.kind === 'staged' && outcome.routing.approvalId
-        ? { approvalId: outcome.routing.approvalId, approvalStatus: 'pending' as const }
-        : {}),
-    };
+    this.filings = new FeedbackFilingFlow({
+      governed: this.governed,
+      assembler: this.assembler,
+      eventLog: this.eventLog,
+      actionEtiquette: this.actionEtiquette,
+      notes: this.notes,
+      deliverSpeech: (text) => this.deliverSpeech(text),
+      now: this.now,
+    });
   }
 
   /** Entry point for live meeting utterances. */
@@ -269,7 +214,7 @@ export class OrchestratedPipeline {
       const confirm = this.actionEtiquette.offerConfirmation(speakerId, text, ts);
       if (confirm.handled) {
         if (confirm.filing) {
-          return await this.dispatchFeedbackFiling(cid, confirm.filing, speakerId, meetingChannel, threadTs);
+          return await this.filings.file(cid, confirm.filing, speakerId, meetingChannel, threadTs);
         }
         return { routed: 'etiquette', correlationId: cid, ...(confirm.ok !== undefined ? { ok: confirm.ok } : {}), ...(confirm.reason ? { reason: confirm.reason } : {}) };
       }
@@ -307,7 +252,7 @@ export class OrchestratedPipeline {
       } catch {
         // Memory failure must not fail the request.
       }
-      return await this.dispatch(cid, envelope, {
+      return await this.core.dispatch(cid, envelope, {
         correlationId: cid,
         speakerId,
         text,
@@ -342,7 +287,7 @@ export class OrchestratedPipeline {
         typeof (envelope.rawContext.payload as { text?: unknown }).text === 'string'
           ? (envelope.rawContext.payload as { text: string }).text
           : '';
-      return await this.dispatch(cid, envelope, { correlationId: cid, speakerId: envelope.entities.speakerId ?? 'surface', text: payloadText });
+      return await this.core.dispatch(cid, envelope, { correlationId: cid, speakerId: envelope.entities.speakerId ?? 'surface', text: payloadText });
     } catch (e) {
       return {
         routed: 'legacy',
@@ -375,7 +320,6 @@ export class OrchestratedPipeline {
   stagedCorrelation(approvalId: string): string | undefined {
     return this.governed.stagedCorrelation(approvalId);
   }
-
   /** Record a signature on a pending approval. Legacy trust-the-caller form
    *  (no identity resolver wired). */
   signApproval(approvalId: string, signerRole: string, signerId?: string): ApprovalSnapshot {
@@ -394,99 +338,4 @@ export class OrchestratedPipeline {
     return this.governed.executeApproved(approvalId, correlationId);
   }
 
-  /* ------------------------- internals ------------------------- */
-
-  private async dispatch(
-    cid: string,
-    envelope: IntentEnvelope,
-    ctx: DispatchContext,
-  ): Promise<PipelineRouting> {
-    // Meeting utterances assemble with the per-meeting scope: the dance sees
-    // what was said earlier in THIS conversation (spec §4.1 episodic recall),
-    // while cross-scope procedures still short-circuit via the library.
-    const bundle = await this.assembler.assemble({
-      envelope,
-      recent: await recentEvents(this.eventLog, this.now),
-      text: ctx.text,
-      ...(ctx.meetingScope ? { scope: 'perMeeting' as const } : {}),
-      ...(ctx.meetingId ? { meetingId: ctx.meetingId } : {}),
-    });
-
-    const subKind = envelope.intent.kind === 'meeting_response' ? envelope.intent.subKind : undefined;
-
-    // Runbook offers resolve to a concrete provider action; the provider's
-    // destructive flag (not the text) drives policy.
-    if (subKind === 'runbook_offer') {
-      return this.handleRunbookOffer(cid, envelope, ctx);
-    }
-
-    // KB-first for questions: when the knowledge base can ground an answer
-    // (stricter 0.4 floor — spoken answers must be genuinely about the
-    // corpus, not trigram-adjacent), speak it with citations — no tool call,
-    // no LLM dance. Refusals (and live-data questions, which never touch the
-    // static KB) fall through to the governed log-query path below, so
-    // live-data questions still work exactly as before.
-    const question = await this.questions.offer(cid, envelope, ctx.text, ctx.thread);
-    if (question.answered) return question.answered;
-
-    // Questions propose a read-only log query; anything else routed here
-    // proposes speaking an interrupt — the shaper owns both shapes.
-    const proposal = shapeProposal(envelope, question.isQuestion);
-
-    const outcome = await this.governed.run({
-      cid,
-      speakerId: ctx.speakerId,
-      envelope,
-      action: proposal,
-      bundle,
-      ...(ctx.thread ? { thread: ctx.thread } : {}),
-    });
-    if (outcome.kind === 'executed' && proposal.tool === 'jira_get_issue') {
-      // Deterministic surface: the ticket status is read from the tool_call
-      // audit event's payload (the audit spine is the single source of
-      // truth), then spoken — same pattern as feedback filings.
-      for await (const e of this.eventLog.query({ correlationId: cid })) {
-        if (e.kind === 'tool_call' && e.tool === 'jira_get_issue' && e.result.ok) {
-          const d = e.result.data as { key?: string; summary?: string; status?: string } | undefined;
-          if (d?.key) {
-            const line = `${d.key} ('${d.summary ?? ''}') is ${d.status ?? 'unknown'}.`;
-            this.deliverSpeech(line, ctx.thread ? { channel: ctx.thread.channel, threadTs: ctx.thread.ts } : undefined);
-            return { ...outcome.routing, answer: line, answerSource: 'jira' as const };
-          }
-        }
-      }
-    }
-    // KB refusal → the governed log query IS the answer source ('logs').
-    if (outcome.kind === 'executed' && question.kbRefused && proposal.tool === 'query_logs') {
-      return { ...outcome.routing, answerSource: 'logs' };
-    }
-    return outcome.routing;
-  }
-
-  private async handleRunbookOffer(
-    cid: string,
-    envelope: IntentEnvelope,
-    ctx: DispatchContext,
-  ): Promise<PipelineRouting> {
-    const wanted = envelope.entities.runbookIds?.[0];
-    const resolved = await this.runbooks.resolve(wanted, ctx.text);
-    if (!resolved) {
-      return { routed: 'pipeline', correlationId: cid, ok: false, reason: 'no matching runbook action' };
-    }
-
-    const proposal = runbookProposal(resolved);
-    const enriched: IntentEnvelope = {
-      ...envelope,
-      entities: { ...envelope.entities, runbookIds: [resolved.id], runbookDestructive: resolved.destructive },
-    };
-
-    const outcome = await this.governed.run({
-      cid,
-      speakerId: ctx.speakerId,
-      envelope: enriched,
-      action: proposal,
-      ...(ctx.thread ? { thread: ctx.thread } : {}),
-    });
-    return outcome.routing;
-  }
 }
