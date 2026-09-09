@@ -152,9 +152,15 @@ pluggable to Postgres/Kafka later.
 **`IntentClassifier`** (`understanding/intent-classifier.ts`) — LLM-backed,
 Zod-validated `IntentEnvelope` (union as drafted, plus the additive
 `entities.runbookDestructive?: boolean` flag — see §5.1). Degradation is honest:
-unwired LLM / unparseable output / schema-invalid output → deterministic
-fallback (each fallback reason recorded in the emitted event's
-`contextBundleRef: via:<reason>`); transport failures **propagate**.
+EVERY provider-side condition → deterministic fallback with the real reason
+recorded in the emitted event's `contextBundleRef: via:<reason>` — unwired
+LLM / unparseable / schema-invalid output, and equally provider unavailability
+(429-saturated ladder exhaustion → `via:http_error`, open breaker →
+`via:circuit_open`, network faults → `via:network`). The floor's claims are
+governance-safe by construction (its runbook intents still traverse the policy
+engine and SafetyNet), so a saturated provider downgrades classification
+instead of taking utterances down. Non-LlmError throwables (wiring/interface
+bugs) propagate.
 `classify(input, { correlationId })` lets a caller stamp the emitted
 `understanding` event with the request's correlation id so the trail joins.
 
@@ -417,7 +423,10 @@ retry-with-feedback is not in v1; a `fail` verdict ends the request.*
 
 **Sub-agents** — `LlmAgent` base: focused system prompt, Zod-validated JSON
 output, `source: 'llm' | 'fallback'` on every result; unwired/invalid →
-deterministic fallback; transport errors propagate. Tool constraints live in
+deterministic fallback, and provider-side LlmErrors (saturated ladder, open
+breaker, network) degrade to the fallback too with `degradedReason: <code>`
+on the result — same ladder as the classifier (§4); non-LlmError bugs
+propagate. Tool constraints live in
 each schema (Triage suggests from the real `ToolName` enum; Investigator plans
 only `query_logs`/`invoke_human_on_slack`; Executor plans only mutating tools;
 Reviewer has none).
@@ -581,8 +590,9 @@ Not built from the drafted layout: `src/llm/`, top-level `src/integrations/`,
 As drafted, plus: Zod at every boundary (envelope, tool args, policy rules,
 scenarios, suggestions, promotion inputs); honest-degradation doctrine
 everywhere (unwired = configured condition; invalid output = fallback;
-transport failure = propagate, except at pipeline edges where legacy takes
-over — §15). Not built: CI eval wiring; the hardcoded-value grep test.
+provider failure = deterministic floor with the recorded reason — §4's
+classifier is the pipeline edge where legacy takes over; interface bugs =
+propagate). Not built: CI eval wiring; the hardcoded-value grep test.
 
 ## 11. Phasing (completed)
 
@@ -633,8 +643,11 @@ The draft said `processUtterance` would be **deleted**. Built instead:
   provider catalog; the provider's `destructive` flag (additively carried as
   `entities.runbookDestructive`) — not text guessing — drives the approval
   policy. Granted approvals execute via `executeApproved` after M-of-N.
-- **Any pipeline failure** (LLM transport, store, gate) → the utterance is
-  re-dispatched into the legacy cascade. The meeting never hangs on the platform.
+- **Any genuine pipeline failure** (store, gate, non-LlmError bug) → the
+  utterance is re-dispatched into the legacy cascade. The meeting never hangs
+  on the platform. LLM provider failures no longer reach this boundary: the
+  classifier degrades to the deterministic floor at the understanding edge
+  (via:<code> provenance), so saturation costs fidelity, not availability.
 - **Webhook/proactive envelopes** enter via `processEnvelope` with the same
   governance; P0/P1 anomalies speak through the agent's urgent barge-in.
 

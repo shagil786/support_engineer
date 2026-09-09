@@ -75,6 +75,34 @@ describe('TriageAgent', () => {
     expect(r.decision.suggestedTools).toEqual(['query_logs']);
   });
 
+  it('degrades to the fallback when the provider is 429-saturated, with the reason surfaced', async () => {
+    const saturated: typeof fetch = () =>
+      Promise.resolve(new Response('rate limited', { status: 429, headers: { 'content-type': 'text/plain' } }));
+    const llm = new OpenAiCompatibleClient({
+      baseUrl: 'https://api.test/v1',
+      apiKey: 'k',
+      model: 'm',
+      request: saturated,
+      maxRetries: 0,
+      retryBackoffMs: 1,
+    });
+    const agent = new TriageAgent({ llm });
+    const r = await agent.run(bundle());
+    expect(r.source).toBe('fallback');
+    // The deterministic triage is safe (no tool escalation beyond the floor),
+    // so saturation costs fidelity, not availability. degradedReason carries
+    // the real failure mode; unwired fallbacks leave it unset.
+    expect(r.degradedReason).toBe('http_error');
+  });
+
+  it('leaves degradedReason unset for unwired fallbacks', async () => {
+    const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    const agent = new TriageAgent({ llm });
+    const r = await agent.run(bundle());
+    expect(r.source).toBe('fallback');
+    expect(r.degradedReason).toBeUndefined();
+  });
+
   it('proposes a meeting interrupt for proactive alerts', async () => {
     const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
     const agent = new TriageAgent({ llm });

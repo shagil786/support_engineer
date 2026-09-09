@@ -2,12 +2,21 @@
  * LLM-backed intent classifier (Understanding layer, spec §4).
  *
  * Two-path by design: the LLM is the ceiling, the deterministic
- * LegacyClassifierAdapter is the floor. Degradation is honest:
- *  - unwired LLM, unparseable output, or schema-invalid output → fallback
- *  - transport/network failures → propagate (never silently degrade)
- *
- * Every classification (LLM or fallback) emits an `understanding`
- * DecisionEvent when an EventLog is wired.
+ * LegacyClassifierAdapter is the floor. The floor is the degradation rung
+ * for EVERY provider-side condition, and the emitted `understanding` event
+ * records the real reason (contextBundleRef `via:<reason>`):
+ *  - unwired LLM → via:unwired
+ *  - unparseable / empty / schema-invalid output → via:no_content,
+ *    via:parse_error, via:schema_invalid
+ *  - provider unavailable: 429 saturation that exhausted the retry ladder,
+ *    an open circuit breaker, network faults → via:http_error,
+ *    via:circuit_open, via:network. The floor's claims are safe by
+ *    construction (its runbook intents still traverse governance and the
+ *    SafetyNet), so a saturated provider downgrades classification instead
+ *    of taking utterances down — and the reason travels on the spine, so
+ *    nothing degrades silently.
+ * Non-LlmError throwables are caller bugs (wiring, interface misuse) and
+ * still propagate.
  */
 import { z } from 'zod';
 import { LlmError, OpenAiCompatibleClient } from '../support-voice-agent/tools/llm.js';
@@ -106,14 +115,18 @@ export class IntentClassifier {
       const resp = await this.llm.complete({ messages, tools: [], tool_choice: 'none', temperature: 0, max_tokens: 4000 });
       const content = resp.choices[0]?.message?.content;
       if (typeof content !== 'string') {
-        return this.useFallback(input, 'no_content');
+        return this.useFallback(input, 'no_content', join?.correlationId);
       }
       raw = content;
     } catch (e) {
-      if (e instanceof LlmError && e.code === 'unwired') {
-        return this.useFallback(input, 'unwired');
+      if (e instanceof LlmError) {
+        // Every provider-side failure — 429-saturated ladder exhaustion, an
+        // open breaker, a network fault, even a config race surfacing
+        // 'unwired' — downgrades to the deterministic floor. Honest
+        // degradation: the reason lands on the spine via useFallback, never
+        // silently. Non-LlmError bugs still propagate.
+        return this.useFallback(input, e.code, join?.correlationId);
       }
-      // Transport/HTTP/malformed failures propagate — honest degradation.
       throw e;
     }
 
@@ -121,7 +134,7 @@ export class IntentClassifier {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return this.useFallback(input, 'parse_error');
+      return this.useFallback(input, 'parse_error', join?.correlationId);
     }
 
     const result = IntentSchema.safeParse(parsed);

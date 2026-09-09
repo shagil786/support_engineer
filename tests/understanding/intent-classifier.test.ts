@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { IntentClassifier } from '../../src/understanding/intent-classifier';
 import { LegacyClassifierAdapter } from '../../src/understanding/legacy/classifier-adapter';
-import { LlmError, OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
+import { OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
+import type { LlmClient } from '../../src/support-voice-agent/tools/llm';
 import type { EventLog, EventFilter } from '../../src/event-log/log';
 import type { DecisionEvent } from '../../src/event-log/types';
 
@@ -114,11 +115,73 @@ describe('IntentClassifier', () => {
     expect(env.confidence).toBe(1); // legacy confidence, not the LLM's
   });
 
-  it('propagates transport failures as LlmError instead of silently degrading', async () => {
-    const failFetch: typeof fetch = () => Promise.reject(new Error('boom'));
-    const llm = new OpenAiCompatibleClient({ baseUrl: 'https://api.test/v1', apiKey: 'k', model: 'm', request: failFetch });
+  it('degrades to the floor when the provider 429s through the entire retry ladder', async () => {
+    const saturated: typeof fetch = () =>
+      Promise.resolve(new Response('rate limited', { status: 429, headers: { 'content-type': 'text/plain' } }));
+    // One ladder attempt, no backoff sleep: this test pins the classifier's
+    // degradation decision, not the client's ladder arithmetic (pinned in
+    // llm.test.ts). The LlmError('http_error') from ladder exhaustion is the
+    // exact signal a real saturation window produces.
+    const llm = new OpenAiCompatibleClient({
+      baseUrl: 'https://api.test/v1',
+      apiKey: 'k',
+      model: 'm',
+      request: saturated,
+      maxRetries: 0,
+      retryBackoffMs: 1,
+    });
     const c = new IntentClassifier({ llm, fallback: new LegacyClassifierAdapter() });
-    await expect(c.classify({ text: 'hello', source: 'meeting', ts: 1 })).rejects.toBeInstanceOf(LlmError);
+    const env = await c.classify({ text: 'agent, can you restart the checkout pod?', source: 'meeting', ts: 1 });
+    // The floor claims the imperative (runbook regex) instead of failing.
+    expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });
+    expect(env.confidence).toBe(1);
+  });
+
+  it('degrades to the floor while the saturation circuit breaker is open', async () => {
+    const saturated: typeof fetch = () =>
+      Promise.resolve(new Response('rate limited', { status: 429, headers: { 'content-type': 'text/plain' } }));
+    const c = new IntentClassifier({
+      llm: new OpenAiCompatibleClient({
+        baseUrl: 'https://api.test/v1',
+        apiKey: 'k',
+        model: 'm',
+        request: saturated,
+        maxRetries: 0,
+        retryBackoffMs: 1,
+        breakerThreshold: 2,
+        breakerBaseCooldownMs: 60_000,
+      }),
+      fallback: new LegacyClassifierAdapter(),
+    });
+    // Two saturated completions trip the breaker (threshold 2).
+    for (let i = 0; i < 2; i++) {
+      await c.classify({ text: 'hello', source: 'meeting', ts: i + 1 });
+    }
+    const env = await c.classify({ text: 'agent, can you restart the checkout pod?', source: 'meeting', ts: 3 });
+    expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });
+  });
+
+  it('degrades to the floor on network faults and stamps the real code as provenance', async () => {
+    const log = new MemEventLog();
+    const failFetch: typeof fetch = () => Promise.reject(new Error('ECONNRESET'));
+    const llm = new OpenAiCompatibleClient({ baseUrl: 'https://api.test/v1', apiKey: 'k', model: 'm', request: failFetch });
+    const c = new IntentClassifier({ llm, fallback: new LegacyClassifierAdapter(), eventLog: log });
+    const env = await c.classify({ text: 'agent, can you restart the checkout pod?', source: 'meeting', ts: 1 }, { correlationId: 'corr-42' });
+    expect(env.intent).toEqual({ kind: 'meeting_response', subKind: 'runbook_offer' });
+    // Honest provenance: the real failure mode travels on the spine, joined
+    // to the request's correlation id — degradation is visible, not silent.
+    expect(log.events).toHaveLength(1);
+    const understanding = log.events.filter(
+      (e): e is Extract<DecisionEvent, { kind: 'understanding' }> => e.kind === 'understanding',
+    );
+    expect(understanding[0]?.contextBundleRef).toBe('via:network');
+    expect(understanding[0]?.correlationId).toBe('corr-42');
+  });
+
+  it('still propagates non-LlmError bugs instead of masking them as fallback', async () => {
+    const bug: LlmClient['complete'] = () => Promise.reject(new Error('TypeError: wiring bug'));
+    const c = new IntentClassifier({ llm: { isWired: () => true, complete: bug }, fallback: new LegacyClassifierAdapter() });
+    await expect(c.classify({ text: 'hello', source: 'meeting', ts: 1 })).rejects.toThrow('TypeError: wiring bug');
   });
 
   it('emits an understanding DecisionEvent for both LLM and fallback paths', async () => {

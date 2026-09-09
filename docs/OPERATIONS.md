@@ -187,6 +187,25 @@ The tripping rule (completions, not attempts), the adaptive cooldown, and
 the half-open probe are specified in
 [ADR-0004](../docs/adr/0004-llm-saturation-circuit-breaker.md).
 
+**What saturation costs the product: classification fidelity, not
+availability.** When a call does fail at the LLM (ladder exhausted on 429s,
+breaker open, network down), the intent classifier degrades to the
+deterministic classifier floor instead of failing the utterance: utterances
+keep working, with reduced classification fidelity, and the emitted
+`understanding` event records the real reason (`contextBundleRef: via:<code>`
+— `http_error`, `circuit_open`, `network`) joined to the request's
+correlation id, so degraded periods are visible on the spine rather than
+silent. Two caveats: the floor's regex claims action requests only for
+common verbs (restart/reboot/clear/rerun/deploy/rollback/redeploy) — an
+imperative naming a runbook id directly needs the LLM, so during saturation
+it routes as a question rather than staging an approval — and
+`support_agent_llm_calls_total{ok="false"}` counts these events. `/ask`
+(KB-direct) is unaffected either way. The same ladder covers the execution
+layer: the supervisor's LLM agents (triage/investigator/executor/reviewer)
+fell back deterministically on provider failure (`degradedReason` on the
+result, visible in the agent_outcome summary), so a saturated provider
+degraded a governed run's plan quality without failing it.
+
 ## Approval timing — `APPROVAL_TIMEOUT_MS`
 
 How long a staged approval stays pending (default 5 minutes; >= 1000).
