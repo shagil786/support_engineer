@@ -1,8 +1,5 @@
-export { SupportVoiceAgent } from './support-voice-agent/agent';
-export type { SupportVoiceAgentConfig } from './support-voice-agent/agent';
 export {
   DEFAULT_SETTINGS,
-  createAgent,
   configFromEnv,
   jiraConfigFromEnv,
   requireJira,
@@ -52,17 +49,6 @@ export type {
 } from './support-voice-agent/integrations/logs';
 export { renderMeetingSummary } from './support-voice-agent/summary';
 export { Guardrails } from './support-voice-agent/guardrails';
-export { createVoiceSession } from './support-voice-agent/bridge/session';
-export type { VoiceSession, VoiceSessionOptions } from './support-voice-agent/bridge/session';
-export { ScriptedBridge } from './support-voice-agent/bridge/fakes';
-export type {
-  MeetingBridge,
-  MeetingTarget,
-  SpeechRequest,
-  SpeechToText,
-  TextToSpeech,
-  TranscriptLine,
-} from './support-voice-agent/bridge/ports';
 export { InMemoryKeyValueStore } from './support-voice-agent/memory/store';
 export type { KeyValueStore } from './support-voice-agent/memory/store';
 export { InMemoryVectorMemory, hashEmbedder, cosine } from './understanding/memory/vector';

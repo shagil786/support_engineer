@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { InMemoryKeyValueStore } from '../src/support-voice-agent/memory/store.ts';
 import { InMemoryVectorMemory, hashEmbedder, cosine } from '../src/understanding/memory/vector.ts';
-import { SupportVoiceAgent } from '../src/index';
-import type { SpeechEvent } from '../src/index';
+import { MeetingNotes } from '../src/meeting/notes';
+import type { MeetingSummaryData } from '../src/index';
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -54,61 +54,33 @@ describe('InMemoryVectorMemory (RAG)', () => {
   });
 });
 
-describe('agent memory integration', () => {
-  function makeMemoryAgent() {
+describe('MeetingNotes (summary state owner)', () => {
+  function makeNotes() {
     const kv = new InMemoryKeyValueStore();
-    const vectors = new InMemoryVectorMemory();
-    const agent = new SupportVoiceAgent({
-      mode: 'response',
-      wakeWord: 'hey agent',
-      minPauseMs: 1500,
-      memory: { kv, vectors },
-      now: () => 1_000_000,
-    });
-    return { agent, kv, vectors };
+    const notes = new MeetingNotes({ kv, now: () => 1_000_000 });
+    return { notes, kv };
   }
 
-  it('indexes verbal feedback into vector memory', async () => {
-    const { agent, vectors } = makeMemoryAgent();
-    agent.processUtterance('U1', 'Users hate the new onboarding flow');
-    await flush();
-    expect(vectors.size()).toBe(1);
-    const hits = await vectors.search('onboarding flow complaints');
-    expect(hits[0]?.text).toContain('onboarding');
-  });
-
-  it('answers a question from indexed notes via RAG', async () => {
-    const { agent, vectors } = makeMemoryAgent();
-    await vectors.add({ id: 'rb', text: '[runbook] checkout pod restart fixes post-deploy payment timeouts' });
-    const speech: SpeechEvent[] = [];
-    agent.on('speech', (e) => speech.push(e));
-    agent.processUtterance('U1', 'what should we do when payments time out after a deploy?');
-    await flush();
-    agent.onPause(2000);
-    await flush();
-    expect(speech.some((e) => e.text.includes('From my notes') && e.text.includes('checkout pod restart'))).toBe(true);
-  });
-
-  it('falls back to the honest no-data line when nothing matches', async () => {
-    const { agent, vectors } = makeMemoryAgent();
-    await vectors.add({ id: 'r', text: '[feedback] someone mentioned the coffee machine' });
-    const speech: SpeechEvent[] = [];
-    agent.on('speech', (e) => speech.push(e));
-    agent.processUtterance('U1', 'what is the status of the kubernetes migration?');
-    await flush();
-    agent.onPause(2000);
-    await flush();
-    expect(speech.some((e) => e.text.includes('pull it from Jira'))).toBe(true);
+  it('collects feedback, participants, and jira changes from any stage', () => {
+    const { notes } = makeNotes();
+    notes.recordUtterance('U1', 'Users hate the new onboarding flow');
+    notes.recordUtterance('U2', 'yeah, agreed');
+    notes.addFeedback({ at: 1_000_000, speakerId: 'U1', original: 'Users hate the new onboarding flow', paraphrase: 'The users hate the new onboarding flow.', jiraKey: 'SUP-7' });
+    notes.recordJiraChange('created', 'SUP-7', 'Bug filed from verbal feedback');
+    const s = notes.finishMeeting({ title: 'Test war room' });
+    expect(s.participants).toEqual(['U1', 'U2']);
+    expect(s.feedback).toHaveLength(1);
+    expect(s.jiraChanges).toHaveLength(1);
+    expect(s.feedback[0]?.jiraKey).toBe('SUP-7');
   });
 
   it('persists the meeting summary to the KV store', async () => {
-    const { agent, kv } = makeMemoryAgent();
-    agent.processUtterance('U1', 'Users hate the new onboarding flow');
-    await flush();
-    agent.finishMeeting();
-    await flush();
+    const { notes, kv } = makeNotes();
+    notes.recordUtterance('U1', 'Users hate the new onboarding flow');
+    notes.finishMeeting();
+    await new Promise((r) => setTimeout(r, 0));
     const stored = await kv.get('summary:1000000');
     expect(stored).toBeTruthy();
-    expect(JSON.parse(stored as string)).toHaveProperty('feedback');
+    expect(JSON.parse(stored as string) as MeetingSummaryData).toHaveProperty('feedback');
   });
 });

@@ -1,7 +1,7 @@
 /**
  * createPlatform — the production composition root (spec §3).
  *
- * Wires all five layers plus the legacy agent into one running platform:
+ * Wires all five layers into one running platform — one brain:
  * Understanding → Governance → Execution over the shared DecisionEvent log,
  * with the Learning layer optionally scheduled and its durable
  * ProcedureLibrary handed to the Supervisor. Everything degrades honestly:
@@ -18,6 +18,9 @@ import { join, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { JsonlFileEventLog } from './event-log/log.js';
 import { LegacyClassifierAdapter } from './understanding/legacy/classifier-adapter.js';
+import { Guardrails } from './support-voice-agent/guardrails.js';
+import { MeetingNotes } from './meeting/notes.js';
+import type { UrgencyStage } from './pipeline/urgency-stage.js';
 import { IntentClassifier } from './understanding/intent-classifier.js';
 import { EpisodicMemory } from './understanding/memory/episodic.js';
 import { ContextAssembler } from './understanding/context-assembler.js';
@@ -40,7 +43,6 @@ import { OutcomeRecorder } from './learning/outcome-recorder.js';
 import { LearningLoop } from './learning/learning-loop.js';
 import { ProcedureLibrary } from './execution/procedure-library.js';
 import { OrchestratedPipeline } from './pipeline/agent-pipeline.js';
-import { SupportVoiceAgent } from './support-voice-agent/agent.js';
 import { SlackBotClient } from './support-voice-agent/integrations/slack-bot.js';
 import { InMemoryRunbookProvider } from './support-voice-agent/integrations/runbook.js';
 import { JiraClient } from './support-voice-agent/integrations/jira.js';
@@ -116,7 +118,10 @@ export interface PlatformOptions {
 }
 
 export interface Platform {
-  legacy: SupportVoiceAgent;
+  /** Meeting-summary state: the single record every stage feeds. */
+  notes: MeetingNotes;
+  /** Urgent-signal surface: feed P0/P1 alerts here (severe ones barge in). */
+  urgency: UrgencyStage;
   pipeline: OrchestratedPipeline;
   eventLog: JsonlFileEventLog;
   /** Present only when learning is enabled. */
@@ -301,13 +306,10 @@ export function createPlatform(opts: PlatformOptions): Platform {
     ...(now ? { now } : {}),
   });
 
-  const legacy = new SupportVoiceAgent({
-    mode: 'interrupt',
-    runbooks: runbookProvider,
-    ...(opts.logProvider ? { logs: opts.logProvider } : {}),
-    ...(opts.jira ? { jira: opts.jira } : {}),
-    ...(opts.slack ? { slack: opts.slack } : {}),
-  });
+  const notes = new MeetingNotes({ ...(now ? { now } : {}) });
+  // Layer 4 escalation: injection attempts page security through the same
+  // Slack notifier the rest of the platform uses (absent = console pages).
+  const guardrails = new Guardrails({ ...(opts.slack ? { notifier: opts.slack } : {}) });
 
   // The claim-verification guard rides along whenever the LLM is wired: any
   // unsupported claim in an LLM answer drops it to the extractive floor, so
@@ -318,7 +320,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
     ...(llm.isWired() ? { claimJudge: new LlmClaimJudge(llm) } : {}),
   });
   const pipeline = new OrchestratedPipeline({
-    legacy,
+    notes,
+    guardrails,
     classifier,
     assembler,
     policyEngine,
@@ -343,7 +346,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
   });
 
   return {
-    legacy,
+    notes,
+    urgency: pipeline.urgency,
     pipeline,
     eventLog,
     learningLoop,

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync, mkdirSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
-import { SupportVoiceAgent } from '../../src/support-voice-agent/agent';
+import { MeetingNotes } from '../../src/meeting/notes';
 import { IntentClassifier } from '../../src/understanding/intent-classifier';
 import { LegacyClassifierAdapter } from '../../src/understanding/legacy/classifier-adapter';
 import { ContextAssembler } from '../../src/understanding/context-assembler';
@@ -86,7 +86,7 @@ async function harness(opts: Opts = {}) {
     toolRunner,
     eventLog,
   });
-  const legacy = new SupportVoiceAgent({ mode: 'interrupt', runbooks: runbookProvider, logs: logProvider as never });
+  const notes = new MeetingNotes({ now: () => 1_000_000 });
   mkdirSync(outcomesDir, { recursive: true });
 
   const knowledge = new FileBackedKnowledgeBase({ path: join(dir, 'kb.json') });
@@ -105,7 +105,7 @@ async function harness(opts: Opts = {}) {
   const answerer = new GroundedAnswerer({ knowledge, llm });
 
   const pipeline = new OrchestratedPipeline({
-    legacy,
+    notes,
     classifier,
     assembler,
     policyEngine,
@@ -227,7 +227,7 @@ describe('grounded question path', () => {
     const approvals = new ApprovalGate({ slack: { async postMessage(): Promise<void> {} }, securityChannel: '#sec', approverCount: 2, eventLog });
     mkdirSync(outcomesDir, { recursive: true });
     const pipeline = new OrchestratedPipeline({
-      legacy: new SupportVoiceAgent({ mode: 'interrupt', logs: logProvider as never }),
+      notes: new MeetingNotes({ now: () => 1_000_000 }),
       classifier: new IntentClassifier({ llm, fallback: new LegacyClassifierAdapter(), eventLog }),
       assembler: new ContextAssembler({ episodic: new EpisodicMemory({}) }),
       policyEngine,

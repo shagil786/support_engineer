@@ -93,10 +93,6 @@ const platform = createPlatform({
   deliverSpeech: (text) => console.log(`\n🗣  AGENT: ${text}`),
 });
 
-// The cascade (critical declarations, chatter) still speaks through its own
-// event port — print it so the scene shows both brains' outputs.
-platform.legacy.on('speech', (e) => console.log(`\n🗣  AGENT${e.urgent ? ' [URGENT BARGE-IN]' : ''}: ${e.text}`));
-platform.legacy.on('log', (e) => { if (e.level !== 'info') console.log(`   · [${e.level}] ${e.message}`); });
 
 /* ------------------------------- drive ------------------------------- */
 
@@ -124,7 +120,7 @@ async function scriptedScene(): Promise<void> {
   await say('U1', 'hey agent, what did the cache incident postmortem conclude?');
   await say('U2', 'hey agent, can you restart the checkout pod?');
   console.log('\n🚨 [monitor] CloudWatch P1: payment-api returning 500s');
-  platform.legacy.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
+  platform.urgency.ingestAlert({ severity: 'P1', source: 'CloudWatch', summary: 'payment-api returning 500s', ts: clock.now });
   await new Promise((r) => setTimeout(r, 30));
   await say('U2', 'this is a P1');
   await say('U1', 'hey agent, what do we do when the database is unreachable?');
@@ -132,8 +128,8 @@ async function scriptedScene(): Promise<void> {
   await say('U1', 'hey agent, shut up');
   await say('U2', 'what about the database?');
   await say('U1', 'hey agent');
-  const summary = platform.legacy.finishMeeting({ title: 'Demo war room' });
-  console.log(`\n📝 meeting summary captured: ${summary.feedback.length} feedback, ${summary.jiraChanges.length} Jira changes, ${summary.alerts.length} alerts (persisted to KV, never read aloud)`);
+  const summary = platform.notes.finishMeeting({ title: 'Demo war room' });
+  console.log(`\n📝 meeting summary captured: ${summary.feedback.length} feedback, ${summary.jiraChanges.length} Jira changes, ${summary.alerts.length} alerts (never read aloud)`);
 }
 
 async function main(): Promise<void> {
@@ -156,7 +152,7 @@ async function main(): Promise<void> {
     if (line === '/quit') { rl.close(); return; }
     if (line === '/script') { await scriptedScene(); rl.prompt(); return; }
     if (line === '/summary') {
-      const s = platform.legacy.finishMeeting({ title: 'Interactive demo' });
+      const s = platform.notes.finishMeeting({ title: 'Interactive demo' });
       console.log(`📝 feedback=${s.feedback.length} jira=${s.jiraChanges.length} alerts=${s.alerts.length}`);
       rl.prompt(); return;
     }

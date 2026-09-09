@@ -3,11 +3,15 @@
  * five-layer pipeline, kept deliberately thin.
  *
  * It owns only what an entry point must own:
- *  - classify → route (etiquette intents and unknown chatter go straight to
- *    the legacy cascade — the pipeline does not intercept what works);
+ *  - guard → classify → route (etiquette, urgency, governed work; unknown
+ *    chatter is recorded for the meeting summary and acknowledged);
  *  - per-meeting episodic recording of every routed utterance;
  *  - honest degradation: ANY pipeline failure (LLM transport, store, gate)
- *    falls back to the legacy cascade — the meeting never hangs.
+ *    answers with a spoken failure notice — the meeting never hangs.
+ *
+ * One brain: the legacy cascade is gone. Urgent signals (critical
+ * declarations, the alert feed, the injection guard) are UrgencyStage; the
+ * meeting summary is MeetingNotes.
  *
  * The change-axes live in focused collaborators:
  *  - `route.ts` — legacy-vs-pipeline routing policy
@@ -26,8 +30,8 @@ import { correlationId } from '../event-log/correlation.js';
 import type { IntentEnvelope } from '../event-log/types.js';
 import type { EventLog } from '../event-log/log.js';
 import type { ToolName } from '../support-voice-agent/tools/types.js';
-import type { SupportVoiceAgent } from '../support-voice-agent/agent.js';
 import type { RunbookProvider } from '../support-voice-agent/integrations/runbook.js';
+import type { Guardrails } from '../support-voice-agent/guardrails.js';
 import type { GroundedAnswerer } from '../understanding/grounded-answerer.js';
 import type { IntentClassifier } from '../understanding/intent-classifier.js';
 import type { ContextAssembler } from '../understanding/context-assembler.js';
@@ -44,13 +48,18 @@ import { RunbookResolver } from './runbook-resolver.js';
 import { routeIntent } from './route.js';
 import { EtiquetteGate } from './etiquette-gate.js';
 import { ActionEtiquetteStage, type PendingFiling } from './action-etiquette.js';
+import { UrgencyStage } from './urgency-stage.js';
+import type { MeetingNotes } from '../meeting/notes.js';
 import { runbookProposal, shapeProposal } from './proposal.js';
 import type { DispatchContext, PipelineRouting } from './types.js';
 
 export type { ApprovedAction, PipelineRouting } from './types.js';
 
 export interface OrchestratedPipelineOptions {
-  legacy: SupportVoiceAgent;
+  /** Meeting-summary state: the single record every stage feeds. */
+  notes: MeetingNotes;
+  /** Layer 4 escalation ports (injection attempts page security). */
+  guardrails?: Guardrails;
   classifier: IntentClassifier;
   assembler: ContextAssembler;
   policyEngine: PolicyEngine;
@@ -79,7 +88,9 @@ export interface OrchestratedPipelineOptions {
 }
 
 export class OrchestratedPipeline {
-  private readonly legacy: SupportVoiceAgent;
+  private readonly notes: MeetingNotes;
+  /** Urgent-signal surface: hosts feed P0/P1 alerts here. */
+  readonly urgency: UrgencyStage;
   private readonly classifier: IntentClassifier;
   private readonly assembler: ContextAssembler;
   private readonly approvals: ApprovalGate;
@@ -94,8 +105,14 @@ export class OrchestratedPipeline {
   private readonly actionEtiquette: ActionEtiquetteStage;
 
   constructor(opts: OrchestratedPipelineOptions) {
-    this.legacy = opts.legacy;
+    this.notes = opts.notes;
     this.classifier = opts.classifier;
+    this.urgency = new UrgencyStage({
+      notes: opts.notes,
+      ...(opts.guardrails ? { guardrails: opts.guardrails } : {}),
+      deliverSpeech: (text) => this.deliverSpeech(text),
+      ...(opts.now ? { now: opts.now } : {}),
+    });
     this.assembler = opts.assembler;
     this.approvals = opts.approvals;
     this.eventLog = opts.eventLog;
@@ -123,12 +140,11 @@ export class OrchestratedPipeline {
       deliverSpeech: (text) => this.deliverSpeech(text),
       ...(opts.muteDurationMs !== undefined ? { muteDurationMs: opts.muteDurationMs } : {}),
     });
-    // The legacy agent stays the meeting-summary data owner; the pipeline
-    // feeds it through the sink port (two-brain consolidation, pass two).
+    // MeetingNotes is the single summary record; every stage feeds it.
     this.actionEtiquette = new ActionEtiquetteStage({
       sink: {
-        addFeedback: (item) => this.legacy.addPipelineFeedback(item),
-        addConcern: (item) => this.legacy.addPipelineConcern(item),
+        addFeedback: (item) => this.notes.addFeedback(item),
+        addConcern: (item) => this.notes.addConcern(item),
       },
       deliverSpeech: (text) => this.deliverSpeech(text),
     });
@@ -193,6 +209,9 @@ export class OrchestratedPipeline {
     // outcome, and return the routing (approvalId included when staged).
     this.actionEtiquette.completeFiling(filing, { jiraKey });
     if (jiraKey !== undefined) {
+      // The summary's Jira-change record: the audit spine stays the source of
+      // truth, this is the meeting-facing view.
+      this.notes.recordJiraChange('created', jiraKey, `Bug filed from verbal feedback (${filing.severity})`);
       this.deliverSpeech?.(`Filed ${jiraKey} (${filing.severity}).`);
     } else if (ok) {
       this.deliverSpeech?.(`Feedback noted for filing (${filing.severity}) — approval staged.`);
@@ -220,6 +239,13 @@ export class OrchestratedPipeline {
   ): Promise<PipelineRouting> {
     const cid = correlationId(ts);
     try {
+      // Layer 4 before routing: the injection guard sees EVERY input — in
+      // the two-brain era pipeline-routed text never met it.
+      const injection = this.urgency.guard(speakerId, text);
+      if (injection.handled) {
+        return { routed: 'etiquette', correlationId: cid, ok: injection.ok, ...(injection.reason ? { reason: injection.reason } : {}) };
+      }
+
       const envelope = await this.classifier.classify(
         { text, source: 'meeting', ts, speakerId },
         { correlationId: cid },
@@ -233,6 +259,9 @@ export class OrchestratedPipeline {
       if (etiquette.handled) {
         return { routed: 'etiquette', correlationId: cid, ...(etiquette.ok !== undefined ? { ok: etiquette.ok } : {}), ...(etiquette.reason ? { reason: etiquette.reason } : {}) };
       }
+
+      // The summary records every post-gate utterance (participants + text).
+      this.notes.recordUtterance(speakerId, text, ts);
 
       // Confirmed priority/negation answers while a feedback filing is
       // pending — intercepted BEFORE routing: a bare "P2" classifies as
@@ -250,15 +279,21 @@ export class OrchestratedPipeline {
       // owns it). Critical declarations were offered to the gate first and
       // passed through by design — urgent signals break through mutes.
       if (routeIntent(envelope) === 'legacy') {
-        // Complaint/feedback are claimed by the pipeline's action stage
-        // first — same conversational semantics, but confirmations end in
-        // GOVERNED Jira filing instead of the cascade's direct createIssue.
+        // Urgent declarations break through everything, exactly as the
+        // cascade guaranteed — recorded, barged in, break mutes.
+        const critical = this.urgency.criticalFrom(text, speakerId);
+        if (critical.handled) {
+          return { routed: 'etiquette', correlationId: cid, ok: critical.ok, ...(critical.reason ? { reason: critical.reason } : {}) };
+        }
+        // Complaint/feedback are claimed by the pipeline's action stage —
+        // confirmations end in GOVERNED Jira filing.
         const action = this.actionEtiquette.offerIntent(envelope, speakerId, text, ts);
         if (action.handled) {
           return { routed: 'etiquette', correlationId: cid, ...(action.ok !== undefined ? { ok: action.ok } : {}), ...(action.reason ? { reason: action.reason } : {}) };
         }
-        this.legacy.processUtterance(speakerId, text, ts);
-        return { routed: 'legacy', correlationId: cid, legacyFallback: false };
+        // Unrecognized chatter: recorded above, never spoken over (the
+        // cascade's deep-dive silence policy, owned here).
+        return { routed: 'legacy', correlationId: cid, ok: true, reason: 'chatter_noted', legacyFallback: false };
       }
 
       // Meeting context: every routed utterance becomes a per-meeting
@@ -281,14 +316,16 @@ export class OrchestratedPipeline {
         ...(meetingChannel ? { thread: { channel: meetingChannel, ts: threadTs ?? String(ts) } } : {}),
       });
     } catch (e) {
-      // Honest degradation: pipeline failure → legacy cascade.
-      this.legacy.processUtterance(speakerId, text, ts);
+      // Honest degradation: say so. The meeting never hangs and no
+      // ungoverned second brain silently takes over.
+      const message = e instanceof Error ? e.message : String(e);
+      this.deliverSpeech("I couldn't process that just now — try again in a moment.");
       return {
         routed: 'legacy',
         correlationId: cid,
         ok: false,
-        reason: `pipeline failed, legacy fallback: ${e instanceof Error ? e.message : String(e)}`,
-        legacyFallback: true,
+        reason: `pipeline failed: ${message}`,
+        legacyFallback: false,
       };
     }
   }
@@ -314,6 +351,11 @@ export class OrchestratedPipeline {
         reason: `pipeline failed: ${e instanceof Error ? e.message : String(e)}`,
       };
     }
+  }
+
+  /** Mute-state query (hosts/tests): the gate is the single owner. */
+  isMuted(ts = this.now()): boolean {
+    return this.etiquette.isMuted(ts);
   }
 
   /** Record a signature on a pending approval. */

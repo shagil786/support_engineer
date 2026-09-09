@@ -15,8 +15,6 @@ import { z } from 'zod';
 import type { RunbookAction } from './support-voice-agent/integrations/runbook';
 import { loadDotEnv } from './env';
 import * as h from './support-voice-agent/heuristics';
-import { SupportVoiceAgent } from './support-voice-agent/agent';
-import type { SupportVoiceAgentConfig } from './support-voice-agent/agent';
 import { InMemoryRunbookProvider } from './support-voice-agent/integrations/runbook';
 import { SplunkProvider } from './support-voice-agent/integrations/logs';
 import { SlackWebhookNotifier } from './support-voice-agent/integrations/slack';
@@ -300,25 +298,6 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
   if (runbooksFile) out.runbooksFile = runbooksFile;
 
   return out;
-}
-
-export interface CreateAgentOptions extends SupportVoiceAgentConfig {
-  /** Env source override (defaults to `process.env`); useful in tests. */
-  env?: Env;
-}
-
-/** Production entry point: behavior options come from `config`, integration
- *  wiring falls back to the environment, and the runbook registry defaults to
- *  empty (sample actions live in `src/fixtures/sample-runbooks.ts`). */
-export function createAgent(options: CreateAgentOptions = {}): SupportVoiceAgent {
-  const { env = process.env, ...config } = options;
-  const envConfig = configFromEnv(env);
-  const merged: SupportVoiceAgentConfig = { ...config };
-  merged.jira = config.jira ?? envConfig.jira;
-  merged.logs = config.logs ?? envConfig.logs;
-  merged.slack = config.slack ?? envConfig.slack;
-  merged.runbooks = config.runbooks ?? new InMemoryRunbookProvider([]);
-  return new SupportVoiceAgent(merged);
 }
 
 /** Create the LLM client from environment (or explicit config). Returns undefined when unwired. */

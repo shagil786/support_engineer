@@ -59,6 +59,46 @@ describe('chunkDocument', () => {
     for (const c of chunkDocument(noisy)) expect(c.text.trim().length).toBeGreaterThan(0);
   });
 
+  it('unwraps markdown hard-wrapped prose so sentences survive retrieval', () => {
+    // A wrapped paragraph: the answerer splits candidate sentences on
+    // newlines, so a line ending mid-sentence truncates KB answers at the
+    // wrap point (the live bug: "...caused by connection pool").
+    const wrapped = doc({
+      text: [
+        '# Cache incidents',
+        'Postmortem: the checkout timeout incident was caused by connection pool',
+        'exhaustion in the payments service, not by Redis. Mitigation was a deploy',
+        'rollback plus a pool-size bump.',
+      ].join('\n'),
+    });
+    const [chunk] = chunkDocument(wrapped) as [Chunk];
+    expect(chunk.text).toContain(
+      'caused by connection pool exhaustion in the payments service, not by Redis.',
+    );
+    // No prose line ends mid-sentence anymore.
+    for (const line of chunk.text.split('\n')) {
+      expect(line.endsWith('pool')).toBe(false);
+      expect(line.endsWith('deploy')).toBe(false);
+    }
+  });
+
+  it('keeps list lines as one-item-per-line while unwrapping prose', () => {
+    const mixed = doc({
+      text: [
+        '# Runbook',
+        'First check whether the saturation alert is firing before you do anything else.',
+        '- scale the deployment to three replicas',
+        '- restart the checkout pod',
+        'Escalate to the on-call engineer if the pod refuses to come back.',
+      ].join('\n'),
+    });
+    const [chunk] = chunkDocument(mixed) as [Chunk];
+    expect(chunk.text).toContain('- scale the deployment to three replicas');
+    expect(chunk.text).toContain('- restart the checkout pod');
+    // Prose around the list is unwrapped into full sentences.
+    expect(chunk.text).toContain('Escalate to the on-call engineer if the pod refuses to come back.');
+  });
+
   it('rejects a document with no id or empty text', () => {
     expect(() => chunkDocument(doc({ id: '' }))).toThrow();
     expect(() => chunkDocument(doc({ text: '   ' }))).toThrow();

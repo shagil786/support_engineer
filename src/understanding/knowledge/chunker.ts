@@ -43,6 +43,42 @@ function cleanLines(text: string): string[] {
     .filter((l) => l.length > 0 && !/^-{3,}$/.test(l));
 }
 
+/** Join markdown hard-wrapped prose into whole sentences (one per line).
+ *  Downstream retrieval splits candidate sentences on newlines, so a stored
+ *  line ending mid-sentence would truncate KB answers at the wrap point.
+ *  Line-oriented markdown keeps its shape: list items, block quotes, tables,
+ *  and fenced code. A paragraph without terminal punctuation accumulates
+ *  until a structured line or the end of the section. */
+function unwrapProse(lines: string[]): string[] {
+  const out: string[] = [];
+  let buf: string | null = null;
+  let inFence = false;
+  const structured = (l: string) => /^(?:[-*+]\s|\d+[.)]\s|>\s?|\|)/.test(l);
+  const flush = () => {
+    if (buf !== null) {
+      out.push(buf);
+      buf = null;
+    }
+  };
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      flush();
+      out.push(line);
+      continue;
+    }
+    if (inFence || structured(line)) {
+      flush();
+      out.push(line);
+      continue;
+    }
+    buf = buf === null ? line : `${buf} ${line}`;
+    if (/[.!?]$/.test(line)) flush();
+  }
+  flush();
+  return out;
+}
+
 interface Section {
   heading: string;
   lines: string[];
@@ -109,7 +145,7 @@ export function chunkDocument(doc: IngestDoc, opts: ChunkOptions = {}): Chunk[] 
 
   const chunks: Chunk[] = [];
   for (const section of toSections(lines)) {
-    const body = section.lines.join('\n');
+    const body = unwrapProse(section.lines).join('\n');
     if (body.length <= maxChars) {
       // Heading-only sections keep the heading as their text so they remain
       // retrievable (the index also prepends the heading).

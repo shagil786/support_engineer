@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SupportVoiceAgent } from '../../src/support-voice-agent/agent';
+import { MeetingNotes } from '../../src/meeting/notes';
 import { InMemoryRunbookProvider } from '../../src/support-voice-agent/integrations/runbook';
 import { OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
@@ -44,14 +44,7 @@ const defaultPolicyYaml = rf(join(process.cwd(), 'policies/default.yaml'), 'utf8
 
 function harness(opts: { muteDurationMs?: number } = {}) {
   const spoken: string[] = [];
-  const legacyMuted: number[] = [];
-  const legacy = new SupportVoiceAgent({
-    mode: 'interrupt',
-    runbooks: new InMemoryRunbookProvider([
-      { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
-    ]),
-  });
-  legacy.on('muted', (m) => legacyMuted.push(m.until));
+  const notes = new MeetingNotes({ now: () => 1_000_000 });
 
   const eventLog = new JsonlFileEventLog({ baseDir: join(dir, 'events') });
   const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
@@ -81,7 +74,7 @@ function harness(opts: { muteDurationMs?: number } = {}) {
   const outcomeRecorder = new OutcomeRecorder({ eventLog, outcomesDir: join(dir, 'outcomes') });
 
   const pipeline = new OrchestratedPipeline({
-    legacy,
+    notes,
     classifier,
     assembler,
     policyEngine,
@@ -97,17 +90,17 @@ function harness(opts: { muteDurationMs?: number } = {}) {
     now: () => 1_000_000,
   });
 
-  return { pipeline, legacy, spoken, legacyMuted };
+  return { pipeline, spoken, notes };
 }
 
 describe('EtiquetteGate (pipeline-owned mute/wake)', () => {
-  it('mutes in the pipeline; the legacy cascade never learns of it', async () => {
-    const { pipeline, legacy, legacyMuted } = harness();
+  it('mute state has one owner — the pipeline gate', async () => {
+    const { pipeline, spoken } = harness();
     const r = await pipeline.processUtterance('u1', 'agent, shut up');
     expect(r.routed).toBe('etiquette');
     expect(r.ok).toBe(true);
-    expect(legacy.isMuted(1_000_000)).toBe(false); // state stays out of the cascade
-    expect(legacyMuted).toHaveLength(0);
+    expect(pipeline.isMuted(1_000_000)).toBe(true);
+    expect(spoken).toHaveLength(0);
   });
 
   it('a bare wake word while muted greets through the gate and re-arms', async () => {
@@ -155,9 +148,11 @@ describe('EtiquetteGate (pipeline-owned mute/wake)', () => {
     expect(spoken).toContain("Yes, I'm here. What do you need?");
   });
 
-  it('a critical declaration still routes to the legacy cascade (action path, not etiquette)', async () => {
-    const { pipeline } = harness();
+  it('a critical declaration barges in through the urgency stage', async () => {
+    const { pipeline, spoken } = harness();
     const r = await pipeline.processUtterance('u1', 'this is a P1, checkout is down');
-    expect(r.routed).toBe('legacy');
+    expect(r.routed).toBe('etiquette');
+    expect(r.reason).toBe('critical_p1');
+    expect(spoken.join(' ')).toContain('urgent alert');
   });
 });

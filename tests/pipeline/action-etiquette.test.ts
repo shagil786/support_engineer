@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SupportVoiceAgent } from '../../src/support-voice-agent/agent';
+import { MeetingNotes } from '../../src/meeting/notes';
 import { InMemoryRunbookProvider } from '../../src/support-voice-agent/integrations/runbook';
 import { OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
@@ -51,12 +51,7 @@ function harness() {
       return { key: 'SUP-7', self: 'https://jira.example/rest/api/2/issue/10001' };
     },
   };
-  const legacy = new SupportVoiceAgent({
-    mode: 'interrupt',
-    runbooks: new InMemoryRunbookProvider([
-      { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
-    ]),
-  });
+  const notes = new MeetingNotes({ now: () => 1_000_000 });
 
   const eventLog = new JsonlFileEventLog({ baseDir: join(dir, 'events') });
   const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
@@ -91,7 +86,7 @@ function harness() {
   const outcomeRecorder = new OutcomeRecorder({ eventLog, outcomesDir: join(dir, 'outcomes') });
 
   const pipeline = new OrchestratedPipeline({
-    legacy,
+    notes,
     classifier,
     assembler,
     policyEngine,

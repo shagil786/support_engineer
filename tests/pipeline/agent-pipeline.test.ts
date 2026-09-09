@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SupportVoiceAgent } from '../../src/support-voice-agent/agent';
+import { MeetingNotes } from '../../src/meeting/notes';
 import { InMemoryRunbookProvider } from '../../src/support-voice-agent/integrations/runbook';
 import { OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
@@ -58,14 +58,7 @@ function harness(opts: HarnessOptions = {}) {
     name: 'noop',
     query: async () => ({ provider: 'noop', rows: [] as Array<{ message: string }>, error: undefined }),
   };
-  const legacy = new SupportVoiceAgent({
-    mode: 'interrupt',
-    runbooks: new InMemoryRunbookProvider([
-      { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
-      { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
-    ]),
-    logs: logProvider as never,
-  });
+  const notes = new MeetingNotes({ now: () => 1_000_000 });
 
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
   const llm = opts.llm ?? new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
@@ -110,7 +103,7 @@ function harness(opts: HarnessOptions = {}) {
   const outcomeRecorder = new OutcomeRecorder({ eventLog, outcomesDir });
 
   const pipeline = new OrchestratedPipeline({
-    legacy,
+    notes,
     classifier,
     assembler,
     policyEngine,
@@ -125,7 +118,7 @@ function harness(opts: HarnessOptions = {}) {
     now: () => 1_000_000,
   });
 
-  return { pipeline, legacy, eventLog, outcomesDir, slack, runbookRuns };
+  return { pipeline, notes, eventLog, outcomesDir, slack, runbookRuns };
 }
 
 const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => {
@@ -135,16 +128,12 @@ const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => 
 };
 
 describe('OrchestratedPipeline', () => {
-  it('talk-permission (mute) is owned by the pipeline gate, not the cascade', async () => {
-    const { pipeline, legacy } = harness();
-    const muted: number[] = [];
-    legacy.on('muted', (m) => muted.push(m.until));
-
+  it('talk-permission (mute) is owned by the pipeline gate', async () => {
+    const { pipeline } = harness();
     const r = await pipeline.processUtterance('u1', 'agent, shut up');
     expect(r.routed).toBe('etiquette');
-    // One owner: the cascade never learns of the mute in orchestrated mode.
-    expect(muted.length).toBe(0);
-    expect(legacy.isMuted(1_000_000)).toBe(false);
+    // One owner: the gate holds the state, queryable on the pipeline.
+    expect(pipeline.isMuted(1_000_000)).toBe(true);
   });
 
   it('routes unknown chatter to the legacy cascade', async () => {
@@ -211,7 +200,7 @@ describe('OrchestratedPipeline', () => {
     expect(runbookRuns).toEqual(['clear-cache']);
   });
 
-  it('falls back to the legacy cascade when the pipeline throws (LLM transport failure)', async () => {
+  it('degrades honestly when the pipeline throws (LLM transport failure)', async () => {
     const failingLlm = new OpenAiCompatibleClient({
       baseUrl: 'https://api.test/v1',
       apiKey: 'k',
@@ -219,14 +208,14 @@ describe('OrchestratedPipeline', () => {
       request: (() => Promise.reject(new Error('ECONNRESET'))) as typeof fetch,
     });
     const logProvider = { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) };
-    const { pipeline, legacy } = harness({ llm: failingLlm, logProvider });
-    const speeches: string[] = [];
-    legacy.on('speech', (s) => speeches.push(s.text));
+    const { pipeline } = harness({ llm: failingLlm, logProvider });
 
     const r = await pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
     expect(r.routed).toBe('legacy');
-    legacy.flushSpeech();
-    expect(speeches.join(' ')).toContain('Pulling that now');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/pipeline failed/);
+    // The speaker is told, not left hanging — no ungoverned second brain.
+    expect(spoken.join(' ')).toContain("couldn't process");
   });
 
   it('safety-net vetoes beat an allow-everything policy', async () => {
