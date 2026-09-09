@@ -38,12 +38,16 @@ export function interruptMessageFrom(envelope: IntentEnvelope): string {
   return parts.length ? parts.join(' ') : 'proactive alert';
 }
 
-/** Question intents propose a read-only log query; everything else that
- *  reaches this point proposes speaking an interrupt. */
+/** Question intents propose a read-only lookup: a ticket key means the
+ *  question IS a Jira issue, everything else a log query. Non-questions
+ *  that reach this point propose speaking an interrupt. */
 export function shapeProposal(envelope: IntentEnvelope, isQuestion: boolean): ProposedAction {
-  return isQuestion
-    ? { tool: 'query_logs', args: { query_string: logQueryFrom(envelope) } }
-    : { tool: 'meeting_interrupt', args: { message: interruptMessageFrom(envelope) } };
+  if (!isQuestion) {
+    return { tool: 'meeting_interrupt', args: { message: interruptMessageFrom(envelope) } };
+  }
+  const ticket = envelope.entities.ticketKeys?.[0];
+  if (ticket) return { tool: 'jira_get_issue', args: { issue_key: ticket } };
+  return { tool: 'query_logs', args: { query_string: logQueryFrom(envelope) } };
 }
 
 /** A resolved runbook offer becomes an execute proposal for the concrete

@@ -109,7 +109,7 @@ describe('OpenAiCompatibleClient', () => {
     // OpenAI wire format: each tool wrapped in { type: 'function', function: {...} }
     const first = (sent?.body.tools as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
     expect(first.type).toBe('function');
-    expect((first.function as Record<string, unknown>).name).toBe('jira_create_issue');
+    expect((first.function as Record<string, unknown>).name).toBe('jira_get_issue');
     expect(sent?.body.tool_choice).toBe('auto');
   });
 
@@ -295,9 +295,9 @@ describe('OpenAiCompatibleClient', () => {
 });
 
 describe('tool registry schemas', () => {
-  it('defines the five required tools with spec names', () => {
+  it('defines the six required tools with spec names', () => {
     expect(Object.keys(TOOL_SCHEMAS).sort()).toEqual([
-      'execute_runbook_script', 'invoke_human_on_slack', 'jira_create_issue', 'meeting_interrupt', 'query_logs',
+      'execute_runbook_script', 'invoke_human_on_slack', 'jira_create_issue', 'jira_get_issue', 'meeting_interrupt', 'query_logs',
     ]);
   });
 
@@ -310,7 +310,7 @@ describe('tool registry schemas', () => {
 
   it('serialize to the OpenAI tools array format (type wrapper)', () => {
     const tools = schemasToOpenAiTools();
-    expect(tools).toHaveLength(5);
+    expect(tools).toHaveLength(6);
     for (const t of tools) {
       expect(t.type).toBe('function');
       expect(typeof t.function.name).toBe('string');

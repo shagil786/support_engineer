@@ -8,6 +8,10 @@
  */
 import { z } from 'zod';
 
+export const JiraGetIssueSchema = z.object({
+  issue_key: z.string().regex(/^[A-Z][A-Z0-9_]+-\d+$/, 'issue_key must be a Jira key like SUPPORT-7'),
+});
+
 export const JiraCreateIssueSchema = z.object({
   project_key: z.string().min(1).optional(),
   summary: z.string().min(1),
@@ -37,6 +41,7 @@ export const MeetingInterruptSchema = z.object({
   urgency: z.enum(['normal', 'critical']).optional(),
 });
 
+export type JiraGetIssueArgs = z.output<typeof JiraGetIssueSchema>;
 export type JiraCreateIssueArgs = z.output<typeof JiraCreateIssueSchema>;
 export type QueryLogsArgs = z.output<typeof QueryLogsSchema>;
 export type ExecuteRunbookArgs = z.output<typeof ExecuteRunbookSchema>;

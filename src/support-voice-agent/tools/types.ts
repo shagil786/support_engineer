@@ -1,6 +1,17 @@
 /** JSON function schemas for the agent's callable tools (Layer 2). */
 
 export const TOOL_SCHEMAS = {
+  jira_get_issue: {
+    name: 'jira_get_issue',
+    description: 'Get the current status of a Jira issue (read-only).',
+    parameters: {
+      type: 'object',
+      properties: {
+        issue_key: { type: 'string' },
+      },
+      required: ['issue_key'],
+    },
+  },
   jira_create_issue: {
     name: 'jira_create_issue',
     description: 'Create a Jira ticket from spoken feedback.',
@@ -85,6 +96,8 @@ export type ToolHandler = (args: unknown, deps: ToolDependencies) => Promise<Too
  *  integration ports so the orchestrator can wire the actual clients. */
 export interface ToolDependencies {
   jiraClient?: Pick<import('../integrations/jira.js').JiraClient, 'createIssue'>;
+  /** Read-only Jira port (handlers mirror the registry's split). */
+  jiraGetIssueClient?: Pick<import('../integrations/jira.js').JiraClient, 'getIssue'>;
   logProvider?: import('../types.js').LogProvider;
   runbookProvider?: import('../integrations/runbook.js').RunbookProvider;
   slackNotifier?: import('../integrations/slack.js').SlackNotifier;

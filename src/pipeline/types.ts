@@ -21,11 +21,11 @@ export interface PipelineRouting {
   /** Present on legacy fallback: the wrapper re-dispatched into the cascade. */
   legacyFallback?: boolean;
   /** Grounded-answer fields: present when a question was answered from the
-   *  knowledge base ('knowledge') or, on KB refusal, from governed log
-   *  query results ('logs'). Absent for legacy/etiquette routes and when no
-   *  answerer is wired. */
+   *  knowledge base ('knowledge'), from a governed read-only Jira lookup
+   *  ('jira'), or, on KB refusal, from governed log query results ('logs').
+   *  Absent for legacy/etiquette routes and when no answerer is wired. */
   answer?: string;
-  answerSource?: 'knowledge' | 'logs';
+  answerSource?: 'knowledge' | 'logs' | 'jira';
 }
 
 /** A staged action awaiting (or holding) an approval grant. */

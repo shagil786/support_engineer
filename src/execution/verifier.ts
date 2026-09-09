@@ -24,6 +24,8 @@ const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]+-\d+$/;
 const outputFilters = new OutputFilters();
 
 const CHECKS: Record<string, Check> = {
+  jira_get_issue: (r) =>
+    r.ok ? { passed: true } : { passed: false, reason: 'issue lookup failed' },
   jira_create_issue: (r) => {
     if (!r.ok) return { passed: false, reason: 'createIssue returned not-ok' };
     const key = (r.data as { ticket_id?: unknown } | undefined)?.ticket_id;

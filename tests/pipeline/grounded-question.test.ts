@@ -38,6 +38,7 @@ beforeEach(() => {
   eventsDir = join(dir, 'events');
   outcomesDir = join(dir, 'outcomes');
   spoken.length = 0;
+  jiraLookups.length = 0;
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -48,7 +49,10 @@ interface Opts {
   policyYaml?: string;
   classifierOverride?: IntentClassifier;
   deliver?: (text: string, target?: { channel: string; threadTs: string }) => void;
+  /** Wire the fake read-only Jira port (status lookups land in jiraLookups). */
+  jiraStatus?: boolean;
 }
+const jiraLookups: string[] = [];
 
 async function harness(opts: Opts = {}) {
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
@@ -74,7 +78,21 @@ async function harness(opts: Opts = {}) {
     { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
   ]);
   const toolRunner = new ToolRunner({
-    context: { runbookProvider, logProvider, speak: (t) => spoken.push(t) },
+    context: {
+      runbookProvider,
+      logProvider,
+      speak: (t) => spoken.push(t),
+      ...(opts.jiraStatus
+        ? {
+            jiraGetIssueClient: {
+              getIssue: async (key: string) => {
+                jiraLookups.push(key);
+                return { key, summary: 'Checkout 500s', status: 'In Progress' };
+              },
+            },
+          }
+        : {}),
+    },
     safetyNet,
     eventLog,
   });
@@ -120,7 +138,7 @@ async function harness(opts: Opts = {}) {
     answerer,
     now: () => 1_000_000,
   });
-  return { pipeline, eventLog, logQueries };}
+  return { pipeline, eventLog, logQueries, jiraLookups };}
 
 const kinds = async (log: JsonlFileEventLog, cid: string): Promise<string[]> => {
   const out: string[] = [];
@@ -249,5 +267,43 @@ describe('grounded question path', () => {
     expect(r.answerSource).toBe('logs');
     const files = readdirSync(outcomesDir).filter((f) => f.endsWith('.json'));
     expect(files.length).toBe(1); // the governed run was recorded
+  });
+
+  it('a ticket-status question is answered from the governed read-only jira_get_issue (one path, no bypass)', async () => {
+    const h = await harness({ jiraStatus: true });
+    const r = await h.pipeline.processUtterance('U1', 'hey agent, what is the status of SUPPORT-7?', 1_000_000);
+    // Routed as a question, proposed as a read-only Jira lookup, allowed by
+    // the default read-only policy, executed through the supervisor, and
+    // audited on the spine — no separate status pathway exists.
+    expect(r.routed).toBe('pipeline');
+    expect(r.ok).toBe(true);
+    expect(r.answerSource).toBe('jira');
+    expect(r.answer).toContain('SUPPORT-7');
+    expect(r.answer).toContain("'Checkout 500s'");
+    expect(r.answer).toContain('In Progress');
+    expect(h.jiraLookups).toEqual(['SUPPORT-7']);
+    expect(spoken).toContain(r.answer); // spoken through the same deliverSpeech
+    let sawGovernedJira = false;
+    for await (const e of h.eventLog.query({ correlationId: r.correlationId })) {
+      if (e.kind === 'tool_call' && e.tool === 'jira_get_issue' && e.result.ok) sawGovernedJira = true;
+    }
+    expect(sawGovernedJira).toBe(true);
+  });
+
+  it('a ticket-status question is denied when the policy forbids jira_get_issue', async () => {
+    const denyYaml = [
+      'rules:',
+      '  - id: no_jira_reads',
+      '    when:',
+      '      tools_in: [jira_get_issue]',
+      '    effect: deny',
+      '    reason: jira reads are off',
+    ].join('\n');
+    const h = await harness({ jiraStatus: true, policyYaml: denyYaml });
+    const r = await h.pipeline.processUtterance('U1', 'hey agent, what is the status of SUPPORT-7?', 1_000_000);
+    expect(r.routed).toBe('pipeline');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('denied');
+    expect(h.jiraLookups).toEqual([]); // nothing executed — governance held
   });
 });

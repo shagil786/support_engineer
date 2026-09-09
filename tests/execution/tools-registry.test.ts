@@ -8,9 +8,16 @@ describe('TOOL_REGISTRY', () => {
       'execute_runbook_script',
       'invoke_human_on_slack',
       'jira_create_issue',
+      'jira_get_issue',
       'meeting_interrupt',
       'query_logs',
     ]);
+  });
+
+  it('validates the jira_get_issue key shape', async () => {
+    expect((await TOOL_REGISTRY['jira_get_issue'].schema.safeParseAsync({ issue_key: 'SUPPORT-7' })).success).toBe(true);
+    expect((await TOOL_REGISTRY['jira_get_issue'].schema.safeParseAsync({ issue_key: 'support-7' })).success).toBe(false);
+    expect((await TOOL_REGISTRY['jira_get_issue'].schema.safeParseAsync({})).success).toBe(false);
   });
 
   it('rejects invalid args via Zod', async () => {

@@ -5,17 +5,20 @@
 import type { z } from 'zod';
 import type { ToolName, ToolResult } from '../../support-voice-agent/tools/types.js';
 import {
+  JiraGetIssueSchema,
   JiraCreateIssueSchema,
   QueryLogsSchema,
   ExecuteRunbookSchema,
   InvokeHumanOnSlackSchema,
   MeetingInterruptSchema,
+  type JiraGetIssueArgs,
   type JiraCreateIssueArgs,
   type QueryLogsArgs,
   type ExecuteRunbookArgs,
   type InvokeHumanOnSlackArgs,
   type MeetingInterruptArgs,
 } from './schemas.js';
+import { jiraGetIssue } from './jira-get.js';
 import { jiraCreateIssue } from './jira.js';
 import { queryLogs } from './logs.js';
 import { executeRunbook } from './runbook.js';
@@ -26,6 +29,8 @@ import { meetingInterrupt } from './memory.js';
  *  interfaces so the Supervisor can wire actual instances directly. */
 export interface ToolContext {
   jiraClient?: Pick<import('../../support-voice-agent/integrations/jira.js').JiraClient, 'createIssue'>;
+  /** Read-only Jira port; split so a viewer-scoped token cannot create. */
+  jiraGetIssueClient?: Pick<import('../../support-voice-agent/integrations/jira.js').JiraClient, 'getIssue'>;
   logProvider?: import('../../support-voice-agent/types.js').LogProvider;
   runbookProvider?: import('../../support-voice-agent/integrations/runbook.js').RunbookProvider;
   slackNotifier?: import('../../support-voice-agent/integrations/slack.js').SlackNotifier;
@@ -41,6 +46,10 @@ export interface ToolEntry<TSchema extends z.ZodType = z.ZodType> {
 }
 
 export const TOOL_REGISTRY = {
+  jira_get_issue: {
+    schema: JiraGetIssueSchema,
+    execute: (args: JiraGetIssueArgs, ctx: ToolContext): Promise<ToolResult> => jiraGetIssue(args, ctx),
+  },
   jira_create_issue: {
     schema: JiraCreateIssueSchema,
     execute: (args: JiraCreateIssueArgs, ctx: ToolContext): Promise<ToolResult> => jiraCreateIssue(args, ctx),

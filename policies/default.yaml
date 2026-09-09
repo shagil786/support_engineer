@@ -31,7 +31,7 @@ rules:
   # Read-only ops are always allowed.
   - id: read_only_default_allow
     when:
-      tools_in: [query_logs]
+      tools_in: [query_logs, jira_get_issue]
     effect: allow
     reason: read-only ops are default-allowed
 

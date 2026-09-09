@@ -23,6 +23,18 @@ export function parseTimeRange(range: string | undefined, now: number): { from: 
 }
 
 export const handlers: Record<ToolName, (args: unknown, deps: ToolDependencies) => Promise<ToolResult>> = {
+  async jira_get_issue(args, deps) {
+    if (!deps.jiraGetIssueClient) return unwired('jira_get_issue');
+    const a = (args ?? {}) as Record<string, unknown>;
+    const issueKey = str(a, 'issue_key');
+    if (!issueKey) return { ok: false, error: 'jira_get_issue requires issue_key' };
+    try {
+      const issue = await deps.jiraGetIssueClient.getIssue(issueKey);
+      return { ok: true, data: issue };
+    } catch (e) {
+      return { ok: false, error: 'Jira getIssue failed', detail: err(e) };
+    }
+  },
   async jira_create_issue(args, deps) {
     if (!deps.jiraClient) return unwired('jira_create_issue');
     const a = (args ?? {}) as Record<string, unknown>;

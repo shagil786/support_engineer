@@ -85,7 +85,7 @@ export class SupervisorAgent {
   /** Tools whose replay cannot mutate state. Mutating steps of a learned
    *  procedure are never replayed — policy approved THIS request's action,
    *  not the procedure's historical args. */
-  private static readonly READ_ONLY = new Set(['query_logs']);
+  private static readonly READ_ONLY = new Set(['query_logs', 'jira_get_issue']);
 
   constructor(opts: SupervisorOptions) {
     this.triage = opts.triage;
@@ -318,7 +318,7 @@ export class SupervisorAgent {
   }
 
   private isToolName(tool: string): tool is ToolName {
-    return ['jira_create_issue', 'query_logs', 'execute_runbook_script', 'invoke_human_on_slack', 'meeting_interrupt'].includes(tool);
+    return ['jira_get_issue', 'jira_create_issue', 'query_logs', 'execute_runbook_script', 'invoke_human_on_slack', 'meeting_interrupt'].includes(tool);
   }
 
   private async emitOutcome(

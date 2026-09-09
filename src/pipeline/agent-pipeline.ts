@@ -415,8 +415,23 @@ export class OrchestratedPipeline {
       bundle,
       ...(ctx.thread ? { thread: ctx.thread } : {}),
     });
+    if (outcome.kind === 'executed' && proposal.tool === 'jira_get_issue') {
+      // Deterministic surface: the ticket status is read from the tool_call
+      // audit event's payload (the audit spine is the single source of
+      // truth), then spoken — same pattern as feedback filings.
+      for await (const e of this.eventLog.query({ correlationId: cid })) {
+        if (e.kind === 'tool_call' && e.tool === 'jira_get_issue' && e.result.ok) {
+          const d = e.result.data as { key?: string; summary?: string; status?: string } | undefined;
+          if (d?.key) {
+            const line = `${d.key} ('${d.summary ?? ''}') is ${d.status ?? 'unknown'}.`;
+            this.deliverSpeech(line, ctx.thread ? { channel: ctx.thread.channel, threadTs: ctx.thread.ts } : undefined);
+            return { ...outcome.routing, answer: line, answerSource: 'jira' as const };
+          }
+        }
+      }
+    }
     // KB refusal → the governed log query IS the answer source ('logs').
-    if (outcome.kind === 'executed' && question.kbRefused) {
+    if (outcome.kind === 'executed' && question.kbRefused && proposal.tool === 'query_logs') {
       return { ...outcome.routing, answerSource: 'logs' };
     }
     return outcome.routing;

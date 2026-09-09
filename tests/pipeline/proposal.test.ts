@@ -54,10 +54,17 @@ describe('interruptMessageFrom (non-question → meeting_interrupt shaping)', ()
 });
 
 describe('shapeProposal', () => {
-  it('a question proposes a read-only log query with the shaped query_string', () => {
+  it('a question with a ticket key proposes the read-only jira_get_issue', () => {
     expect(shapeProposal(envelopeWith({ ticketKeys: ['SUPPORT-9'] }), true)).toEqual({
+      tool: 'jira_get_issue',
+      args: { issue_key: 'SUPPORT-9' },
+    });
+  });
+
+  it('a question without a ticket proposes a read-only log query with the shaped query_string', () => {
+    expect(shapeProposal(envelopeWith({ services: ['api'] }), true)).toEqual({
       tool: 'query_logs',
-      args: { query_string: 'SUPPORT-9' },
+      args: { query_string: 'api' },
     });
   });
 

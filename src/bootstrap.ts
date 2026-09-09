@@ -285,6 +285,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
   const slackBot = opts.slackBot ?? slackBotClient;
   const toolRunner = new ToolRunner({
     context: {
+      ...(opts.jira ? { jiraGetIssueClient: new JiraClient(opts.jira) } : {}),
       ...(opts.jira ? { jiraClient: new JiraClient(opts.jira) } : {}),
       ...(opts.logProvider ? { logProvider: opts.logProvider } : {}),
       ...(opts.slack ? { slackNotifier: opts.slack } : {}),
