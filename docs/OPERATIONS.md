@@ -7,7 +7,8 @@ absent), and expose the meeting surface you want.
 
 The architectural decisions behind these behaviors are recorded in
 [docs/adr/](../docs/adr/) — KB-first answering, hybrid retrieval, catalog
-ingest-on-boot, and the LLM saturation breaker each have a page.
+ingest-on-boot, the LLM saturation breaker, and server-side signer-role
+resolution each have a page.
 
 ## Runtime data — `DATA_DIR`
 
@@ -112,7 +113,12 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   `pending` or `granted` plus the `correlationId` execute needs),
   `GET /approvals/events` (the same listing as an SSE stream, pushed on
   connect and after every mutation, with keep-alive pings), approval
-  sign/execute endpoints. `GET /metrics` (same bearer auth) exposes the
+  sign/execute endpoints. Signing is `POST /approvals/:id/sign
+  {"signerId": …}` — the server resolves the signer's role through the
+  same speaker registry the SafetyNet uses and answers 403 when the
+  identity is not an approver; client-asserted roles are not accepted
+  (ADR-0005). Grants are attributed: `approval_granted` events record the
+  resolved `signerIds`. `GET /metrics` (same bearer auth) exposes the
   Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
   governed-run outcomes, policy decisions, SafetyNet vetoes, and approval
   lifecycle counts (`requested`/`granted`/`denied`/`timed_out`/`executed`) —

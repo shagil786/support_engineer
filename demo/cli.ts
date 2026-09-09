@@ -139,7 +139,7 @@ async function main(): Promise<void> {
   console.log(`📚 knowledge: ${chunks} chunks seeded from examples/knowledge/*.md`);
   await platform.ready();
   console.log('=== Support Voice Agent — offline demo (one pipeline brain, fake Jira/Slack, no network) ===');
-  console.log('Type lines as  speaker: text   — or: /script /summary /quit\n');
+  console.log('Type lines as  speaker: text   — or: /script /summary /quit (or restart with --script)\n');
 
   if (process.argv.includes('--script')) {
     await scriptedScene();
