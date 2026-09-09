@@ -53,7 +53,13 @@ auto-ingested into the KB at boot as a `runbook:<id>` doc (`source: runbooks`,
 plus `runbookId`/`destructive` metadata), so `/ask` and KB-first answers cite
 the executable catalog with zero manual ingest. The KB re-syncs to the catalog
 on every boot: changed actions replace atomically, and actions removed from
-the catalog have their docs evicted. The same sync runs on demand:
+the catalog have their docs evicted. Fuzzy resolution runs on the same KB's
+hybrid scorer with fail-safe bands — a destructive candidate below the
+strong-match floor always stages for approval instead of executing, and
+every resolution records how it matched (`matchedBy: id/name/kb`) on the
+spine. The bands and their rationale are specified in
+[ADR-0006](../docs/adr/0006-runbook-resolution-fail-safe-bands.md). The same
+sync runs on demand:
 
 ```bash
 npx tsx scripts/knowledge-cli.ts runbooks /path/to/runbooks.json

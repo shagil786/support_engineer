@@ -66,6 +66,7 @@ Integrations are dependency-free ports you wire in:
 - [ADR-0003](docs/adr/0003-runbook-catalog-ingest-on-boot.md) — The runbook catalog is the source of truth; the KB mirrors it on every boot.
 - [ADR-0004](docs/adr/0004-llm-saturation-circuit-breaker.md) — Saturation circuit breaker on the LLM client: sustained 429 windows fail fast instead of hammering.
 - [ADR-0005](docs/adr/0005-server-side-signer-role-resolution.md) — Approval signatures resolve the signer's role server-side; a bearer token authenticates the channel, the speaker registry authorizes the actor.
+- [ADR-0006](docs/adr/0006-runbook-resolution-fail-safe-bands.md) — Fuzzy runbook resolution shares the citation engine's scorer, with fail-safe bands: ambiguous destructive candidates always stage for approval, never auto-execute.
 
 ## Getting started
 

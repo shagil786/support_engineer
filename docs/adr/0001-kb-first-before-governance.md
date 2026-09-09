@@ -48,7 +48,8 @@ answer is itself audited.
 ## Consequences
 
 - Answer provenance is always explicit: `answerSource: 'knowledge'` with
-  citations, or `'logs'` via the governed path. Nothing answers unattributed.
+  citations, `'jira'` for read-only ticket-status lookups, or `'logs'` via
+  the governed path. Nothing answers unattributed.
 - The KB's quality is load-bearing. An empty or stale KB silently pushes
   every question to the tool path (visible as `answerSource: 'logs'` in the
   audit spine); ingest-on-boot (ADR-0003) exists to keep it fed.
