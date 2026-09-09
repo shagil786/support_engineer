@@ -68,7 +68,7 @@ export type DecisionEvent =
   | (BaseEvent & { kind: 'governance'; intent: IntentEnvelope; decision: Decision })
   | (BaseEvent & { kind: 'safety_net'; vetoed: boolean; check: string; reason: string })
   | (BaseEvent & { kind: 'approval_request'; approvalId: string; policyId: string; approver_count: number })
-  | (BaseEvent & { kind: 'approval_granted'; approvalId: string; signerRole: string })
+  | (BaseEvent & { kind: 'approval_granted'; approvalId: string; signerRole: string; /** Resolved signer identities at grant time (attribution). */ signerIds?: string[] })
   | (BaseEvent & { kind: 'approval_executed'; approvalId: string })
   | (BaseEvent & { kind: 'approval_timeout'; approvalId: string })
   | (BaseEvent & { kind: 'approval_denied'; approvalId: string })

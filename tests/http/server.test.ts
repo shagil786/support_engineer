@@ -151,7 +151,7 @@ describe('createHttpServer: approvals', () => {
     const runbookPlatform = createPlatform({
       dataDir: dir,
       runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true }],
-      speakerRole: (id) => (id === 'admin1' ? 'admin' : undefined),
+      speakerRole: (id) => (id === 'admin1' || id === 'admin2' ? 'admin' : undefined),
     });
     const h = await createHttpServer(runbookPlatform, { authTokens: ['tok-1'] });
     handles.push(h);
@@ -163,7 +163,7 @@ describe('createHttpServer: approvals', () => {
     const first = await post(h.url, '/approvals/' + staged.approvalId + '/sign', {
       method: 'POST',
       headers: authed(),
-      body: JSON.stringify({ role: 'admin', signerId: 'human-1' }),
+      body: JSON.stringify({ signerId: 'admin1' }),
     });
     expect(first.status).toBe(200);
     expect(((await first.json()) as { status: string }).status).toBe('pending');
@@ -171,7 +171,7 @@ describe('createHttpServer: approvals', () => {
     const sign = await post(h.url, '/approvals/' + staged.approvalId + '/sign', {
       method: 'POST',
       headers: authed(),
-      body: JSON.stringify({ role: 'admin', signerId: 'human-2' }),
+      body: JSON.stringify({ signerId: 'admin2' }),
     });
     expect(sign.status).toBe(200);
     expect(((await sign.json()) as { status: string }).status).toBe('granted');
@@ -187,12 +187,44 @@ describe('createHttpServer: approvals', () => {
     expect(body.ok).toBe(true);
   });
 
+  it('403s a signer whose server-resolved role is insufficient — client-asserted roles are dead', async () => {
+    const h = await start();
+    const runbookPlatform = createPlatform({
+      dataDir: dir,
+      runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart all pods', destructive: true }],
+      // admin-console is admin; everyone else is a guest.
+      speakerRole: (id) => (id === 'admin-console' ? 'admin' : undefined),
+    });
+    const rh = await createHttpServer(runbookPlatform, { authTokens: ['tok-1'] });
+    handles.push(rh);
+    const staged = await runbookPlatform.pipeline.processUtterance('admin-console', 'agent, can you restart all pods?', 500);
+    expect(staged.approvalId).toBeDefined();
+
+    // The old escalation: claim admin in the body. Now irrelevant — the role
+    // is resolved server-side and the guest is refused with 403.
+    const escalated = await post(rh.url, '/approvals/' + staged.approvalId + '/sign', {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ role: 'admin', signerId: 'guest-person' }),
+    });
+    expect(escalated.status).toBe(403);
+    expect(((await escalated.json()) as { error: string }).error).toMatch(/guest/);
+
+    // Missing signerId is a 400 (the client supplies WHO, never the role).
+    const noWho = await post(rh.url, '/approvals/' + staged.approvalId + '/sign', {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ role: 'admin' }),
+    });
+    expect(noWho.status).toBe(400);
+  });
+
   it('404s unknown approval ids', async () => {
     const h = await start();
     const res = await post(h.url, '/approvals/does-not-exist/sign', {
       method: 'POST',
       headers: authed(),
-      body: JSON.stringify({ role: 'admin' }),
+      body: JSON.stringify({ signerId: 'human-1' }),
     });
     expect(res.status).toBe(404);
   });

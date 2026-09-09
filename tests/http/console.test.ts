@@ -15,7 +15,7 @@ beforeEach(() => {
     dataDir: dir,
     runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart all pods', destructive: true }],
     // The console test's speaker is admin server-side; other ids stay guests.
-    speakerRole: (id) => (id === 'admin-console' ? 'admin' : undefined),
+    speakerRole: (id) => (id === 'admin-console' || id === 'admin-1' || id === 'admin-2' ? 'admin' : undefined),
   });
   handles = [];
 });
@@ -108,11 +108,11 @@ describe('GET /approvals (approval queue)', () => {
   it('keeps a granted-but-unexecuted approval in the queue with status granted', async () => {
     const h = await start();
     const staged = await stageDestructive(h.url);
-    for (const signer of ['approver-1', 'approver-2']) {
+    for (const signer of ['admin-1', 'admin-2']) {
       const r = await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/sign`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authed() },
-        body: JSON.stringify({ role: 'admin', signerId: signer }),
+        body: JSON.stringify({ signerId: signer }),
       });
       expect(r.status).toBe(200);
     }
@@ -131,11 +131,11 @@ describe('GET /approvals (approval queue)', () => {
   it('drains the queue after the granted approval is executed', async () => {
     const h = await start();
     const staged = await stageDestructive(h.url);
-    for (const signer of ['approver-1', 'approver-2']) {
+    for (const signer of ['admin-1', 'admin-2']) {
       await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/sign`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authed() },
-        body: JSON.stringify({ role: 'admin', signerId: signer }),
+        body: JSON.stringify({ signerId: signer }),
       });
     }
     await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/execute`, {

@@ -275,6 +275,9 @@ export function createPlatform(opts: PlatformOptions): Platform {
     slack: approvalSlack,
     securityChannel: opts.approvalChannel ?? '#support-agent-approvals',
     approverCount: 2,
+    // REST signatures resolve identity through the SAME registry the
+    // SafetyNet uses — one trust boundary for the whole platform.
+    resolveSignerRole: speakerRole,
     ...(opts.approvalTimeoutMs !== undefined ? { defaultTimeoutMs: opts.approvalTimeoutMs } : {}),
     eventLog,
     ...(now ? { now } : {}),

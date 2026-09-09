@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ApprovalGate, type SlackLike } from '../../src/governance/approval-gate';
+import { ApprovalGate, SignerRoleError, type SlackLike } from '../../src/governance/approval-gate';
 import { JsonlFileEventLog } from '../../src/event-log/log';
 import type { Decision, ProposedAction } from '../../src/governance/decision';
 
@@ -187,5 +187,59 @@ describe('ApprovalGate', () => {
     const gate = new ApprovalGate({ slack, securityChannel: '#sec' });
     expect(() => gate.sign('nope', 'admin')).toThrow(/unknown approvalId/);
     expect(() => gate.deny('nope')).toThrow(/unknown approvalId/);
+  });
+
+  describe('signAs (server-side identity resolution)', () => {
+    const registry = (id: string): 'admin' | 'engineer' | 'viewer' | 'guest' | undefined =>
+      id === 'alice' || id === 'bob' ? 'admin' : id === 'eng' ? 'engineer' : undefined;
+
+    it('resolves the role server-side, rank-checks it, and dedupes by identity', async () => {
+      const slack = new FakeSlack();
+      const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, resolveSignerRole: registry });
+      const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+
+      expect(gate.signAs(approvalId, 'alice').status).toBe('pending'); // admin counts
+      // Same identity again: dedupe, no double-count.
+      expect(gate.signAs(approvalId, 'alice').signatures).toBe(1);
+      // A second distinct admin grants.
+      expect(gate.signAs(approvalId, 'bob').status).toBe('granted');
+    });
+
+    it('throws SignerRoleError for an insufficient resolved role — before any signature lands', async () => {
+      const slack = new FakeSlack();
+      const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, resolveSignerRole: registry });
+      const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+      // Unknown ids resolve to guest (least privilege).
+      expect(() => gate.signAs(approvalId, 'stranger')).toThrow(SignerRoleError);
+      expect(() => gate.signAs(approvalId, 'stranger')).toThrow(/guest/);
+      expect(gate.status(approvalId)?.signatures).toBe(0); // nothing landed
+    });
+
+    it('validates the id first: an unknown approval is a 404-class error even for guests', () => {
+      const slack = new FakeSlack();
+      const gate = new ApprovalGate({ slack, securityChannel: '#sec', resolveSignerRole: registry });
+      expect(() => gate.signAs('nope', 'stranger')).toThrow(/unknown approvalId/);
+    });
+
+    it('without a resolver it falls back to the legacy trust-the-caller contract', async () => {
+      const slack = new FakeSlack();
+      const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1 });
+      const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+      expect(gate.signAs(approvalId, 'anyone').status).toBe('granted');
+    });
+
+    it('the grant event records the resolved signer identities', async () => {
+      const log = new JsonlFileEventLog({ baseDir: join(dir, 'events-attrib') });
+      const slack = new FakeSlack();
+      const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, resolveSignerRole: registry, eventLog: log });
+      const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+      gate.signAs(approvalId, 'alice');
+      gate.signAs(approvalId, 'bob');
+      await new Promise((r) => setTimeout(r, 30));
+      const kinds: Array<{ kind: string; signerIds?: string[] }> = [];
+      for await (const e of log.query({})) kinds.push(e as { kind: string; signerIds?: string[] });
+      const granted = kinds.find((e) => e.kind === 'approval_granted');
+      expect(granted?.signerIds).toEqual(['alice', 'bob']);
+    });
   });
 });

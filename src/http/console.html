@@ -322,7 +322,9 @@ async function act(a, op) {
   if (op === 'sign') {
     const { res, body } = await api('/approvals/' + encodeURIComponent(a.approvalId) + '/sign', {
       method: 'POST',
-      body: JSON.stringify({ role: 'admin', signerId: speaker }),
+      // Identity contract: send WHO; the server resolves the role from its
+      // own registry. Insufficient privilege comes back as 403.
+      body: JSON.stringify({ signerId: speaker }),
     });
     if (!res.ok) addMsg('agent', 'Sign failed: ' + (body.error || res.status), '<span class="badge error">error</span>');
     else addMsg('agent', 'Signed ' + a.approvalId + ' (' + body.status + ', ' + body.signatures + '/' + body.required + ').', '<span class="badge note">approval</span>');

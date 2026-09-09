@@ -14,7 +14,7 @@ beforeEach(() => {
   platform = createPlatform({
     dataDir: dir,
     runbooks: [{ id: 'restart-all', name: 'restart-all', description: 'restart all pods', destructive: true }],
-    speakerRole: (id) => (id === 'admin-console' ? 'admin' : undefined),
+    speakerRole: (id) => (id === 'admin-console' || id === 'admin-1' || id === 'admin-2' ? 'admin' : undefined),
   });
   handles = [];
 });
@@ -106,7 +106,7 @@ describe('GET /approvals/events (SSE queue stream)', () => {
     await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/sign`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authed() },
-      body: JSON.stringify({ role: 'admin', signerId: 'approver-1' }),
+      body: JSON.stringify({ signerId: 'admin-1' }),
     });
     const frames = await framesPromise;
     // 1: initial connect (empty) · 2: staged · 3: signature counted.
@@ -125,11 +125,11 @@ describe('GET /approvals/events (SSE queue stream)', () => {
     const framesPromise = readApprovalFrames(h.url, 5);
     await new Promise((r) => setTimeout(r, 150));
     const staged = await stageDestructive(h.url);
-    for (const signer of ['approver-1', 'approver-2']) {
+    for (const signer of ['admin-1', 'admin-2']) {
       await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/sign`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authed() },
-        body: JSON.stringify({ role: 'admin', signerId: signer }),
+        body: JSON.stringify({ signerId: signer }),
       });
     }
     await fetch(h.url + `/approvals/${encodeURIComponent(staged.approvalId)}/execute`, {

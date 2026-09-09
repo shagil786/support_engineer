@@ -13,7 +13,7 @@
 import { correlationId } from '../event-log/correlation.js';
 import type { EventLog } from '../event-log/log.js';
 import type { Decision, ProposedAction } from './decision.js';
-import type { SpeakerRole } from './safety-net/rbac.js';
+import type { SpeakerRole, SpeakerRegistry } from './safety-net/rbac.js';
 
 /** Minimal Slack port satisfied by SlackNotifier and test fakes alike.
  *  Everything past `postMessage` is OPTIONAL — capability probing, never
@@ -65,6 +65,21 @@ export interface ApprovalRequestInput {
 
 export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'timeout' | 'executed';
 
+/** Thrown when a signature is attempted with a role the server-resolved
+ *  identity does not hold. Distinct from the unknown-id 404 so HTTP surfaces
+ *  can answer 403 (authenticated, not allowed) honestly. */
+export class SignerRoleError extends Error {}
+
+/** Shared signature-privilege rule: a signer may contribute `wanted` only if
+ *  their resolved role outranks or equals it. One rule for reactions AND the
+ *  REST surface — the trust boundary lives here, next to the ranks. */
+export const ROLE_RANK: Record<SpeakerRole, number> = { admin: 0, engineer: 1, viewer: 2, guest: 3 };
+
+export function roleSatisfies(resolved: SpeakerRole | undefined, wanted: SpeakerRole): boolean {
+  if (!resolved) return false;
+  return ROLE_RANK[resolved] <= ROLE_RANK[wanted];
+}
+
 export interface ApprovalSnapshot {
   status: ApprovalStatus;
   signatures: number;
@@ -85,6 +100,14 @@ export interface ApprovalGateOptions {
    *  🔧 engineer, 👀 viewer, ✅ viewer, ❌ deny. A reaction only counts when
    *  the reactor's actual role is at least the mapped role. */
   reactionRoleMap?: Record<string, SpeakerRole | 'deny'>;
+  /** Server-side signer-identity resolver for the REST surface. When wired,
+   *  signAs() resolves the signer's role HERE (never from the client) and
+   *  rank-checks it; signatures dedupe by resolved identity. When absent,
+   *  signAs falls back to the legacy trust-the-caller contract (tests). */
+  resolveSignerRole?: SpeakerRegistry;
+  /** Roles allowed to contribute an approval signature over REST (default:
+   *  admin only — keep approval power narrow). */
+  approverRoles?: SpeakerRole[];
 }
 
 export interface ReactionEvent {
@@ -153,7 +176,6 @@ const DEFAULT_REACTION_ROLES: Record<string, SpeakerRole | 'deny'> = {
   '❌': 'deny',
   'x': 'deny',
 };
-const ROLE_RANK: Record<SpeakerRole, number> = { admin: 0, engineer: 1, viewer: 2, guest: 3 };
 
 export class ApprovalGate {
   private readonly slack: SlackLike;
@@ -164,6 +186,8 @@ export class ApprovalGate {
   private readonly now: () => number;
   private readonly pending = new Map<string, PendingApproval>();
   private readonly reactionRoles: Record<string, SpeakerRole | 'deny'>;
+  private readonly resolveSignerRole: SpeakerRegistry | undefined;
+  private readonly approverRoles: readonly SpeakerRole[];
   /** 'channel:ts' of posted approval messages → approvalId (bot-token only;
    *  webhook posters have no ref and rely on the single-pending fallback). */
   private readonly deliveries = new Map<string, string>();
@@ -180,6 +204,8 @@ export class ApprovalGate {
     this.eventLog = opts.eventLog;
     this.now = opts.now ?? Date.now;
     this.reactionRoles = opts.reactionRoleMap ?? DEFAULT_REACTION_ROLES;
+    this.resolveSignerRole = opts.resolveSignerRole;
+    this.approverRoles = opts.approverRoles ?? ['admin'];
   }
 
   /** Subscribe to queue mutations (request/grant/deny/timeout/execute).
@@ -294,6 +320,7 @@ export class ApprovalGate {
           kind: 'approval_granted',
           approvalId: p.id,
           signerRole: role,
+          signerIds: [...p.signatures],
         }).catch(() => {});
       }
       // The original message tracks reality: full card re-render (rich
@@ -326,6 +353,27 @@ export class ApprovalGate {
       this.notify();
     }
     return this.snapshot(p);
+  }
+
+  /** Sign with server-side identity resolution — the REST surface's entry
+   *  point. The caller supplies WHO; the gate decides WHAT THAT IS WORTH:
+   *  the signer's role is resolved through `resolveSignerRole` (never taken
+   *  from the client), rank-checked against the approver roles, and the
+   *  signature dedupes by resolved identity. Two distinct failures:
+   *  unknown id → 404-class throw from require(), insufficient role →
+   *  SignerRoleError (403-class). Falls back to the legacy trust-the-caller
+   *  `sign()` only when no resolver is wired (tests). */
+  signAs(approvalId: string, signerId: string): ApprovalSnapshot {
+    // Id first: unknown approvals are a 404-class error regardless of who is
+    // asking (and role resolution must not leak onto nonexistent ids).
+    this.require(approvalId);
+    if (!this.resolveSignerRole) return this.sign(approvalId, 'admin', signerId);
+    const resolved = this.resolveSignerRole(signerId) ?? 'guest';
+    const wanted = this.approverRoles[0] ?? 'admin';
+    if (!roleSatisfies(resolved, wanted)) {
+      throw new SignerRoleError(`role ${resolved} cannot contribute a ${wanted} signature`);
+    }
+    return this.sign(approvalId, resolved, signerId);
   }
 
   deny(approvalId: string): ApprovalSnapshot {

@@ -27,7 +27,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import type { Platform } from '../bootstrap.js';
 import type { PipelineRouting } from '../pipeline/agent-pipeline.js';
-import type { ApprovalSnapshot } from '../governance/approval-gate.js';
+import { SignerRoleError, type ApprovalSnapshot } from '../governance/approval-gate.js';
 import type { IntentEnvelope } from '../event-log/types.js';
 import type { ToolName } from '../support-voice-agent/tools/types.js';
 import { buildEnvelope, ENVELOPE_SOURCES } from '../surface/dispatch.js';
@@ -392,11 +392,14 @@ export async function createHttpServer(
 
     try {
       if (op === 'sign') {
-        const b = parsed.value as { role?: unknown; signerId?: unknown };
-        if (typeof b.role !== 'string' || b.role.trim() === '') {
-          return { status: 400, body: { error: 'role is required (admin | engineer | viewer | guest)' }, createdAt: now() };
+        // Identity contract: the client supplies WHO (signerId); the platform
+        // resolves WHAT THAT IS WORTH via the same speaker registry the
+        // SafetyNet uses. A client-asserted role is never accepted.
+        const b = parsed.value as { signerId?: unknown };
+        if (typeof b.signerId !== 'string' || b.signerId.trim() === '') {
+          return { status: 400, body: { error: 'signerId is required (the server resolves its role)' }, createdAt: now() };
         }
-        const snap: ApprovalSnapshot = platform.pipeline.signApproval(approvalId, b.role, typeof b.signerId === 'string' ? b.signerId : undefined);
+        const snap: ApprovalSnapshot = platform.pipeline.signApprovalAs(approvalId, b.signerId);
         return { status: 200, body: snap, createdAt: now() };
       }
       const b = parsed.value as { correlationId?: unknown };
@@ -406,7 +409,12 @@ export async function createHttpServer(
       const route: PipelineRouting = await platform.pipeline.executeApproved(approvalId, b.correlationId);
       return { status: 200, body: route, createdAt: now() };
     } catch (e) {
-      // Unknown approval ids and gate errors surface as 404s with the reason.
+      // Unknown approval ids surface as 404s with the reason; an insufficient
+      // resolved role is 403 (authenticated but not allowed) — never folded
+      // into 404, which would hide the privilege failure.
+      if (e instanceof SignerRoleError) {
+        return { status: 403, body: { error: e.message }, createdAt: now() };
+      }
       return { status: 404, body: { error: e instanceof Error ? e.message : String(e) }, createdAt: now() };
     }
   }
