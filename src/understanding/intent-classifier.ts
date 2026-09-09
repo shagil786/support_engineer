@@ -56,6 +56,9 @@ const SYSTEM_PROMPT =
   '- unknown: omit subKind\n' +
   'confidence: number 0..1.\n' +
   'For meeting_response questions: set intent.liveData=true when the question asks about CURRENT system state — logs, metrics, status, entries "right now" — that only live tool data can answer; static documents cannot. Otherwise omit it (or false).\n' +
+  'subKind precedence for meeting_response (check in this order, first match wins): mute (stop talking) > critical (declares an incident priority) > feedback > complaint > runbook_offer (the speaker asks the agent to DO an operational action: restart/reboot/clear/rerun/deploy/rollback anything) > question (asks for information) > wake.\n' +
+  '  - An utterance that asks for an action is runbook_offer even if phrased politely or as "can you…" — it is NOT a question and NOT wake.\n' +
+  '  - wake is ONLY an utterance whose purpose is getting the agent\'s attention (contains the wake word); never classify an action request as wake.\n' +
   'entities keys (all optional, omit unknown keys): ticketKeys (string[]), runbookIds (string[]), services (string[]), severity (P0|P1|P2|P3|P4), speakerId (string), runbookDestructive (boolean).\n' +
   'rawContext: { source: meeting|jira|slack|cloudwatch|splunk|cron, ts: number, payload: any } — copy source/ts/payload from the input verbatim.\n' +
   'Example: {"intent":{"kind":"meeting_response","subKind":"question"},"confidence":0.9,"entities":{"services":["api"]},"rawContext":{"source":"meeting","ts":123,"payload":{}}}';

@@ -65,6 +65,13 @@ describe('IntentClassifier system prompt', () => {
     for (const key of ['ticketKeys', 'runbookIds', 'services', 'severity', 'speakerId', 'runbookDestructive']) {
       expect(prompt).toContain(key);
     }
+    // Precedence rule: the deterministic floor (classifier-adapter) checks
+    // intents in a fixed order, offers before questions before wake. Without
+    // the same rule in the prompt, the LLM ceiling classifies action requests
+    // ("please restart all pods") as wake or question — a destructive runbook
+    // then bypasses approval staging. Found live via the operator console.
+    expect(prompt).toContain('subKind precedence for meeting_response');
+    expect(prompt).toContain('runbook_offer');
   });
 });
 
