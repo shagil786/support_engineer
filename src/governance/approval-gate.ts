@@ -63,7 +63,7 @@ export interface ApprovalRequestInput {
   thread?: { channel: string; ts: string };
 }
 
-export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'timeout';
+export type ApprovalStatus = 'pending' | 'granted' | 'denied' | 'timeout' | 'executed';
 
 export interface ApprovalSnapshot {
   status: ApprovalStatus;
@@ -281,6 +281,25 @@ export class ApprovalGate {
     return this.snapshot(p);
   }
 
+  /** Terminal transition: the approved action has run. Leaves the queue (and
+   *  re-renders the Slack card) with a permanent audit trail. */
+  markExecuted(approvalId: string): ApprovalSnapshot {
+    const p = this.require(approvalId);
+    if (p.status === 'granted') {
+      p.status = 'executed';
+      this.rerender(p);
+      void this.eventLog?.append({
+        correlationId: p.id,
+        ts: this.now(),
+        layer: 'governance',
+        source: 'internal',
+        kind: 'approval_executed',
+        approvalId: p.id,
+      }).catch(() => {});
+    }
+    return this.snapshot(p);
+  }
+
   deny(approvalId: string): ApprovalSnapshot {
     const p = this.require(approvalId);
     if (p.status === 'pending') {
@@ -382,7 +401,7 @@ export class ApprovalGate {
     for await (const e of this.eventLog.query({})) {
       if (e.ts >= bootTs) continue;
       if (e.kind === 'approval_request') requested.set(e.approvalId, e.ts);
-      else if (e.kind === 'approval_granted' || e.kind === 'approval_denied' || e.kind === 'approval_timeout') {
+      else if (e.kind === 'approval_granted' || e.kind === 'approval_executed' || e.kind === 'approval_denied' || e.kind === 'approval_timeout') {
         terminal.add(e.approvalId);
       }
     }
@@ -426,9 +445,55 @@ export class ApprovalGate {
     return expired;
   }
 
+  /** The status a pending entry holds at instant t, deadline applied —
+   *  shared by checkTimeouts and listPending so the two never disagree. */
+  private effectiveStatus(p: PendingApproval, t: number): ApprovalStatus {
+    if (p.status !== 'pending') return p.status;
+    if (p.timeoutMs > 0 && t > p.createdAt + p.timeoutMs) return 'timeout';
+    return 'pending';
+  }
+
   status(approvalId: string): ApprovalSnapshot | undefined {
     const p = this.pending.get(approvalId);
     return p ? this.snapshot(p) : undefined;
+  }
+
+  /** Read-only listing of queue-worthy approvals (queue surfaces such as
+   *  GET /approvals). Both pending and granted-but-unexecuted entries are
+   *  listed, each with its `status` — a granted entry vanishing from the
+   *  queue strands the operator: execute is only reachable by id, and the id
+   *  came from the staged utterance response. Denied, timed-out, swept, and
+   *  executed entries have left the queue. Timeout at LIST time is
+   *  evaluated, not stored: an entry whose deadline passed shows 'timeout'
+   *  without anyone having called checkTimeouts yet. */
+  listPending(): Array<{
+    approvalId: string;
+    policyId: string;
+    reason: string;
+    tool: string;
+    args: Record<string, unknown>;
+    signatures: number;
+    required: number;
+    ageMs: number;
+    expires: boolean;
+    status: 'pending' | 'granted';
+  }> {
+    const t = this.now();
+    return [...this.pending.values()]
+      .map((p) => ({ p, status: this.effectiveStatus(p, t) }))
+      .filter((entry): entry is { p: PendingApproval; status: 'pending' | 'granted' } => entry.status === 'pending' || entry.status === 'granted')
+      .map(({ p, status }) => ({
+        approvalId: p.id,
+        policyId: p.policyId,
+        reason: p.decision.reason,
+        tool: p.action.tool,
+        args: p.action.args,
+        signatures: p.signatures.size,
+        required: this.approverCount,
+        ageMs: Math.max(0, t - p.createdAt),
+        expires: p.timeoutMs > 0,
+        status,
+      }));
   }
 
   private require(approvalId: string): PendingApproval {
@@ -449,7 +514,9 @@ export class ApprovalGate {
     const state =
       p.status === 'granted'
         ? { color: 'good', head: '*Approval GRANTED*', sub: `Signatures: ${p.signatures.size}/${this.approverCount}. Executing.` }
-        : p.status === 'denied'
+        : p.status === 'executed'
+          ? { color: 'good', head: '*Approval EXECUTED*', sub: `Action \`${p.action.tool}\` has run under governance.` }
+          : p.status === 'denied'
           ? { color: 'danger', head: '*Approval DENIED*', sub: `Action \`${p.action.tool}\` will not execute.` }
           : p.status === 'timeout'
             ? { color: 'warning', head: '*Approval TIMED OUT*', sub: `Action \`${p.action.tool}\` was not approved in time.` }
@@ -484,7 +551,9 @@ export class ApprovalGate {
     const textLine =
       p.status === 'granted'
         ? `*Approval GRANTED* (${p.policyId}) — ${p.signatures.size}/${this.approverCount} signatures. Executing.`
-        : p.status === 'denied'
+        : p.status === 'executed'
+          ? `*Approval EXECUTED* (${p.policyId}) — action \`${p.action.tool}\` has run under governance.`
+          : p.status === 'denied'
           ? `*Approval DENIED* (${p.policyId}) — action \`${p.action.tool}\` will not execute.`
           : p.status === 'timeout'
             ? `*Approval TIMED OUT* (${p.policyId}) — action \`${p.action.tool}\` will not execute. Re-request if still needed.`
@@ -493,7 +562,7 @@ export class ApprovalGate {
       void this.slack.updateRichMessage(ref.channel, ref.ts, this.renderRich(p)).catch(() => this.announce(p, textLine));
       return;
     }
-    this.announce(p, textLine, p.status === 'granted' || p.status === 'pending' ? 'threaded' : 'ladder');
+    this.announce(p, textLine, p.status === 'granted' || p.status === 'executed' || p.status === 'pending' ? 'threaded' : 'ladder');
   }
 
   /** Fire-and-forget follow-up (deny/timeout): sync callers must never block

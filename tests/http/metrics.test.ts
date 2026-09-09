@@ -29,6 +29,7 @@ describe('renderMetrics', () => {
     await log.append({ correlationId: cid, ts: 12, layer: 'governance', source: 'internal', kind: 'approval_granted', approvalId: 'a1', signerRole: 'admin' });
     await log.append({ correlationId: cid, ts: 13, layer: 'governance', source: 'internal', kind: 'approval_timeout', approvalId: 'a2' });
     await log.append({ correlationId: cid, ts: 14, layer: 'governance', source: 'slack', kind: 'approval_denied', approvalId: 'a3' });
+    await log.append({ correlationId: cid, ts: 15, layer: 'governance', source: 'internal', kind: 'approval_executed', approvalId: 'a1' });
 
     const text = await renderMetrics(log);
 
@@ -54,6 +55,7 @@ describe('renderMetrics', () => {
     expect(text).toContain('support_agent_approvals_total{outcome="granted"} 1');
     expect(text).toContain('support_agent_approvals_total{outcome="denied"} 1');
     expect(text).toContain('support_agent_approvals_total{outcome="timed_out"} 1');
+    expect(text).toContain('support_agent_approvals_total{outcome="executed"} 1');
   });
 
   it('renders a valid (empty) body when the log has no events', async () => {

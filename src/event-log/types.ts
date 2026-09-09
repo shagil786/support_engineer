@@ -69,6 +69,7 @@ export type DecisionEvent =
   | (BaseEvent & { kind: 'safety_net'; vetoed: boolean; check: string; reason: string })
   | (BaseEvent & { kind: 'approval_request'; approvalId: string; policyId: string; approver_count: number })
   | (BaseEvent & { kind: 'approval_granted'; approvalId: string; signerRole: string })
+  | (BaseEvent & { kind: 'approval_executed'; approvalId: string })
   | (BaseEvent & { kind: 'approval_timeout'; approvalId: string })
   | (BaseEvent & { kind: 'approval_denied'; approvalId: string })
   | (BaseEvent & { kind: 'tool_call'; tool: ToolName; args: unknown; result: ToolResult; latencyMs: number; attempts: number })
@@ -107,7 +108,7 @@ export type DecisionEvent =
 
 const KINDS: readonly DecisionEvent['kind'][] = [
   'understanding', 'grounded_answer', 'governance', 'safety_net',
-  'approval_request', 'approval_granted', 'approval_timeout', 'approval_denied',
+  'approval_request', 'approval_granted', 'approval_executed', 'approval_timeout', 'approval_denied',
   'tool_call', 'agent_outcome', 'llm_call',
   'policy_suggested', 'policy_promoted', 'knowledge_extracted',
 ];

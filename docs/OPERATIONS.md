@@ -97,11 +97,14 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   `HTTP_PORT` (default 8787) `HTTP_HOST` (default 127.0.0.1),
   `RATE_LIMIT_PER_MINUTE` (default 120/credential), idempotency keys honored.
   Routes: `POST /utterance` `{ text, speakerId }`, `POST /ask`
-  `{ question }`, `POST /envelope` (structured webhook deliveries), approval
-  grant/deny/execute endpoints. `GET /metrics` (same bearer auth) exposes the
+  `{ question }`, `POST /envelope` (structured webhook deliveries),
+  `GET /approvals` (the queue listing; entries carry `status` of
+  `pending` or `granted` plus the `correlationId` execute needs), approval
+  sign/execute endpoints. `GET /metrics` (same bearer auth) exposes the
   Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
   governed-run outcomes, policy decisions, SafetyNet vetoes, and approval
-  lifecycle counts — aggregated live from the event log.
+  lifecycle counts (`requested`/`granted`/`denied`/`timed_out`/`executed`) —
+  aggregated live from the event log.
 
 - **Monitoring**: scrape `GET /metrics` with Prometheus (bearer token in the
   scrape config), then import `deploy/grafana/support-agent-dashboard.json`

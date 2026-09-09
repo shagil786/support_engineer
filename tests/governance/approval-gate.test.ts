@@ -27,6 +27,42 @@ afterEach(() => {
 });
 
 describe('ApprovalGate', () => {
+  it('listPending: lists queue-worthy entries with tool/args/progress; timed-out leaves; granted stays until executed', async () => {
+    let t = 1_000_000;
+    const slack = new FakeSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, now: () => t, defaultTimeoutMs: 5_000 });
+    const a = await gate.request({ policyId: 'p1', decision, action });
+    const b = await gate.request({ policyId: 'p2', decision, action: { tool: 'jira_create_issue', args: { summary: 'x' } } });
+
+    let list = gate.listPending();
+    expect(list).toHaveLength(2);
+    const first = list[0];
+    if (!first) throw new Error('expected a listed approval');
+    expect(first.approvalId).toBe(a.approvalId);
+    expect(first.tool).toBe('execute_runbook_script');
+    expect(first.args).toEqual({ script_name: 'restart-all' });
+    expect(first.reason).toBe('destructive');
+    expect(first.signatures).toBe(0);
+    expect(first.required).toBe(2);
+    expect(first.expires).toBe(true);
+    expect(first.status).toBe('pending');
+
+    // Grant one fully: it STAYS in the queue with status 'granted' —
+    // vanishing would strand the operator (execute is id-addressed and the
+    // id came from the staged response).
+    gate.sign(a.approvalId, 'admin');
+    gate.sign(a.approvalId, 'admin2');
+    // Timeout the other AT LIST TIME — no one called checkTimeouts, but the
+    // deadline passed, so the queue must not show it at all.
+    t += 6_000;
+    list = gate.listPending();
+    expect(list).toHaveLength(1);
+    expect(list[0]?.approvalId).toBe(a.approvalId);
+    expect(list[0]?.status).toBe('granted');
+    // checkTimeouts agrees: only the timed-out one expires.
+    expect(gate.checkTimeouts()).toEqual([b.approvalId]);
+  });
+
   it('posts a Slack message and tracks approvals until M-of-N', async () => {
     const slack = new FakeSlack();
     const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2 });

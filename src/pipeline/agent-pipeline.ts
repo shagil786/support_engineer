@@ -358,6 +358,18 @@ export class OrchestratedPipeline {
     return this.etiquette.isMuted(ts);
   }
 
+  /** The pending approval queue (hosts/tests): the gate is the single owner
+   *  of the state; this is the read-only passthrough queue surfaces use. */
+  listPendingApprovals() {
+    return this.governed.listPendingApprovals();
+  }
+
+  /** The correlation id a staged action executes under (queue surfaces pass
+   *  it to executeApproved). Unknown ids return undefined. */
+  stagedCorrelation(approvalId: string): string | undefined {
+    return this.governed.stagedCorrelation(approvalId);
+  }
+
   /** Record a signature on a pending approval. */
   signApproval(approvalId: string, signerRole: string, signerId?: string): ApprovalSnapshot {
     return this.approvals.sign(approvalId, signerRole, signerId);

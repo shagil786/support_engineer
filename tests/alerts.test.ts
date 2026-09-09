@@ -115,6 +115,10 @@ describe('Prometheus alert rules ↔ /metrics contract', () => {
     for (const outcome of ['requested', 'granted', 'denied', 'timed_out']) {
       expect(backlog!.expr, `backlog must subtract outcome="${outcome}"`).toContain(`outcome="${outcome}"`);
     }
+    // executed is a SUBSET of granted (an approval is granted before it can
+    // execute) — subtracting it too would double-count and understate, even
+    // go negative. The queue-drain alerting stays granted-based.
+    expect(backlog!.expr).not.toContain('outcome="executed"');
   });
 
   it('saturation alerting uses the two real failure signals (error codes, not guesses)', async () => {

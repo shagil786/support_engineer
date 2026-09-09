@@ -78,6 +78,7 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   let approvalsGranted = 0;
   let approvalsDenied = 0;
   let approvalsTimedOut = 0;
+  let approvalsExecuted = 0;
 
   for await (const e of log.query({})) {
     switch (e.kind) {
@@ -121,6 +122,9 @@ export async function renderMetrics(log: EventLog): Promise<string> {
         break;
       case 'approval_denied':
         approvalsDenied += 1;
+        break;
+      case 'approval_executed':
+        approvalsExecuted += 1;
         break;
       default:
         break;
@@ -179,6 +183,7 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   out.push(`support_agent_approvals_total{outcome="granted"} ${approvalsGranted}`);
   out.push(`support_agent_approvals_total{outcome="denied"} ${approvalsDenied}`);
   out.push(`support_agent_approvals_total{outcome="timed_out"} ${approvalsTimedOut}`);
+  out.push(`support_agent_approvals_total{outcome="executed"} ${approvalsExecuted}`);
 
   return `${out.join('\n')}\n`;
 }

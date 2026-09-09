@@ -99,7 +99,7 @@ function fakeGate(trace: string[]) {
     action: ProposedAction;
     thread?: { channel: string; ts: string };
   }> = [];
-  const status = new Map<string, 'pending' | 'granted' | 'denied'>();
+  const status = new Map<string, 'pending' | 'granted' | 'denied' | 'executed'>();
   let counter = 0;
   const gate = {
     request: async (input: {
@@ -115,6 +115,10 @@ function fakeGate(trace: string[]) {
       return { approvalId: id };
     },
     status: (id: string) => (status.has(id) ? { status: status.get(id) } : undefined),
+    markExecuted: (id: string) => {
+      if (status.get(id) === 'granted') status.set(id, 'executed');
+      return { status: status.get(id) };
+    },
   };
   return {
     approvals: gate as unknown as GovernedDispatchOptions['approvals'],

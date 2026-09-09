@@ -121,6 +121,18 @@ export class GovernedDispatch {
     return { kind: 'executed', routing: { routed: 'pipeline', correlationId: input.cid, ok: r.ok, reason: r.reason } };
   }
 
+  /** The correlation id a staged action will execute under (queue surfaces
+   *  pass it to executeApproved). Unknown ids return undefined. */
+  stagedCorrelation(approvalId: string): string | undefined {
+    return this.staged.get(approvalId)?.correlationId;
+  }
+
+  /** Read-only pending-approval listing (queue surfaces) — delegated to the
+   *  gate, the single owner of the approval state. */
+  listPendingApprovals() {
+    return this.approvals.listPending();
+  }
+
   /** Execute a staged action once its approval is granted. */
   async executeApproved(approvalId: string, correlationId: string): Promise<PipelineRouting> {
     const staged = this.staged.get(approvalId);
@@ -145,6 +157,9 @@ export class GovernedDispatch {
       },
       bundle: await this.assembleFor(unknownEnvelope(cid)),
     });
+    // Terminal lifecycle: executed (ok or not), so the queue drains and the
+    // audit spine records the final state.
+    this.approvals.markExecuted(staged.approvalId);
     await this.outcomeRecorder?.record(cid);
     return { routed: 'pipeline', correlationId: cid, ok: r.ok, reason: r.reason };
   }
