@@ -19,7 +19,7 @@
  * envelope. Utterance responses carry the full PipelineRouting so callers
  * see vetoes, denials, staged approvals, and legacy fallbacks honestly.
  */
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +32,7 @@ import type { IntentEnvelope } from '../event-log/types.js';
 import type { ToolName } from '../support-voice-agent/tools/types.js';
 import { buildEnvelope, ENVELOPE_SOURCES } from '../surface/dispatch.js';
 import { renderMetrics } from './metrics.js';
+import { createSlackHandlers } from './slack.js';
 
 export interface HttpServerOptions {
   /** Bearer tokens for /utterance and /approvals/*. Empty/missing → those
@@ -87,13 +88,6 @@ interface Body {
   error?: 'too-large';
 }
 
-/** The inner JSON of a Slack interactive-component POST's `payload` field. */
-interface InteractivePayload {
-  type?: string;
-  user?: { id?: string };
-  actions?: Array<{ action_id?: string }>;
-}
-
 const MAX_DEFAULT = 1024 * 1024;
 const DEFAULT_RATE_LIMIT_PER_MIN = 120;
 /** SSE keep-alive cadence: frequent enough to hold open idling proxies, rare
@@ -103,11 +97,6 @@ const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const DEFAULT_EXECUTE_REPLAY_TTL_MS = 5 * 60_000;
 /** Idempotency caches never grow unbounded: TTL sweep + hard cap. */
 const IDEMPOTENCY_MAX_ENTRIES = 10_000;
-/** Slack retry dedupe window: TTL-first, then a hard cap (a burst of
- *  unique events must not grow the map unbounded). */
-const SLACK_DEDUPE_TTL_MS = 5 * 60_000;
-const SLACK_DEDUPE_MAX = 5_000;
-
 export async function createHttpServer(
   platform: Platform,
   opts: HttpServerOptions = {},
@@ -118,6 +107,9 @@ export async function createHttpServer(
   const signingSecret = opts.slackSigningSecret;
 
   const seenSlackEvents = new Map<string, number>();
+  // Slack webhook handlers live in ./slack.ts (HMAC verification, Events API
+  // routing, interactive clicks). This closure owns the dedupe map they use.
+  const slack = createSlackHandlers({ platform, signingSecret, maxBody, now, reply, readBody, seenSlackEvents });
 
   // ---- Rate limiting: per-credential token buckets. Bearer routes key on
   // the VALIDATED token (invalid tokens never mint a bucket); Slack routes
@@ -419,136 +411,7 @@ export async function createHttpServer(
     }
   }
 
-  /** Slack interactive components (button clicks) arrive here as
-   *  application/x-www-form-urlencoded with a `payload` field containing
-   *  JSON. Signature is computed over the RAW body (the urlencoding must not
-   *  be decoded before verification). */
-  async function handleSlackInteractive(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!signingSecret) {
-      return reply(res, 503, { error: 'slack signing secret not configured; refusing to serve unverified interactions' });
-    }
-    const body = await readBody(req, maxBody);
-    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
-    const sig = header(req, 'x-slack-signature');
-    const ts = header(req, 'x-slack-timestamp');
-    if (!sig || !ts || !verifySlackSignature(signingSecret, sig, ts, body.raw, now)) {
-      return reply(res, 401, { error: 'invalid slack signature' });
-    }
-    let payload: InteractivePayload | null = null;
-    try {
-      const params = new URLSearchParams(body.raw);
-      payload = JSON.parse(params.get('payload') ?? 'null') as InteractivePayload | null;
-    } catch {
-      return reply(res, 400, { error: 'malformed interactive payload' });
-    }
-    if (!payload || payload.type !== 'block_actions') {
-      return reply(res, 200, { ok: true, ignored: 'interaction type not handled' });
-    }
-    const userId = payload.user?.id ?? 'unknown';
-    const results = [];
-    for (const action of payload.actions ?? []) {
-      if (!action.action_id) continue;
-      results.push(
-        await platform.approvals.handleAction({
-          actionId: action.action_id,
-          userId,
-          userRole: userId !== 'unknown' ? platform.speakerRole(userId) : undefined,
-        }),
-      );
-    }
-    return reply(res, 200, { ok: true, results });
-  }
-
-  async function handleSlack(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!signingSecret) {
-      return reply(res, 503, { error: 'slack signing secret not configured; refusing to serve unverified events' });
-    }
-    const body = await readBody(req, maxBody);
-    if (body.error === 'too-large') return reply(res, 413, { error: 'body too large' });
-
-    const sig = header(req, 'x-slack-signature');
-    const ts = header(req, 'x-slack-timestamp');
-    if (!sig || !ts || !verifySlackSignature(signingSecret, sig, ts, body.raw, now)) {
-      return reply(res, 401, { error: 'invalid slack signature' });
-    }
-
-    const parsed = parseJson(body);
-    if (!parsed.ok) return reply(res, 400, { error: parsed.error });
-    const payload = parsed.value as {
-      type?: string;
-      challenge?: string;
-      event_id?: string;
-      event?: {
-        type?: string;
-        bot_id?: unknown;
-        user?: string;
-        text?: unknown;
-        ts?: string;
-        event_ts?: string;
-        channel?: string;
-        thread_ts?: string;
-        reaction?: string;
-        item?: { type?: string; channel?: string; ts?: string };
-      };
-    };
-
-    if (payload.type === 'url_verification') {
-      return reply(res, 200, { challenge: typeof payload.challenge === 'string' ? payload.challenge : '' });
-    }
-    if (payload.type !== 'event_callback') return reply(res, 200, { ok: true, ignored: 'unknown payload type' });
-
-    const event = payload.event;
-    if (!event) return reply(res, 200, { ok: true, ignored: 'no event' });
-
-    // Emoji sign-off: reaction events route to the ApprovalGate. The role is
-    // resolved SERVER-SIDE from the Slack user id via the platform resolver
-    // (unknown users are guests — a reaction is a claim, not a credential).
-    if (event.type === 'reaction_added' || event.type === 'reaction_removed') {
-      const reaction = typeof event.reaction === 'string' ? event.reaction : '';
-      const result = await platform.approvals.handleReaction({
-        type: event.type,
-        reaction,
-        userId: event.user ?? 'unknown',
-        userRole: event.user ? platform.speakerRole(event.user) : undefined,
-        ...(event.item?.channel ? { channel: event.item.channel } : {}),
-        ...(event.item?.ts ? { ts: event.item.ts } : {}),
-      });
-      return reply(res, 200, { ok: true, ...result });
-    }
-
-    if (event.type !== 'app_mention' && event.type !== 'message') {
-      return reply(res, 200, { ok: true, ignored: 'event type not handled' });
-    }
-    // Never respond to bots (including ourselves) — classic loop hazard.
-    if (event.bot_id !== undefined) return reply(res, 200, { ok: true, ignored: 'bot-authored event' });
-    const text = typeof event.text === 'string' ? event.text.trim() : '';
-    if (text === '') return reply(res, 200, { ok: true, ignored: 'empty text' });
-
-    // Slack retries deliveries until acked; event_id dedupe makes that safe.
-    if (payload.event_id !== undefined) {
-      if (seenSlackEvents.has(payload.event_id)) {
-        return reply(res, 200, { ok: true, deduped: true });
-      }
-      seenSlackEvents.set(payload.event_id, now());
-      if (seenSlackEvents.size > SLACK_DEDUPE_MAX) pruneDedupe(seenSlackEvents, now());
-    }
-
-    const speaker = typeof event.user === 'string' && event.user !== '' ? event.user : 'slack-user';
-    // Meeting targeting: a threaded message (thread_ts) is part of a specific
-    // conversation — memory and approvals scope to the channel, not the user.
-    const meetingChannel = typeof event.channel === 'string' && event.channel.trim() !== '' ? event.channel.trim() : undefined;
-    // The thread root: Slack sets thread_ts on every reply in a thread; when
-    // absent (a top-of-thread message that starts the conversation) the
-    // message's own ts IS the thread root.
-    const threadTs = typeof event.thread_ts === 'string' && event.thread_ts.trim() !== '' ? event.thread_ts.trim() : (typeof event.ts === 'string' && event.ts.trim() !== '' ? event.ts.trim() : undefined);
-    try {
-      await platform.pipeline.processUtterance(speaker, text, now(), meetingChannel, threadTs);
-    } catch {
-      // Already logged by the pipeline's own degradation; ack regardless so
-      // Slack does not retry an event we cannot process.
-    }
-    return reply(res, 200, { ok: true });
-  }
+  const { handleSlack, handleSlackInteractive } = slack;
 
 /* ------------------- rate limiting + idempotency ------------------- */
 
@@ -723,17 +586,6 @@ function hasToken(tokens: Set<string>, presented: string): boolean {
   return false;
 }
 
-/** Slack v0 scheme: sig = HMAC-SHA256(secret, "v0:ts:body"), with a 5-minute
- *  replay window on the timestamp. */
-function verifySlackSignature(secret: string, presented: string, ts: string, rawBody: string, now: () => number): boolean {
-  const tsNum = Number(ts);
-  if (!Number.isFinite(tsNum) || Math.abs(now() / 1000 - tsNum) > 300) return false;
-  const expected = 'v0=' + createHmac('sha256', secret).update(`v0:${ts}:${rawBody}`).digest('hex');
-  const a = Buffer.from(expected, 'utf8');
-  const b = Buffer.from(presented, 'utf8');
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 function readBody(req: IncomingMessage, maxBytes: number, preRead?: string): Promise<Body> {
   if (preRead !== undefined) {
     return Promise.resolve(preRead.length > maxBytes ? { json: undefined, raw: '', error: 'too-large' } : { json: undefined, raw: preRead });
@@ -780,16 +632,4 @@ function parseJson(body: Body): { ok: true; value: unknown } | { ok: false; erro
 function header(req: IncomingMessage, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
-}
-
-function pruneDedupe(map: Map<string, number>, nowMs: number): void {
-  // TTL-first, then hard cap (a burst of unique events must not grow the map).
-  for (const [id, seenAt] of map) {
-    if (nowMs - seenAt > SLACK_DEDUPE_TTL_MS) map.delete(id);
-  }
-  const ids = [...map.entries()].sort((x, y) => x[1] - y[1]);
-  while (ids.length > SLACK_DEDUPE_MAX) {
-    const oldest = ids.shift();
-    if (oldest) map.delete(oldest[0]);
-  }
 }
