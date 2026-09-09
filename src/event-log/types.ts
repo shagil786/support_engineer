@@ -32,6 +32,10 @@ export interface IntentEnvelope {
      *  Additive, optional flag — envelopes without it fall back to the
      *  id-scope heuristic in policy evaluation. */
     runbookDestructive?: boolean;
+    /** How the resolver picked the action (id/name/kb) — resolution
+     *  provenance on the spine, so an audit can tell an exact match from a
+     *  retrieval match. */
+    runbookMatchedBy?: 'id' | 'name' | 'kb';
   };
   rawContext: { source: EventSource; ts: number; payload: unknown };
 }

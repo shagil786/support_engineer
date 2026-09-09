@@ -345,6 +345,9 @@ export function createPlatform(opts: PlatformOptions): Platform {
     episodic,
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir, ...(now ? { now } : {}) }),
     runbookProvider,
+    // Tier-3 runbook resolution shares the citation engine's hybrid scorer
+    // (same KB, same BM25+vector→RRF→rerank signals).
+    runbookKnowledge: knowledge,
     ...(opts.deliverSpeech
       ? {
           deliverSpeech: (text: string, target?: { channel: string; threadTs: string }) => {

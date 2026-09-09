@@ -78,11 +78,11 @@ describe('shapeProposal', () => {
 
 describe('runbookProposal', () => {
   it('a resolved offer becomes an execute proposal for the concrete action id', () => {
-    expect(runbookProposal({ id: 'restart-all', destructive: true })).toEqual({
+    expect(runbookProposal({ id: 'restart-all', destructive: true, matchedBy: 'id' })).toEqual({
       tool: 'execute_runbook_script',
       args: { script_name: 'restart-all' },
     });
-    expect(runbookProposal({ id: 'clear-cache', destructive: false })).toEqual({
+    expect(runbookProposal({ id: 'clear-cache', destructive: false, matchedBy: 'id' })).toEqual({
       tool: 'execute_runbook_script',
       args: { script_name: 'clear-cache' },
     });

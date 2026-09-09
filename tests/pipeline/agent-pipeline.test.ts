@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MeetingNotes } from '../../src/meeting/notes';
 import { InMemoryRunbookProvider } from '../../src/support-voice-agent/integrations/runbook';
+import { FileBackedKnowledgeBase } from '../../src/understanding/knowledge/knowledge-base';
+import { runbookToDoc } from '../../src/bootstrap/runbooks-kb';
 import { OpenAiCompatibleClient } from '../../src/support-voice-agent/tools/llm';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
 import { LegacyClassifierAdapter } from '../../src/understanding/legacy/classifier-adapter';
@@ -77,16 +79,18 @@ function harness(opts: HarnessOptions = {}) {
     },
   };
   const approvals = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, eventLog });
-  const runbookProvider = new InMemoryRunbookProvider(
-    [
-      { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
-      { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
-    ],
-    async (actionId) => {
-      runbookRuns.push(actionId);
-      return { actionId, ok: true, output: `${actionId} done` };
-    },
-  );
+  const runbookActions = [
+    { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
+    { id: 'clear-cache', name: 'clear-cache', description: 'clear the api cache', destructive: false },
+  ];
+  const runbookProvider = new InMemoryRunbookProvider(runbookActions, async (actionId) => {
+    runbookRuns.push(actionId);
+    return { actionId, ok: true, output: `${actionId} done` };
+  });
+  // Tier-3 resolution uses the real hybrid scorer over the catalog's KB docs
+  // (same wiring as production bootstrap).
+  const runbookKb = new FileBackedKnowledgeBase({ path: join(dir, 'runbook-kb.json') });
+  for (const a of runbookActions) runbookKb.ingest(runbookToDoc(a));
   const toolRunner = new ToolRunner({
     context: { runbookProvider, logProvider, speak: (t) => spoken.push(t) },
     safetyNet,
@@ -114,6 +118,7 @@ function harness(opts: HarnessOptions = {}) {
     eventLog,
     outcomeRecorder,
     runbookProvider,
+    runbookKnowledge: runbookKb,
     deliverSpeech: (text) => spoken.push(text),
     now: () => 1_000_000,
   });
@@ -150,7 +155,7 @@ describe('OrchestratedPipeline', () => {
     const { pipeline, eventLog, outcomesDir } = harness({ logProvider });
     const r = await pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
     expect(r.routed).toBe('pipeline');
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
 
     const ks = await kinds(eventLog, r.correlationId);
     expect(ks).toContain('understanding');
@@ -175,8 +180,8 @@ describe('OrchestratedPipeline', () => {
     expect(runbookRuns).toEqual([]); // nothing executed yet
 
     // Two admin signatures grant it; then the host re-dispatches.
-    pipeline.signApproval(r.approvalId ?? '', 'admin');
-    const signed = pipeline.signApproval(r.approvalId ?? '', 'admin');
+    pipeline.signApprovalAs(r.approvalId ?? '', 'signer-1');
+    const signed = pipeline.signApprovalAs(r.approvalId ?? '', 'signer-2');
     expect(signed.status).toBe('granted');
 
     const done = await pipeline.executeApproved(r.approvalId ?? '', 'admin1');
@@ -188,27 +193,58 @@ describe('OrchestratedPipeline', () => {
     const { pipeline } = harness();
     const r = await pipeline.processUtterance('intern1', 'agent, can you restart the checkout pod?', 500);
     expect(r.approvalStatus).toBe('pending');
-    // Non-admin signature cannot grant: signatures are roles counted by the gate.
-    expect(pipeline.signApproval(r.approvalId ?? '', 'admin').status).toBe('pending');
+    // Non-admin signature cannot grant: signatures dedupe by identity and
+    // M-of-N needs two.
+    expect(pipeline.signApprovalAs(r.approvalId ?? '', 'signer-1').status).toBe('pending');
   });
 
   it('executes a non-destructive runbook offer directly', async () => {
     const { pipeline, runbookRuns } = harness();
     const r = await pipeline.processUtterance('u1', 'agent, can you clear the api cache?', 500);
     expect(r.routed).toBe('pipeline');
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(runbookRuns).toEqual(['clear-cache']);
   });
 
-  it('degrades honestly when the pipeline throws (LLM transport failure)', async () => {
-    const failingLlm = new OpenAiCompatibleClient({
+  it('stages governed approvals from the deterministic floor while the provider is 429-saturated', async () => {
+    const saturated = new OpenAiCompatibleClient({
       baseUrl: 'https://api.test/v1',
       apiKey: 'k',
       model: 'm',
-      request: (() => Promise.reject(new Error('ECONNRESET'))) as typeof fetch,
+      request: (() =>
+        Promise.resolve(
+          new Response('rate limited', { status: 429, headers: { 'content-type': 'text/plain' } }),
+        )) as typeof fetch,
+      maxRetries: 0,
+      retryBackoffMs: 1,
     });
-    const logProvider = { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) };
-    const { pipeline } = harness({ llm: failingLlm, logProvider });
+    const { pipeline, eventLog } = harness({ llm: saturated });
+
+    // Before the fix, this exact scenario 500'd: the transport error
+    // propagated out of classification and the pipeline hard-failed the
+    // utterance ("pipeline failed: LLM HTTP 429") even though a safe floor
+    // existed. Now: floor classification → governed staging.
+    const r = await pipeline.processUtterance('u1', 'agent, can you restart the checkout pod?', 500);
+    expect(r.routed).toBe('pipeline');
+    expect(r.approvalId, JSON.stringify(r)).toBeDefined();
+    expect(r.approvalStatus).toBe('pending');
+    // Provenance on the spine: the understanding event shows the floor
+    // served the request AND WHY (via:http_error), joined by correlation id.
+    const ks = await kinds(eventLog, r.correlationId);
+    expect(ks).toContain('understanding');
+    let understanding: { contextBundleRef?: string } | undefined;
+    for await (const e of eventLog.query({ correlationId: r.correlationId })) {
+      if (e.kind === 'understanding') understanding = e as unknown as { contextBundleRef?: string };
+    }
+    expect(understanding?.contextBundleRef).toBe('via:http_error');
+  });
+
+  it('still speaks an honest failure when a genuine (non-provider) bug breaks the pipeline', async () => {
+    const bugLlm: OpenAiCompatibleClient = {
+      isWired: () => true,
+      complete: () => Promise.reject(new Error('TypeError: wiring bug')),
+    } as unknown as OpenAiCompatibleClient;
+    const { pipeline } = harness({ llm: bugLlm });
 
     const r = await pipeline.processUtterance('u1', 'agent, can you check the error logs for the api?', 500);
     expect(r.routed).toBe('legacy');
@@ -236,7 +272,7 @@ describe('OrchestratedPipeline', () => {
     const env = anomalyToEnvelope({ severity: 'P1', summary: 'error rate spike on checkout', source: 'cloudwatch', ts: 1 });
     const r = await pipeline.processEnvelope(env, { tool: 'meeting_interrupt', args: { message: 'P1: error rate spike on checkout' } });
     expect(r.routed).toBe('pipeline');
-    expect(r.ok).toBe(true);
+    expect(r.ok, JSON.stringify(r)).toBe(true);
     expect(spoken.join(' ')).toContain('urgent alert');
   });
 

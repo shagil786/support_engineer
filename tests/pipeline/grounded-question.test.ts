@@ -9,6 +9,7 @@ import { LegacyClassifierAdapter } from '../../src/understanding/legacy/classifi
 import { ContextAssembler } from '../../src/understanding/context-assembler';
 import { EpisodicMemory } from '../../src/understanding/memory/episodic';
 import { FileBackedKnowledgeBase } from '../../src/understanding/knowledge/knowledge-base';
+import { runbookToDoc } from '../../src/bootstrap/runbooks-kb';
 import { GroundedAnswerer } from '../../src/understanding/grounded-answerer';
 import { PolicyEngine } from '../../src/governance/policy-engine';
 import { SafetyNet } from '../../src/governance/safety-net';
@@ -74,9 +75,12 @@ async function harness(opts: Opts = {}) {
       return { provider: 'splunk', rows: [{ message: '502 spike' }], error: undefined };
     },
   };
-  const runbookProvider = new InMemoryRunbookProvider([
+  const runbookActions = [
     { id: 'restart-all', name: 'restart-all', description: 'restart the checkout pod', destructive: true },
-  ]);
+  ];
+  const runbookProvider = new InMemoryRunbookProvider(runbookActions);
+  const runbookKb = new FileBackedKnowledgeBase({ path: join(dir, 'runbook-kb.json') });
+  for (const a of runbookActions) runbookKb.ingest(runbookToDoc(a));
   const toolRunner = new ToolRunner({
     context: {
       runbookProvider,
@@ -134,6 +138,7 @@ async function harness(opts: Opts = {}) {
     eventLog,
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir }),
     runbookProvider,
+    runbookKnowledge: runbookKb,
     deliverSpeech: (text, target) => (opts.deliver ? opts.deliver(text, target) : spoken.push(text)),
     answerer,
     now: () => 1_000_000,

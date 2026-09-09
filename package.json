@@ -18,6 +18,7 @@
     "learn:once": "LEARNING_ENABLED=true tsx scripts/learning-cron.ts --once",
     "prepare": "test -d .git && git config core.hooksPath .githooks || true",
     "demo": "tsx demo/cli.ts",
+    "probe:llm-chaos": "tsx scripts/llm-chaos-probe.ts",
     "smoke:container": "bash scripts/container-smoke.sh"
   },
   "devDependencies": {

@@ -127,14 +127,30 @@ export class DispatchCore {
     ctx: DispatchContext,
   ): Promise<PipelineRouting> {
     const wanted = envelope.entities.runbookIds?.[0];
-    const resolved = await this.runbooks.resolve(wanted, ctx.text);
-    if (!resolved) {
+    const resolution = await this.runbooks.resolve(wanted, ctx.text);
+    if (resolution === undefined) {
       return { routed: 'pipeline', correlationId: cid, ok: false, reason: 'no matching runbook action' };
     }
+    if (resolution.kind === 'ambiguous') {
+      // The resolver found near-misses below its confidence bands. Refuse
+      // with the closest ids — the speaker can name one explicitly.
+      return {
+        routed: 'pipeline',
+        correlationId: cid,
+        ok: false,
+        reason: `ambiguous runbook request — closest actions: ${resolution.closest.join(', ')}`,
+      };
+    }
+    const resolved = resolution.match;
     const proposal = runbookProposal(resolved);
     const enriched: IntentEnvelope = {
       ...envelope,
-      entities: { ...envelope.entities, runbookIds: [resolved.id], runbookDestructive: resolved.destructive },
+      entities: {
+        ...envelope.entities,
+        runbookIds: [resolved.id],
+        runbookDestructive: resolved.destructive,
+        runbookMatchedBy: resolved.matchedBy,
+      },
     };
 
     const outcome = await this.governed.run({

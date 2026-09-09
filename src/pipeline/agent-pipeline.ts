@@ -47,7 +47,7 @@ import type { ToolRunner } from '../execution/tool-runner.js';
 import type { OutcomeRecorder } from '../learning/outcome-recorder.js';
 import { GovernedDispatch } from './governed-dispatch.js';
 import { GroundedQuestionStage } from './grounded-question.js';
-import { RunbookResolver } from './runbook-resolver.js';
+import { RunbookResolver, type RunbookSearchPort } from './runbook-resolver.js';
 import { routeIntent } from './route.js';
 import { EtiquetteGate } from './etiquette-gate.js';
 import { ActionEtiquetteStage } from './action-etiquette.js';
@@ -74,6 +74,11 @@ export interface OrchestratedPipelineOptions {
   eventLog: EventLog;
   outcomeRecorder?: OutcomeRecorder;
   runbookProvider?: RunbookProvider;
+  /** Hybrid search over the catalog's own KB docs (runbooks-kb ingest) —
+   *  tier 3 of runbook resolution, sharing the citation engine's scorer so
+   *  fuzzy match precision comes from the same BM25+vector→RRF→rerank
+   *  signals. Unwired → resolution is exact id/name only. */
+  runbookKnowledge?: RunbookSearchPort;
   /** Where pipeline-generated speech is delivered (TTS bridge). */
   deliverSpeech?: (text: string, target?: { channel: string; threadTs: string }) => void;
   /** How long "agent, shut up" mutes the agent (EtiquetteGate default: 5 min,
@@ -141,7 +146,7 @@ export class OrchestratedPipeline {
       deliverSpeech: this.deliverSpeech,
       now: this.now,
     });
-    this.runbooks = new RunbookResolver(opts.runbookProvider);
+    this.runbooks = new RunbookResolver(opts.runbookProvider, opts.runbookKnowledge);
     this.etiquette = new EtiquetteGate({
       deliverSpeech: (text) => this.deliverSpeech(text),
       ...(opts.muteDurationMs !== undefined ? { muteDurationMs: opts.muteDurationMs } : {}),
@@ -320,6 +325,7 @@ export class OrchestratedPipeline {
   stagedCorrelation(approvalId: string): string | undefined {
     return this.governed.stagedCorrelation(approvalId);
   }
+
   /** Record a signature with server-side identity resolution — the gate
    *  resolves the signer's role from the platform registry, rank-checks it,
    *  and throws SignerRoleError on insufficient privilege. */

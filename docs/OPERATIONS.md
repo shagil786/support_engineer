@@ -252,7 +252,16 @@ fakes — this is the pass that proves the real surfaces agree.
    unit tests, not by live providers. Before real traffic: wire
    `LLM_BASE_URL/KEY/MODEL`, ask a live-data question through `/utterance`,
    confirm `llm_call` events appear and `/metrics` reports calls and latency,
-   and confirm a nonsense question refuses instead of hallucinating.
+   and confirm a nonsense question refuses instead of hallucinating. Then run
+   the scheduled chaos probe against the real endpoint:
+   `npm run probe:llm-chaos -- --quick` boots the platform against a local
+   broken provider and checks the full degradation ladder end to end —
+   429 saturation (`via:http_error`), breaker trip (`via:circuit_open`),
+   recovery (`via:llm`), and connection drops (`via:network`) — with every
+   utterance still completing through the deterministic floor. It exits
+   non-zero on any failed check, so it works as a cron/CI gate; keep it on a
+   schedule (15 minutes in CI cadence) so ladder regressions surface as a
+   failed probe, not as a saturated incident.
 6. **Observability live.** Point Prometheus at `/metrics` (same bearer auth),
    import the dashboard, load the alert rules, and trigger one approval so the
    approval metrics visibly move.
