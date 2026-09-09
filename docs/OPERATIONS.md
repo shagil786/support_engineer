@@ -265,9 +265,10 @@ fakes — this is the pass that proves the real surfaces agree.
    429 saturation (`via:http_error`), breaker trip (`via:circuit_open`),
    recovery (`via:llm`), and connection drops (`via:network`) — with every
    utterance still completing through the deterministic floor. It exits
-   non-zero on any failed check, so it works as a cron/CI gate; keep it on a
-   schedule (15 minutes in CI cadence) so ladder regressions surface as a
-   failed probe, not as a saturated incident.
+   non-zero on any failed check, so it works as a cron/CI gate; it runs in
+   `--quick` mode on every push and the full production-shaped ladder hourly
+   (`.github/workflows/ci.yml`, `.github/workflows/chaos.yml`), so ladder
+   regressions surface as a failed run, not as a saturated incident.
 6. **Observability live.** Point Prometheus at `/metrics` (same bearer auth),
    import the dashboard, load the alert rules, and trigger one approval so the
    approval metrics visibly move.

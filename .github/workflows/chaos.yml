@@ -1,0 +1,37 @@
+# Scheduled LLM chaos probe — the production-shaped degradation-ladder gate.
+#
+# CI runs the probe in --quick mode on every push (compressed retry
+# timings); this workflow runs the FULL production ladder (real retry
+# backoff, breaker cooldowns) on a schedule, so a ladder regression
+# surfaces as a failed scheduled run, not as a saturated incident in
+# production. Boots the real platform against a local broken provider —
+# no secrets, no external services.
+name: Chaos
+
+on:
+  schedule:
+    # Hourly, minute 17 — off the top of the hour to dodge runner contention.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: chaos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  chaos:
+    name: degradation ladder (production timings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: LLM chaos probe (production-shaped ladder)
+        run: npm run probe:llm-chaos

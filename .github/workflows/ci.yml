@@ -74,3 +74,11 @@ jobs:
         # fresh KB when empty). A regressed retriever — chunker, BM25, fusion,
         # re-rank — fails CI exactly like a regressed policy bundle.
         run: npm run eval:retrieval
+
+      - name: LLM chaos probe (quick)
+        # Boots the real platform against a local broken provider and asserts
+        # the degradation ladder end to end (429 saturation, breaker trip,
+        # recovery, connection drops). --quick compresses the retry timings;
+        # the production-shaped ladder runs on the hourly schedule
+        # (.github/workflows/chaos.yml).
+        run: npm run probe:llm-chaos -- --quick

@@ -19,6 +19,7 @@
     "prepare": "test -d .git && git config core.hooksPath .githooks || true",
     "demo": "tsx demo/cli.ts",
     "probe:llm-chaos": "tsx scripts/llm-chaos-probe.ts",
+    "check:boot": "tsx scripts/boot-check.ts",
     "smoke:container": "bash scripts/container-smoke.sh"
   },
   "devDependencies": {
