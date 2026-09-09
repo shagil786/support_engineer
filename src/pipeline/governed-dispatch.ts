@@ -133,6 +133,12 @@ export class GovernedDispatch {
     return this.approvals.listPending();
   }
 
+  /** Subscribe to approval-queue mutations (SSE surfaces) — delegated to the
+   *  gate, the single owner of the approval state. */
+  onApprovalQueueChange(fn: () => void): () => void {
+    return this.approvals.onQueueChange(fn);
+  }
+
   /** Execute a staged action once its approval is granted. */
   async executeApproved(approvalId: string, correlationId: string): Promise<PipelineRouting> {
     const staged = this.staged.get(approvalId);

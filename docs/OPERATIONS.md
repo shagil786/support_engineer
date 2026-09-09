@@ -100,15 +100,18 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   their provenance (knowledge-base citation, Jira lookup, live logs), staged
   approvals appear in the queue panel, and two admin signatures enable
   Execute. The queue lists pending AND granted-but-unexecuted approvals, so a
-  granted action is never stranded; the panel refreshes after every action
-  and on a short poll.
+  granted action is never stranded. The panel updates in real time via a
+  server-sent-events stream (`GET /approvals/events`, same bearer auth) that
+  pushes the full listing after every approval mutation — no polling.
 - **HTTP** (starts only when a token exists): `HTTP_TOKENS=tok1,tok2`
   `HTTP_PORT` (default 8787) `HTTP_HOST` (default 127.0.0.1),
   `RATE_LIMIT_PER_MINUTE` (default 120/credential), idempotency keys honored.
   Routes: `POST /utterance` `{ text, speakerId }`, `POST /ask`
   `{ question }`, `POST /envelope` (structured webhook deliveries),
   `GET /approvals` (the queue listing; entries carry `status` of
-  `pending` or `granted` plus the `correlationId` execute needs), approval
+  `pending` or `granted` plus the `correlationId` execute needs),
+  `GET /approvals/events` (the same listing as an SSE stream, pushed on
+  connect and after every mutation, with keep-alive pings), approval
   sign/execute endpoints. `GET /metrics` (same bearer auth) exposes the
   Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
   governed-run outcomes, policy decisions, SafetyNet vetoes, and approval

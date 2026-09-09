@@ -63,6 +63,38 @@ describe('ApprovalGate', () => {
     expect(gate.checkTimeouts()).toEqual([b.approvalId]);
   });
 
+  it('onQueueChange: fires on request, each listing-visible signature, grant, deny, execute; unsubscribe silences it', async () => {
+    const slack = new FakeSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2 });
+    let changes = 0;
+    const off = gate.onQueueChange(() => {
+      changes += 1;
+    });
+    const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+    expect(changes).toBe(1); // staged
+    gate.sign(approvalId, 'admin');
+    expect(changes).toBe(2); // signature count is listing-visible (1/2)
+    gate.sign(approvalId, 'admin2');
+    expect(changes).toBe(3); // grant → pending becomes granted
+    gate.markExecuted(approvalId);
+    expect(changes).toBe(4); // executed → leaves the queue
+    off();
+    const other = await gate.request({ policyId: 'p2', decision, action });
+    gate.deny(other.approvalId);
+    expect(changes).toBe(4); // unsubscribed: silence
+  });
+
+  it('onQueueChange: a throwing listener never breaks the mutation path', async () => {
+    const slack = new FakeSlack();
+    const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1 });
+    gate.onQueueChange(() => {
+      throw new Error('listener bug');
+    });
+    const { approvalId } = await gate.request({ policyId: 'p', decision, action });
+    const snap = gate.sign(approvalId, 'admin');
+    expect(snap.status).toBe('granted'); // mutation succeeded despite the listener
+  });
+
   it('posts a Slack message and tracks approvals until M-of-N', async () => {
     const slack = new FakeSlack();
     const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2 });

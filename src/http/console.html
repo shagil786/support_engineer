@@ -115,7 +115,6 @@ const log = $('log'), queue = $('approvals');
 
 let token = sessionStorage.getItem('agent-token') || '';
 let speaker = sessionStorage.getItem('agent-speaker') || '';
-let pollTimer = null;
 
 // RBAC is keyed on the speaker id: unknown ids are 'guest' and cannot stage
 // destructive actions. The id is editable precisely so an operator can
@@ -181,9 +180,68 @@ $('save-token').addEventListener('click', () => {
   $('send').disabled = false;
   addMsg('agent', 'Connected as ' + speaker + '. The agent answers from its knowledge base with citations; consequential actions stage approvals here.', '<span class="badge note">connected</span>');
   loadQueue();
-  clearInterval(pollTimer);
-  pollTimer = setInterval(loadQueue, 5000);
+  watchQueue();
 });
+
+// ---- Live queue: a server-sent-events stream (GET /approvals/events) pushes
+// the full listing after every gate mutation. Implemented with fetch + a
+// stream reader rather than the EventSource API because EventSource cannot
+// send the Authorization header — and the token must never move to the URL,
+// where proxies and logs would record it. Disconnects reconnect with backoff.
+let queueStream = null;
+
+function watchQueue() {
+  if (queueStream) queueStream.abort.abort();
+  const abort = new AbortController();
+  const backoffMs = { value: 1000 };
+  queueStream = { abort, gen: runStream() };
+
+  async function runStream() {
+    while (true) {
+      try {
+        const res = await fetch('/approvals/events', {
+          headers: { authorization: 'Bearer ' + token, accept: 'text/event-stream' },
+          signal: abort.signal,
+        });
+        if (res.status === 401) {
+          $('identity').textContent = 'session expired — reconnect';
+          $('identity').className = 'disconnected';
+          return;
+        }
+        if (!res.ok || !res.body) throw new Error('stream unavailable');
+        backoffMs.value = 1000;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const evLine = frame.split('\n').find((l) => l.startsWith('event: '));
+            const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
+            if (!evLine || !dataLine || evLine.slice(7) === 'ping') continue;
+            try {
+              const parsed = JSON.parse(dataLine.slice(6));
+              if (parsed && Array.isArray(parsed.approvals)) renderQueue(parsed.approvals);
+            } catch { /* malformed frame: skip, the next push is authoritative */ }
+          }
+        }
+      } catch (e) {
+        if (abort.signal.aborted) return;
+      }
+      if (abort.signal.aborted) return;
+      $('identity').textContent = 'queue stream lost — reconnecting';
+      $('identity').className = 'disconnected';
+      await new Promise((r) => setTimeout(r, backoffMs.value));
+      backoffMs.value = Math.min(backoffMs.value * 2, 15_000);
+    }
+  }
+  void queueStream.gen;
+}
 
 $('composer').addEventListener('submit', async (e) => {
   e.preventDefault();

@@ -58,6 +58,8 @@ export interface HttpServerOptions {
   host?: string;
   port?: number;
   now?: () => number;
+  /** SSE keep-alive cadence for /approvals/events (default 15 s). */
+  sseKeepAliveMs?: number;
 }
 
 export interface HttpServerHandle {
@@ -94,6 +96,9 @@ interface InteractivePayload {
 
 const MAX_DEFAULT = 1024 * 1024;
 const DEFAULT_RATE_LIMIT_PER_MIN = 120;
+/** SSE keep-alive cadence: frequent enough to hold open idling proxies, rare
+ *  enough to be invisible in logs. */
+const SSE_KEEP_ALIVE_MS = 15_000;
 const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60_000;
 const DEFAULT_EXECUTE_REPLAY_TTL_MS = 5 * 60_000;
 /** Idempotency caches never grow unbounded: TTL sweep + hard cap. */
@@ -209,6 +214,16 @@ export async function createHttpServer(
       return reply(res, 200, { approvals });
     }
 
+    // Server-sent events: live approval-queue updates for the console. Same
+    // auth wall and rate budget as every route below (one connect consumes
+    // one request's budget; reconnect storms are throttled like any flood).
+    // The stream pushes the full listing on connect and after every queue
+    // mutation — the payload is the SAME shape as GET /approvals, so client
+    // and server can never disagree about the queue's schema.
+    if (method === 'GET' && path === '/approvals/events') {
+      return streamApprovals(req, res);
+    }
+
     if (method === 'GET' && path === '/metrics') {
       const metrics = await renderMetrics(platform.eventLog);
       return reply(res, 200, metrics, 'text/plain; version=0.0.4');
@@ -245,6 +260,46 @@ export async function createHttpServer(
       return reply(res, knownPath ? 405 : 404, knownPath ? { error: 'method not allowed' } : { error: 'not found' });
     }
     reply(res, 404, { error: 'not found' });
+  }
+
+  /** SSE stream of approval-queue state (GET /approvals/events). Pushes the
+   *  full listing on connect and after every gate mutation — the payload is
+   *  the SAME shape as GET /approvals, so client and server can never
+   *  disagree about the queue's schema. Keep-alive pings keep proxies from
+   *  idling the connection out; the subscription is released on disconnect. */
+  function streamApprovals(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Defeat proxy buffering (nginx et al.) so events arrive immediately.
+      'x-accel-buffering': 'no',
+    });
+    let closed = false;
+    const send = (event: string, data: unknown): void => {
+      if (closed) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    const push = (): void => {
+      const approvals = platform.pipeline.listPendingApprovals().map((a) => ({
+        ...a,
+        correlationId: platform.pipeline.stagedCorrelation(a.approvalId),
+      }));
+      send('approvals', { approvals });
+    };
+    push();
+    const unsubscribe = platform.pipeline.onApprovalQueueChange(push);
+    const keepAlive = setInterval(() => send('ping', { ts: now() }), opts.sseKeepAliveMs ?? SSE_KEEP_ALIVE_MS);
+    const finish = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(keepAlive);
+      unsubscribe();
+      res.end();
+    };
+    req.on('close', finish);
+    res.on('close', finish);
+    res.on('error', finish);
   }
 
   async function handleUtterance(req: IncomingMessage, res: ServerResponse): Promise<CachedResponse> {

@@ -364,6 +364,12 @@ export class OrchestratedPipeline {
     return this.governed.listPendingApprovals();
   }
 
+  /** Subscribe to approval-queue mutations (SSE surfaces) — delegated to the
+   *  gate through the dispatch, the single owner of the approval state. */
+  onApprovalQueueChange(fn: () => void): () => void {
+    return this.governed.onApprovalQueueChange(fn);
+  }
+
   /** The correlation id a staged action executes under (queue surfaces pass
    *  it to executeApproved). Unknown ids return undefined. */
   stagedCorrelation(approvalId: string): string | undefined {

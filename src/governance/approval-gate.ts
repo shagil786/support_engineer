@@ -167,6 +167,10 @@ export class ApprovalGate {
   /** 'channel:ts' of posted approval messages → approvalId (bot-token only;
    *  webhook posters have no ref and rely on the single-pending fallback). */
   private readonly deliveries = new Map<string, string>();
+  /** Queue-change listeners (SSE surfaces). Fired after every mutation that
+   *  affects the queue listing; listeners receive no payload and re-read via
+   *  listPending(), so the notification carries no data to leak. */
+  private readonly listeners = new Set<() => void>();
 
   constructor(opts: ApprovalGateOptions) {
     this.slack = opts.slack;
@@ -176,6 +180,24 @@ export class ApprovalGate {
     this.eventLog = opts.eventLog;
     this.now = opts.now ?? Date.now;
     this.reactionRoles = opts.reactionRoleMap ?? DEFAULT_REACTION_ROLES;
+  }
+
+  /** Subscribe to queue mutations (request/grant/deny/timeout/execute).
+   *  Returns an unsubscribe function. Notifications are fire-and-forget:
+   *  a throwing listener never breaks the mutation path. */
+  onQueueChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private notify(): void {
+    for (const fn of this.listeners) {
+      try {
+        fn();
+      } catch {
+        // A broken listener must never break a governance mutation.
+      }
+    }
   }
 
   async request(input: ApprovalRequestInput): Promise<{ approvalId: string }> {
@@ -191,6 +213,7 @@ export class ApprovalGate {
       timeoutMs: input.timeoutMs ?? this.defaultTimeoutMs,
     };
     this.pending.set(id, p);
+    this.notify();
     const text = this.renderMessage(p);
     p.originalText = text;
     let delivered = false;
@@ -277,6 +300,10 @@ export class ApprovalGate {
       // clients), in-place text edit, or threaded-only announce — whichever
       // the client supports. Unchanged signature count → no re-render.
       if (p.signatures.size !== before) this.rerender(p);
+      // Every listing-visible change notifies: the queue entry carries the
+      // signature count, so a bare signature (1/2) is a change too, and the
+      // grant additionally flips status pending → granted.
+      if (p.signatures.size !== before) this.notify();
     }
     return this.snapshot(p);
   }
@@ -296,6 +323,7 @@ export class ApprovalGate {
         kind: 'approval_executed',
         approvalId: p.id,
       }).catch(() => {});
+      this.notify();
     }
     return this.snapshot(p);
   }
@@ -313,6 +341,7 @@ export class ApprovalGate {
         approvalId: p.id,
       }).catch(() => {});
       this.rerender(p);
+      this.notify();
     }
     return this.snapshot(p);
   }
@@ -432,6 +461,7 @@ export class ApprovalGate {
         p.status = 'timeout';
         expired.push(p.id);
         this.rerender(p);
+        this.notify();
         void this.eventLog?.append({
           correlationId: p.id,
           ts: now,
