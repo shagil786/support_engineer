@@ -54,4 +54,7 @@ cannot see; BM25 rescues an exact rare term the embedder drowns.
   chunk map survive). Identity-tagged embedders detect same-dimension model
   swaps that dimension checks cannot.
 - The re-rank is the known ceiling; retrieval quality regressions show up in
-  the golden set before they show up in spoken answers.
+  the golden set before they show up in spoken answers. Downstream consumers
+  of the raw score scale (the runbook resolver's acceptance bands, ADR-0006)
+  are additionally guarded by a band-calibration eval that re-measures the
+  distribution and fails when their constants no longer fit the gap.

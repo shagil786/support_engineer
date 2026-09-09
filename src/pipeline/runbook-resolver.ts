@@ -54,10 +54,19 @@ export type RunbookResolution =
 
 /** Tier-3 acceptance bands, calibrated on the live scoring engine (see file
  *  header). A true catalog match outruns the wrong-winner band with margin;
- *  these constants sit in the gap. */
-const KB_FLOOR = 0.3;
-const KB_STRONG = 1.1;
-const KB_TIE = 0.15;
+ *  these constants sit in the gap. Exported so the band-calibration eval
+ *  (retrieval-eval.ts) can assert they still sit inside the measured gap —
+ *  an engine change that moves the score scale fails that eval, not a
+ *  meeting. */
+export const RUNBOOK_BANDS = {
+  floor: 0.3,
+  strong: 1.1,
+  tie: 0.15,
+} as const;
+
+const KB_FLOOR = RUNBOOK_BANDS.floor;
+const KB_STRONG = RUNBOOK_BANDS.strong;
+const KB_TIE = RUNBOOK_BANDS.tie;
 
 export class RunbookResolver {
   constructor(

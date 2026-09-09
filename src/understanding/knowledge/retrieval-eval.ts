@@ -76,3 +76,59 @@ export function assertQualityGate(
     throw new Error(`Retrieval quality gate failed: mrr ${result.mrr.toFixed(3)} < ${gate.minMrr}`);
   }
 }
+
+/** One calibrated probe: a query, the doc that should win it (and how high),
+ *  or the score the TOP hit must stay below. Groups form the acceptance
+ *  bands: true matches must clear the strong band; wrong winners and
+ *  unrelated chatter must stay under it / under the floor. */
+export interface BandCase {
+  id: string;
+  query: string;
+  /** Doc expected to win; its measured score is compared against `min`/`max`. */
+  targetDocId?: string;
+  /** The measured target (or top-hit) score must be >= this. */
+  min?: number;
+  /** The measured target (or top-hit) score must be < this. */
+  max?: number;
+  /** Metadata filter for the search (the resolver scopes to `runbooks`). */
+  where?: SearchOptions['where'];
+}
+
+export interface BandCalibrationResult {
+  cases: number;
+  /** Every case's measured score, for diagnostics. */
+  measurements: Array<{ id: string; query: string; score: number | null; ok: boolean }>;
+}
+
+/** Re-measure the scoring engine's distribution on a calibration set and
+ *  check each case against its expected band. This is the two-sided guard
+ *  ADR-0002/ADR-0006 flag as future work: an engine change that moves the
+ *  score scale (different reranker, different fusion, different embedder)
+ *  fails here — before the resolver's bands mis-sort a real utterance.
+ *  LLM-free and deterministic, so it runs in CI next to the golden set. */
+export async function assertBandsInGap(
+  kb: Pick<FileBackedKnowledgeBase, 'search'>,
+  cases: BandCase[],
+): Promise<BandCalibrationResult> {
+  const measurements: BandCalibrationResult['measurements'] = [];
+  for (const c of cases) {
+    const hits = await kb.search(c.query, { topK: 3, ...(c.where ? { where: c.where } : {}) });
+    const target = c.targetDocId === undefined ? hits[0] : hits.find((h) => h.docId === c.targetDocId);
+    const score = target?.score ?? null;
+    const ok =
+      score !== null &&
+      (c.min === undefined || score >= c.min) &&
+      (c.max === undefined || score < c.max);
+    measurements.push({ id: c.id, query: c.query, score, ok });
+  }
+  const failed = measurements.filter((m) => !m.ok);
+  if (failed.length > 0) {
+    const detail = failed
+      .map((m) => `${m.id} ("${m.query}") measured ${m.score === null ? 'NO HIT' : m.score.toFixed(3)}`)
+      .join('; ');
+    throw new Error(
+      `Runbook band calibration failed: the scoring engine's distribution no longer fits the configured bands — ${detail}. Recalibrate the resolver's acceptance bands against the new distribution before shipping.`,
+    );
+  }
+  return { cases: cases.length, measurements };
+}
