@@ -104,6 +104,9 @@ export type DecisionEvent =
         procedureId?: string;
         /** Set when a procedure attempt degraded to the pipeline. */
         fallbackFrom?: string;
+        /** Reviewer `fail` verdicts repaired by a pre-action re-dance.
+         *  Additive and optional (absent when 0 — legacy events omit it). */
+        reviewRetries?: number;
       };
     })
   | (BaseEvent & { kind: 'policy_suggested'; suggestionId: string })

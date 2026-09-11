@@ -72,7 +72,8 @@ export interface IntegrationsFromEnv {
   approvalChannel?: string;
   /** Supervisor caps from env: SUPERVISOR_MAX_WALLCLOCK_MS (>= 1000),
    *  SUPERVISOR_MAX_HOPS (>= 1), SUPERVISOR_MAX_TOKENS (>= 1000),
-   *  SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS (>= 1). Absent keys = the
+   *  SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS (>= 1),
+   *  SUPERVISOR_MAX_REVIEW_RETRIES (>= 0). Absent keys = the
    *  supervisor's built-in defaults. */
   supervisorCaps?: import('./bootstrap.js').PlatformOptions['supervisorCaps'];
   /** Embedding backend for the knowledge base (absent = built-in hash
@@ -276,6 +277,9 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
     ...(num('SUPERVISOR_MAX_TOKENS', 1000) !== undefined ? { maxTokens: num('SUPERVISOR_MAX_TOKENS', 1000) } : {}),
     ...(num('SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS', 1) !== undefined
       ? { maxIdenticalToolCalls: num('SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS', 1) }
+      : {}),
+    ...(num('SUPERVISOR_MAX_REVIEW_RETRIES', 0) !== undefined
+      ? { maxReviewRetries: num('SUPERVISOR_MAX_REVIEW_RETRIES', 0) }
       : {}),
   } as NonNullable<typeof out.supervisorCaps>;
   if (Object.keys(caps).length > 0) out.supervisorCaps = caps;

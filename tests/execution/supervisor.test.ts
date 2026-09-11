@@ -224,3 +224,102 @@ describe('SupervisorAgent', () => {
     expect(r.reason).toMatch(/veto/i);
   });
 });
+
+describe('SupervisorAgent reviewer-feedback retry loop', () => {
+  /** A reviewer LLM scripted to return a verdict per review call. */
+  const scriptedReviewerLlm = (verdicts: Array<'pass' | 'fail' | 'reask'>, feedbacks: string[] = []) => {
+    let calls = 0;
+    const llm = new OpenAiCompatibleClient({ baseUrl: '', apiKey: '', model: '' });
+    (llm as unknown as { isWired: () => boolean }).isWired = () => true;
+    (llm as unknown as { complete: unknown }).complete = async () => {
+      const verdict = verdicts[Math.min(calls, verdicts.length - 1)] ?? 'pass';
+      const feedback = feedbacks[calls] ?? `review ${calls + 1}`;
+      calls++;
+      return { choices: [{ message: { content: JSON.stringify({ verdict, feedback }) } }] } as never;
+    };
+    return { llm, calls: () => calls };
+  };
+
+  const logToolRunner = () =>
+    new ToolRunner({
+      context: { logProvider: { name: 'fake', query: async () => ({ provider: 'splunk', rows: [], error: undefined }) } },
+    });
+
+  it('re-runs the dance once on a fail verdict and completes when the review then passes', async () => {
+    const { llm, calls } = scriptedReviewerLlm(['fail', 'pass'], ['missing log evidence', 'looks good now']);
+    const sup = makeSupervisor({ reviewer: new ReviewerAgent({ llm }), toolRunner: logToolRunner() });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-retry'), bundle });
+    expect(r.ok).toBe(true);
+    // Two pre-action reviews (fail → retry → pass) + one final review.
+    expect(calls()).toBe(3);
+  });
+
+  it('exhausts the retry budget on persistent fail and records every distinct feedback in the reason', async () => {
+    const { llm, calls } = scriptedReviewerLlm(['fail', 'fail', 'fail'], ['need pod logs', 'need metrics', 'still thin']);
+    const sup = makeSupervisor({ reviewer: new ReviewerAgent({ llm }), toolRunner: logToolRunner(), maxReviewRetries: 2 });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-persist'), bundle });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('need pod logs');
+    expect(r.reason).toContain('need metrics');
+    expect(r.reason).toContain('still thin');
+    expect(calls()).toBe(3); // one review per attempt, no final review
+  });
+
+  it('maxReviewRetries: 0 restores fail-fast — exactly one review, no retry', async () => {
+    const { llm, calls } = scriptedReviewerLlm(['fail'], ['no']);
+    const sup = makeSupervisor({ reviewer: new ReviewerAgent({ llm }), toolRunner: logToolRunner(), maxReviewRetries: 0 });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-fast'), bundle });
+    expect(r.ok).toBe(false);
+    expect(calls()).toBe(1);
+    expect(r.reason).toContain('no');
+  });
+
+  it('retry consumes shared caps — the hop cap trips mid-retry', async () => {
+    const { llm } = scriptedReviewerLlm(['fail', 'fail']);
+    // First dance costs hops 1-3; the retry dies at its review (hop 6 > 5).
+    // Caps are shared: the retry budget never widens them.
+    const sup = makeSupervisor({ reviewer: new ReviewerAgent({ llm }), toolRunner: logToolRunner(), maxHops: 5 });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-hop'), bundle });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/hop cap/);
+  });
+
+  it('a reask verdict never retries — it ends the request with the reviewer feedback', async () => {
+    const { llm, calls } = scriptedReviewerLlm(['reask'], ['which service owns this?']);
+    const sup = makeSupervisor({ reviewer: new ReviewerAgent({ llm }), toolRunner: logToolRunner() });
+    const r = await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-reask'), bundle });
+    expect(r.ok).toBe(false);
+    expect(calls()).toBe(1);
+    expect(r.reason).toContain('which service owns this?');
+  });
+
+  it('lands reviewRetries on the agent_outcome event stats', async () => {
+    const log = new JsonlFileEventLog({ baseDir: join(dir, 'events-retry') });
+    const { llm } = scriptedReviewerLlm(['fail', 'fail', 'fail'], ['a', 'b', 'c']);
+    const sup = makeSupervisor({
+      reviewer: new ReviewerAgent({ llm }),
+      toolRunner: logToolRunner(),
+      eventLog: log,
+      maxReviewRetries: 1,
+    });
+    await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-stats'), bundle });
+    const outcomes: Array<Record<string, unknown>> = [];
+    for await (const e of log.query({ correlationId: 'c-stats' })) {
+      if (e.kind === 'agent_outcome') outcomes.push(e.stats as Record<string, unknown>);
+    }
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.['reviewRetries']).toBe(1);
+  });
+
+  it('omits reviewRetries from stats when no retry was spent (legacy shape)', async () => {
+    const log = new JsonlFileEventLog({ baseDir: join(dir, 'events-noretry') });
+    const sup = makeSupervisor({ toolRunner: logToolRunner(), eventLog: log });
+    await sup.run({ governed: governedExecute('query_logs', { query_string: 'e' }), context: ctx('c-legacy'), bundle });
+    for await (const e of log.query({ correlationId: 'c-legacy' })) {
+      if (e.kind === 'agent_outcome') {
+        const stats = e.stats as Record<string, unknown> | undefined;
+        expect(stats?.['reviewRetries']).toBeUndefined();
+      }
+    }
+  });
+});

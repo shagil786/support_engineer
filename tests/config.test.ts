@@ -105,6 +105,13 @@ describe('configFromEnv', () => {
     expect(
       configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: '180000', SUPERVISOR_MAX_HOPS: '12', SUPERVISOR_MAX_TOKENS: '99000', SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS: '5' }).supervisorCaps,
     ).toEqual({ maxWallClockMs: 180_000, maxHops: 12, maxTokens: 99_000, maxIdenticalToolCalls: 5 });
+    // Review-retry budget: floor 0 (0 is meaningful — restore fail-fast).
+    expect(configFromEnv({ SUPERVISOR_MAX_REVIEW_RETRIES: '-1' }).supervisorCaps).toBeUndefined();
+    expect(configFromEnv({ SUPERVISOR_MAX_REVIEW_RETRIES: 'nope' }).supervisorCaps).toBeUndefined();
+    expect(configFromEnv({ SUPERVISOR_MAX_REVIEW_RETRIES: '0' }).supervisorCaps).toEqual({ maxReviewRetries: 0 });
+    expect(
+      configFromEnv({ SUPERVISOR_MAX_WALLCLOCK_MS: '180000', SUPERVISOR_MAX_REVIEW_RETRIES: '2' }).supervisorCaps,
+    ).toEqual({ maxWallClockMs: 180_000, maxReviewRetries: 2 });
   });
 
   it('parses EMBEDDINGS_* all-or-nothing, with optional dim (>= 8)', () => {

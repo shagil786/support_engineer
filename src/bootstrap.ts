@@ -111,6 +111,7 @@ export interface PlatformOptions {
     maxTokens?: number;
     maxWallClockMs?: number;
     maxIdenticalToolCalls?: number;
+    maxReviewRetries?: number;
   };
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;

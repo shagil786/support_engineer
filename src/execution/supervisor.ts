@@ -5,6 +5,9 @@
  * Pipeline: Triage → Investigator (read-only plan) → Reviewer → governed
  * action → Executor (side-effect plan), with every step verified and every
  * execution funneled through the ToolRunner (which re-checks Governance).
+ * A pre-action reviewer `fail` triggers a bounded re-dance (maxReviewRetries,
+ * default 1) so the planners can act on the feedback; `reask` ends the
+ * request for a human; the final review never retries.
  *
  * Caps enforced per request: sub-agent hops, token budget, wall clock, and
  * call-repetition (loop detection, reused from the Governance SafetyNet).
@@ -39,6 +42,11 @@ export interface SupervisorOptions {
    *  well-evidenced procedure replaces the multi-agent dance for a request.
    *  Default: unwired → the dance always runs. */
   procedures?: ProcedureLibrary;
+  /** How many times a pre-action reviewer `fail` may trigger a full re-dance
+   *  (triage → investigate → review) before the request fails with the
+   *  accumulated feedback. Default 1; 0 restores fail-fast. The final review
+   *  (after execution) never retries. */
+  maxReviewRetries?: number;
   now?: () => number;
 }
 
@@ -61,10 +69,11 @@ export interface SupervisorRunOutput {
 }
 
 const DEFAULTS = {
-  maxHops: 8,
+  maxHops: 10,
   maxTokens: 50_000,
   maxWallClockMs: 60_000,
   maxIdenticalToolCalls: 3,
+  maxReviewRetries: 1,
 } as const;
 
 export class SupervisorAgent {
@@ -78,6 +87,7 @@ export class SupervisorAgent {
   private readonly maxTokens: number;
   private readonly maxWallClockMs: number;
   private readonly maxIdenticalToolCalls: number;
+  private readonly maxReviewRetries: number;
   private readonly now: () => number;
   private readonly procedures: ProcedureLibrary | undefined;
   private readonly loops = new LoopDetector();
@@ -98,6 +108,7 @@ export class SupervisorAgent {
     this.maxTokens = opts.maxTokens ?? DEFAULTS.maxTokens;
     this.maxWallClockMs = opts.maxWallClockMs ?? DEFAULTS.maxWallClockMs;
     this.maxIdenticalToolCalls = opts.maxIdenticalToolCalls ?? DEFAULTS.maxIdenticalToolCalls;
+    this.maxReviewRetries = Math.max(0, opts.maxReviewRetries ?? DEFAULTS.maxReviewRetries);
     this.procedures = opts.procedures;
     this.now = opts.now ?? Date.now;
   }
@@ -107,6 +118,8 @@ export class SupervisorAgent {
     const { governed, context, bundle } = input;
     let hops = 0;
     let toolCalls = 0;
+    /** Reviewer `fail` verdicts repaired by a re-dance (for the outcome stats). */
+    let reviewRetries = 0;
     /** Procedure id when a replay was attempted but degraded to the dance. */
     let attemptedProcedureId: string | undefined;
 
@@ -122,6 +135,7 @@ export class SupervisorAgent {
         source,
         wallClockMs: this.now() - started,
         ...(attemptedProcedureId ? { fallbackFrom: attemptedProcedureId } : {}),
+        ...(reviewRetries > 0 ? { reviewRetries } : {}),
       });
       return { ok: false, hops, toolCalls, reason, summary: `Request not completed: ${reason}`, source };
     };
@@ -191,37 +205,63 @@ export class SupervisorAgent {
       }
     }
 
-    // 1. Triage
-    hops++;
-    if (hops > this.maxHops) return fail('hop cap reached');
-    if (overTokens()) return fail('token cap exceeded');
-    const triage = await this.triage.run(bundle);
-    this.accumulate(context, triage);
+    // 1–3. The pre-action dance with the reviewer-feedback retry loop:
+    //    triage → investigate (read-only plan) → review. A reviewer `fail`
+    //    means the trace is correctable — spend retry budget and re-run the
+    //    whole dance so the planners can act on the feedback (the reviewer
+    //    judges the refreshed live trace, so new investigation work is
+    //    visible). `reask` means the request cannot be resolved without a
+    //    human — it never retries and never executes. Caps (hops/tokens/
+    //    wall clock/loops) are NOT reset by a retry; the budget widens
+    //    fidelity, never the caps.
+    const feedbacks: string[] = [];
+    let subKind = 'unknown';
+    for (;;) {
+      // a. Triage
+      hops++;
+      if (hops > this.maxHops) return fail('hop cap reached');
+      if (overTokens()) return fail('token cap exceeded');
+      const triage = await this.triage.run(bundle);
+      this.accumulate(context, triage);
+      subKind = triage.decision.subKind;
 
-    // 2. Investigator — read-only plan
-    hops++;
-    if (hops > this.maxHops) return fail('hop cap reached');
-    if (overTokens()) return fail('token cap exceeded');
-    const inv = await this.investigator.run(bundle);
-    this.accumulate(context, inv);
-    for (const step of inv.decision.plan) {
-      if (overWallClock()) return fail('wall clock cap exceeded');
-      const r = await this.executeStep(step.tool, step.args, context, governed.decision);
-      toolCalls++;
-      const v = verifyResult(step.tool, r, { candidateOutput: context.candidateOutput });
-      if (!v.passed) return fail(`investigation step failed verification: ${v.reason ?? 'unknown'}`);
+      // b. Investigator — read-only plan
+      hops++;
+      if (hops > this.maxHops) return fail('hop cap reached');
+      if (overTokens()) return fail('token cap exceeded');
+      const inv = await this.investigator.run(bundle);
+      this.accumulate(context, inv);
+      for (const step of inv.decision.plan) {
+        if (overWallClock()) return fail('wall clock cap exceeded');
+        const r = await this.executeStep(step.tool, step.args, context, governed.decision);
+        toolCalls++;
+        const v = verifyResult(step.tool, r, { candidateOutput: context.candidateOutput });
+        if (!v.passed) return fail(`investigation step failed verification: ${v.reason ?? 'unknown'}`);
+      }
+
+      // c. Reviewer over the trace so far — refreshed so the reviewer sees
+      //    the tool_call events the dance has already emitted. Judging a
+      //    pre-dance bundle would blind it to the very actions it reviews.
+      hops++;
+      if (hops > this.maxHops) return fail('hop cap reached');
+      if (overTokens()) return fail('token cap exceeded');
+      await this.refreshTrace(bundle);
+      const rev = await this.reviewer.run(bundle);
+      this.accumulate(context, rev);
+      if (rev.decision.verdict === 'reask') {
+        // Unresolvable without a human — the feedback is the answer path,
+        // not a correction. No retry, no execution.
+        return fail(`reviewer needs human input: ${rev.decision.feedback}`);
+      }
+      if (rev.decision.verdict !== 'fail') break; // pass — proceed to the action
+      // A correction request: record it and retry while budget remains.
+      feedbacks.push(rev.decision.feedback);
+      if (reviewRetries >= this.maxReviewRetries) {
+        const unique = [...new Set(feedbacks)].join(' | ');
+        return fail(`reviewer rejected outcome: ${unique}`);
+      }
+      reviewRetries++;
     }
-
-    // 3. Reviewer over the trace so far — refreshed so the reviewer sees
-    //    the tool_call events the dance has already emitted. Judging a
-    //    pre-dance bundle would blind it to the very actions it reviews.
-    hops++;
-    if (hops > this.maxHops) return fail('hop cap reached');
-    if (overTokens()) return fail('token cap exceeded');
-    await this.refreshTrace(bundle);
-    const rev = await this.reviewer.run(bundle);
-    this.accumulate(context, rev);
-    if (rev.decision.verdict === 'fail') return fail(`reviewer rejected outcome: ${rev.decision.feedback}`);
 
     // 4. The governed action itself (already approved by policy)
     hops++;
@@ -256,7 +296,7 @@ export class SupervisorAgent {
     this.accumulate(context, final);
     const ok = final.decision.verdict !== 'fail';
     const summary = ok
-      ? `Handled '${triage.decision.subKind}' with ${toolCalls} tool call(s). ${final.decision.feedback}`.trim()
+      ? `Handled '${subKind}' with ${toolCalls} tool call(s). ${final.decision.feedback}`.trim()
       : `Reviewer rejected: ${final.decision.feedback}`;
     await this.emitOutcome(context.correlationId, {
       ok,
@@ -266,6 +306,7 @@ export class SupervisorAgent {
       source: 'pipeline',
       wallClockMs: this.now() - started,
       ...(attemptedProcedureId ? { fallbackFrom: attemptedProcedureId } : {}),
+      ...(reviewRetries > 0 ? { reviewRetries } : {}),
     });
     this.loops.clear({ correlationId: context.correlationId });
     return { ok, hops, toolCalls, summary, source: 'pipeline' };
@@ -332,6 +373,7 @@ export class SupervisorAgent {
       wallClockMs: number;
       procedureId?: string;
       fallbackFrom?: string;
+      reviewRetries?: number;
     },
   ): Promise<void> {
     if (!this.eventLog) return;
@@ -349,6 +391,7 @@ export class SupervisorAgent {
         wallClockMs: o.wallClockMs,
         ...(o.procedureId !== undefined ? { procedureId: o.procedureId } : {}),
         ...(o.fallbackFrom !== undefined ? { fallbackFrom: o.fallbackFrom } : {}),
+        ...(o.reviewRetries !== undefined ? { reviewRetries: o.reviewRetries } : {}),
       },
     }).catch(() => {});
   }
