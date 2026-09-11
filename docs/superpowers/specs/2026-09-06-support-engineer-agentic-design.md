@@ -32,10 +32,11 @@ names and file moves that don't exist in this repo. The material deviations:
 
 ### 0.3 Promised but not built in v1
 
-The "no hardcoded values" grep test; `PolicyEngine` hot-reload
+`PolicyEngine` hot-reload
 on promotion (the store promotes; a new engine instance is constructed per
 deployment); Slash-command approvals; per-tool rate limits; cancellation;
-multi-tenant policy (still a non-goal).
+multi-tenant policy (still a non-goal). (The "no hardcoded values" grep test
+was built 2026-09-10: `tests/hardcoded-values.test.ts`.)
 
 ---
 
@@ -592,7 +593,8 @@ scenarios, suggestions, promotion inputs); honest-degradation doctrine
 everywhere (unwired = configured condition; invalid output = fallback;
 provider failure = deterministic floor with the recorded reason — §4's
 classifier is the pipeline edge where legacy takes over; interface bugs =
-propagate). Not built: CI eval wiring; the hardcoded-value grep test.
+propagate). Not built: CI eval wiring. (The hardcoded-value grep test was
+built 2026-09-10 — see §0.3/§13.)
 
 ## 11. Phasing (completed)
 
@@ -617,7 +619,7 @@ phase ended typecheck-clean with the full suite green.
 ## 13. Success criteria — verified
 
 - Typecheck clean; **510/510 tests** (150-test regression floor intact). ✅
-- Zero hardcoded hosts/tokens/keys in `src/`. ✅ (by convention; grep test not built)
+- Zero hardcoded hosts/tokens/keys in `src/`. ✅ (enforced by `tests/hardcoded-values.test.ts` — literal endpoints, credential-shaped literals, and opaque key blobs fail the suite; documented carve-outs on a commented allowlist)
 - Every tool call requires a `GovernedAction`; SafetyNet re-checks every call; vetoes beat allow-all policy (tested). ✅
 - Promotion requires M-of-N + candidate eval + SafetyNet regression (tested, including a refused regression-causing patch). ✅
 - `policies/default.yaml` reproduces today's guard behavior (parity suite). ✅

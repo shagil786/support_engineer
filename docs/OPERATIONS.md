@@ -291,6 +291,11 @@ fakes — this is the pass that proves the real surfaces agree.
    `--quick` mode on every push and the full production-shaped ladder hourly
    (`.github/workflows/ci.yml`, `.github/workflows/chaos.yml`), so ladder
    regressions surface as a failed run, not as a saturated incident.
+   The suite itself enforces the repo's hygiene invariant — zero hardcoded
+   hosts/tokens/keys in `src/` (`tests/hardcoded-values.test.ts`): literal
+   non-loopback endpoints, credential-shaped literals, and opaque key blobs
+   fail CI; carve-outs (Slack API base URL, the AWS regional pattern, the
+   provider catalog) live on a commented allowlist in the test.
 6. **Observability live.** Point Prometheus at `/metrics` (same bearer auth),
    import the dashboard, load the alert rules, and trigger one approval so the
    approval metrics visibly move.
