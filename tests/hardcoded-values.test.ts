@@ -87,13 +87,31 @@ describe('hardcoded-values scanner self-checks (canaries)', () => {
     expect(f?.rule).toBe('url');
   });
 
-  it('flags literals bound to secret-named identifiers and spelled-out credentials', () => {
+  it('flags literals bound to secret-SUFFIXED names and spelled-out credentials', () => {
     const src = [
       "const apiKey = 'opensesame1';",
+      "metadata: { botToken: 'xoxb-real-token-here' }",
       "headers: { authorization: 'Bearer abcdefgh12345678' },",
     ].join('\n');
     const findings = detectHardcodedValues('src/x.ts', src);
-    expect(findings.map((f) => f.rule)).toEqual(['secret-context', 'secret-context']);
+    expect(findings.map((f) => f.rule)).toEqual(['secret-context', 'secret-context', 'secret-context']);
+  });
+
+  it('flags a 20-char AWS access key id (below the entropy floor, precise shape)', () => {
+    const [f] = detectHardcodedValues('src/x.ts', "const id = 'AKIAIOSFODNN7EXAMPLE';\n");
+    expect(f).toBeDefined();
+  });
+
+  it('does not flag benign literals near lookalike identifiers (precision)', () => {
+    const findings = detectHardcodedValues('src/x.ts', [
+      "const tokenLabel = 'tokens used';",
+      "metadata: { passwordHint: 'minimum 8 characters' },",
+      "const keyIdea = 'retry with backoff';",
+    ].join('\n'));
+    expect(
+      findings,
+      `false positives: ${findings.map((f) => `${f.rule}: ${f.snippet}`).join('; ')}`,
+    ).toEqual([]);
   });
 
   it('does not flag config-flowing credentials or product nouns', () => {

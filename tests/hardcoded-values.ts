@@ -102,10 +102,23 @@ export function collectStringLiterals(code: string): LiteralOccurrence[] {
 
 const URL_RE = /https?:\/\/[a-z0-9.[\]:_-]+/i;
 const LOOPBACK_RE = /^https?:\/\/(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|local)([:/\s'"`]|$)/i;
-/** Secret-declaring names: TOKEN, SECRET, KEY, PASSWORD/PASSWD/PWD, CREDENTIAL(S), API_KEY… */
-const SECRET_NAME_RE = /\b[A-Z_]*(TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIALS?|API_?KEY|ACCESS_?KEY|SECRET_?KEY|PRIVATE_?KEY|SIGNING)[A-Z_]*\b/i;
-/** …except Jira issue/project keys — product nouns, not credentials. */
-const SECRET_NAME_EXCEPTION_RE = /\b(issue_key|project_key)\b/i;
+/** Secret-SUFFIX names: the identifier must END in the secret word (apiKey,
+ *  botToken, signing_key), so lookalikes (tokenLabel, passwordHint, keyIdea)
+ *  never fire. Compound key suffixes only — bare `key` is a dictionary/cache
+ *  key in this codebase (dayKey, chunkKey, rate-limit bucket keys).
+ *  Known gap (documented, accepted): a credential assigned on one line to a
+ *  name without a secret suffix — or on a DIFFERENT line than its name —
+ *  escapes this rule; the Bearer/AKIA/entropy rules remain as backstops. */
+const SECRET_SUFFIX_RE = /(token|secret|password|passwd|pwd|credentials?|api_?key|access_?key|secret_?key|private_?key|signing_?key)$/i;
+/** Identifiers or quoted object keys bound to a string literal on one line. */
+const NAME_BOUND_FORMS: ReadonlyArray<RegExp> = [
+  /([A-Za-z_$][\w$]*)\s*[:=]\s*['"][^'"\n]*['"]/g,
+  /['"]([A-Za-z_-]+)['"]\s*:\s*['"][^'"\n]*['"]/g,
+];
+/** AWS access key id — the exact shape the SafetyNet's aws_key output filter
+ *  already vetoes (output-filters.ts); a 20-char key sits below the entropy
+ *  floor, so it needs its own (very precise) pattern. */
+const AWS_KEY_RE = /\bAKIA[0-9A-Z]{16}\b/;
 /** Opaque blob: ≥24 chars of [A-Za-z0-9_-], must contain a digit AND a letter,
  *  and must not be a plain lowercase/underscore identifier (metric names etc). */
 const ENTROPY_RE = /^[A-Za-z0-9_-]{24,}$/;
@@ -171,22 +184,24 @@ export function detectHardcodedValues(file: string, source: string): Finding[] {
       continue;
     }
 
-    // 2b. Secret-shaped context: a literal paired on the same line with a
-    //     secret-named identifier (assignment, object key).
-    const nameHit = ctx.match(SECRET_NAME_RE);
-    if (nameHit && !SECRET_NAME_EXCEPTION_RE.test(nameHit[0]!)) {
-      const nameEsc = nameHit[0]!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      if (new RegExp(`${nameEsc}["']?\\s*[:=]\\s*['"\`][^'"\`]+['"\`]`, 'i').test(ctx)) {
+    // 2b. Secret-shaped context: a literal bound on the same line to an
+    //     identifier or quoted key whose name ENDS in a secret word.
+    let flagged = false;
+    for (const form of NAME_BOUND_FORMS) {
+      const hit = [...lit.context.matchAll(form)].find((m) => SECRET_SUFFIX_RE.test(m[1] ?? ''));
+      if (hit) {
         findings.push({
           file, line: lit.line, rule: 'secret-context', snippet: ctx.trim().slice(0, 120),
-          why: 'literal bound to a secret-named identifier — credentials must flow from config into the expression',
+          why: `literal bound to secret-suffixed name "${hit[1]}" — credentials must flow from config into the expression`,
         });
-        continue;
+        flagged = true;
+        break;
       }
     }
+    if (flagged) continue;
 
     // 3. Long opaque blobs (potential keys/tokens pasted as literals).
-    if (looksLikeOpaqueKey(trimmed)) {
+    if (looksLikeOpaqueKey(trimmed) || AWS_KEY_RE.test(trimmed)) {
       const allow = ENTROPY_ALLOWLIST.find((a) => a.file === file && (a.line === undefined || a.line === lit.line));
       if (allow) continue;
       findings.push({
