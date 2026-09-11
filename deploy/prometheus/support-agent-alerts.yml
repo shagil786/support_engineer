@@ -16,7 +16,11 @@
 #   2. Approval backlog     — SupportAgentApprovalBacklog: requested minus
 #      granted minus denied minus timed_out; a pending M-of-N approval is a
 #      destructive runbook stalled mid-war-room.
-#   3. Veto spikes          — SupportAgentVetoSpike: SafetyNet vetoes
+#   3. Review quality       — SupportAgentReviewRecoveryLow: among governed
+#      runs that passed review only after a re-dance, the share that still
+#      ended ok sagging means the reviewer's feedback isn't landing in the
+#      re-plan (or the pre-grant bar fires on noise).
+#   4. Veto spikes          — SupportAgentVetoSpike: SafetyNet vetoes
 #      clustering in a short window means either a misbehaving integration,
 #      a runaway proposal loop, or a policy that fires more than intended.
 #
@@ -100,3 +104,25 @@ groups:
             misbehaving, or a guardrail is tuned too tight for current traffic.
             The event log has per-veto reasons.
           runbook_url: docs/OPERATIONS.md (SafetyNet)
+
+      - alert: SupportAgentReviewRecoveryLow
+        expr: >-
+          (sum by (instance) (increase(support_agent_review_retries_total{outcome="recovered"}[6h]))
+          / clamp_min(sum by (instance) (increase(support_agent_review_retries_total{outcome="retried"}[6h])), 1)
+          < 0.8)
+          and on (instance)
+          (sum by (instance) (increase(support_agent_review_retries_total{outcome="retried"}[6h])) > 3)
+        for: 15m
+        labels:
+          severity: warning
+          service: support-agent
+        annotations:
+          summary: "Review recovery rate low ({{ $labels.instance }})"
+          description: >-
+            Fewer than 80% of governed runs that needed a review re-dance still ended ok in the last
+            6h (currently {{ $value | humanizePercentage }}, at least 4 retried runs required).
+            Either the reviewer's feedback isn't landing in the re-plan — check reviewRetries > 1 on
+            recent agent_outcome events — or the pre-grant bar is firing on noise. The
+            clamp_min keeps a zero-retry window from alerting on silence; recovery self-clears as
+            healthy runs accumulate. The "Review recovery rate" dashboard panel charts the same ratio.
+          runbook_url: docs/OPERATIONS.md (review quality / reviewer-feedback retry loop)

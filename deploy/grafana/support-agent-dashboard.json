@@ -2,10 +2,10 @@
   "__inputs_note": "Import as-is; Grafana prompts for the Prometheus datasource. Every metric charted here is rendered by src/http/metrics.ts — the contract is pinned by tests/dashboard.test.ts, so a rename on either side fails CI.",
   "title": "Support Agent — Governed Ops",
   "uid": "support-agent-ops",
-  "description": "Out-of-the-box view of the support agent's event-spine metrics: LLM provider health and cost, integration latency, governed-run outcomes, policy decisions, SafetyNet vetoes, and the human-approval lifecycle. Requires only GET /metrics scraped by Prometheus (bearer token in the scrape config).",
+  "description": "Out-of-the-box view of the support agent's event-spine metrics: LLM provider health and cost, integration latency, governed-run outcomes, policy decisions, SafetyNet vetoes, review-retry recovery, and the human-approval lifecycle. Requires only GET /metrics scraped by Prometheus (bearer token in the scrape config).",
   "tags": ["support-agent"],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "refresh": "30s",
@@ -280,16 +280,69 @@
     },
     {
       "type": "row",
-      "title": "Human approvals",
+      "title": "Review quality",
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
       "panels": []
     },
     {
       "type": "stat",
+      "title": "Review recovery rate",
+      "description": "share of retried runs that still ended ok — how often the reviewer's re-dance saves a run instead of failing it",
+      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(support_agent_review_retries_total{outcome=\"recovered\",job=~\"$job\"}) / sum(support_agent_review_retries_total{outcome=\"retried\",job=~\"$job\"})",
+          "legendFormat": "recovery %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area", "textMode": "auto" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Review retries by outcome",
+      "description": "runs that passed review only after a re-dance, split by final result — a rising failed share means reviewer feedback isn't landing in the re-plan",
+      "gridPos": { "h": 8, "w": 20, "x": 4, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(support_agent_review_retries_total{job=~\"$job\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "type": "row",
+      "title": "Human approvals",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "panels": []
+    },
+    {
+      "type": "stat",
       "title": "Approvals awaiting action",
       "description": "requested minus granted minus timed out — the open M-of-N queue",
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 28 },
+      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 37 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
@@ -318,7 +371,7 @@
       "type": "timeseries",
       "title": "Approval lifecycle rate",
       "description": "requests vs grants vs timeouts — a widening gap between requested and granted is approver pain",
-      "gridPos": { "h": 8, "w": 20, "x": 4, "y": 28 },
+      "gridPos": { "h": 8, "w": 20, "x": 4, "y": 37 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {

@@ -47,6 +47,10 @@ async function seededRender(): Promise<string> {
   await log.append({ ...gov, ts: 7, kind: 'approval_granted', approvalId: 'a1', signerRole: 'admin' });
   await log.append({ ...gov, ts: 8, kind: 'approval_denied', approvalId: 'a2' });
   await log.append({ ...gov, ts: 9, kind: 'approval_timeout', approvalId: 'a3' });
+  // Review-retry recovery: one recovered, one failed — the recovery-rate
+  // alert's ratio needs both outcomes present in the seeded render.
+  await log.append({ ...base, ts: 10, kind: 'agent_outcome', finalResult: { ok: true, summary: 'recovered' }, stats: { source: 'pipeline', hops: 3, toolCalls: 2, wallClockMs: 900, reviewRetries: 1 } });
+  await log.append({ ...base, ts: 11, kind: 'agent_outcome', finalResult: { ok: false, summary: 'retried then failed' }, stats: { source: 'pipeline', hops: 5, toolCalls: 4, wallClockMs: 1500, reviewRetries: 2 } });
   return renderMetrics(log);
 }
 
@@ -63,10 +67,10 @@ function baseFamily(metric: string): string {
 describe('Prometheus alert rules ↔ /metrics contract', () => {
   const rules = loadRules().flatMap((g) => g.rules);
 
-  it('contains the three alert classes', () => {
+  it('contains the alert classes', () => {
     const names = rules.map((r) => r.alert);
     expect(names).toEqual(
-      expect.arrayContaining(['SupportAgentLlmSaturation', 'SupportAgentLlmCircuitOpen', 'SupportAgentApprovalBacklog', 'SupportAgentVetoSpike']),
+      expect.arrayContaining(['SupportAgentLlmSaturation', 'SupportAgentLlmCircuitOpen', 'SupportAgentApprovalBacklog', 'SupportAgentVetoSpike', 'SupportAgentReviewRecoveryLow']),
     );
   });
 
@@ -119,6 +123,26 @@ describe('Prometheus alert rules ↔ /metrics contract', () => {
     // execute) — subtracting it too would double-count and understate, even
     // go negative. The queue-drain alerting stays granted-based.
     expect(backlog!.expr).not.toContain('outcome="executed"');
+  });
+
+  it('the recovery-rate alert divides recovered by retried (ratio arithmetic pin)', async () => {
+    const text = await seededRender();
+    const recovery = rules.find((r) => r.alert === 'SupportAgentReviewRecoveryLow');
+    expect(recovery).toBeDefined();
+    // Both sides of the ratio must reference the family the renderer emits,
+    // with the exact label values the renderer pins.
+    expect(recovery!.expr).toContain('support_agent_review_retries_total');
+    expect(recovery!.expr).toContain('outcome="recovered"');
+    expect(recovery!.expr).toContain('outcome="retried"');
+    // `failed` and `granted` must never leak into the ratio: failed is a
+    // subset of retried (double-counting understates recovery), granted is
+    // the approvals family (a typo would cross-wire two lifecycles).
+    expect(recovery!.expr).not.toContain('outcome="failed"');
+    expect(recovery!.expr).not.toContain('approvals_total');
+    // And the renderer really emits both label values, so the alert can
+    // never be silently absent due to a label typo on the renderer side.
+    expect(text).toContain('support_agent_review_retries_total{outcome="recovered"}');
+    expect(text).toContain('support_agent_review_retries_total{outcome="retried"}');
   });
 
   it('saturation alerting uses the two real failure signals (error codes, not guesses)', async () => {

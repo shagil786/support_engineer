@@ -17,6 +17,7 @@
  *   governance_decisions_total what does policy decide (allow/deny/approval)?
  *   safety_net_vetoes_total    which guardrail fires?
  *   approvals_total            how many approvals are requested, granted, denied, timed out?
+ *   review_retries_total       how often did the reviewer's re-dance save a governed run?
  */
 import type { EventLog } from '../event-log/log.js';
 
@@ -79,6 +80,9 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   let approvalsDenied = 0;
   let approvalsTimedOut = 0;
   let approvalsExecuted = 0;
+  let reviewRetried = 0;
+  let reviewRecovered = 0;
+  let reviewFailed = 0;
 
   for await (const e of log.query({})) {
     switch (e.kind) {
@@ -100,6 +104,13 @@ export async function renderMetrics(log: EventLog): Promise<string> {
       case 'agent_outcome': {
         if (e.finalResult.ok) outcomesOk += 1;
         else outcomesFailed += 1;
+        // Review-repair loop: a run that passed review only after a re-dance
+        // (stats.reviewRetries >= 1). Legacy events (stats absent) never count.
+        if ((e.stats?.reviewRetries ?? 0) >= 1) {
+          reviewRetried += 1;
+          if (e.finalResult.ok) reviewRecovered += 1;
+          else reviewFailed += 1;
+        }
         break;
       }
       case 'governance': {
@@ -184,6 +195,14 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   out.push(`support_agent_approvals_total{outcome="denied"} ${approvalsDenied}`);
   out.push(`support_agent_approvals_total{outcome="timed_out"} ${approvalsTimedOut}`);
   out.push(`support_agent_approvals_total{outcome="executed"} ${approvalsExecuted}`);
+
+  // Explicit zero series (like the approvals family) so dashboard ratio
+  // panels render a number instead of NoData from day one.
+  out.push('# HELP support_agent_review_retries_total Governed runs that passed review only after a re-dance, by final result.');
+  out.push('# TYPE support_agent_review_retries_total counter');
+  out.push(`support_agent_review_retries_total{outcome="retried"} ${reviewRetried}`);
+  out.push(`support_agent_review_retries_total{outcome="recovered"} ${reviewRecovered}`);
+  out.push(`support_agent_review_retries_total{outcome="failed"} ${reviewFailed}`);
 
   return `${out.join('\n')}\n`;
 }

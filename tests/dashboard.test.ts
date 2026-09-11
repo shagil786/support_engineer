@@ -33,6 +33,8 @@ async function seededRender(): Promise<string> {
   await log.append({ correlationId: cid, layer: 'governance' as const, source: 'internal' as const, ts: 5, kind: 'governance', intent: { kind: 'meeting_response', subKind: 'complaint' } as never, decision: { effect: 'allow', reason: 'r', policyIds: ['p1'] } });
   await log.append({ correlationId: cid, layer: 'governance' as const, source: 'internal' as const, ts: 6, kind: 'safety_net', vetoed: true, check: 'rbac', reason: 'r' });
   await log.append({ correlationId: cid, layer: 'governance' as const, source: 'internal' as const, ts: 7, kind: 'approval_request', approvalId: 'a1', policyId: 'p1', approver_count: 2 });
+  // A retried-then-recovered run, so the review-quality panels render real data.
+  await log.append({ correlationId: cid, layer: 'execution' as const, source: 'internal' as const, ts: 8, kind: 'agent_outcome', finalResult: { ok: true, summary: 'recovered' }, stats: { source: 'pipeline', hops: 3, toolCalls: 2, wallClockMs: 900, reviewRetries: 1 } });
   return renderMetrics(log);
 }
 
@@ -70,6 +72,20 @@ describe('Grafana dashboard ↔ /metrics contract', () => {
       (f) => ![...names].some((n) => n === f || n.startsWith(`${f}_`)),
     );
     expect(uncharted, `renderer emits families the dashboard never charts: ${uncharted.join(', ')}`).toEqual([]);
+  });
+
+  it('the review-recovery-rate panel divides recovered by retried (ratio arithmetic pin)', async () => {
+    const d = JSON.parse(readFileSync(dashboardPath, 'utf8')) as { panels: Array<{ title: string; targets?: Array<{ expr: string }> }> };
+    const recoveryPanels = d.panels.filter((p) => /recovery/i.test(p.title));
+    expect(recoveryPanels.length, 'a review recovery-rate panel must exist').toBeGreaterThan(0);
+    for (const p of recoveryPanels) {
+      const exprs = (p.targets ?? []).map((t) => t.expr).join('\n');
+      expect(exprs, `${p.title} must use outcome="recovered"`).toContain('outcome="recovered"');
+      expect(exprs, `${p.title} must divide by outcome="retried"`).toContain('outcome="retried"');
+    }
+    // Both sides of the ratio must reference the family the renderer emits.
+    const raw = readFileSync(dashboardPath, 'utf8');
+    expect(raw).toContain('support_agent_review_retries_total');
   });
 
   it('dashboard templating only uses label keys the renderer emits ({{model}}, {{ok}}, …)', async () => {

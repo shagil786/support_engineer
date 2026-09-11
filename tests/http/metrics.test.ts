@@ -31,6 +31,14 @@ describe('renderMetrics', () => {
     await log.append({ correlationId: cid, ts: 14, layer: 'governance', source: 'slack', kind: 'approval_denied', approvalId: 'a3' });
     await log.append({ correlationId: cid, ts: 15, layer: 'governance', source: 'internal', kind: 'approval_executed', approvalId: 'a1' });
 
+    // Review-retry recovery: one recovered, one failed, one legacy (no stats),
+    // one with reviewRetries: 0 — only the first two count.
+    await log.append({ correlationId: cid, ts: 16, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: true, summary: 'recovered' }, stats: { source: 'pipeline', hops: 3, toolCalls: 2, wallClockMs: 900, reviewRetries: 1 } });
+    await log.append({ correlationId: cid, ts: 17, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: false, summary: 'retried then failed' }, stats: { source: 'pipeline', hops: 5, toolCalls: 4, wallClockMs: 1500, reviewRetries: 2 } });
+    await log.append({ correlationId: cid, ts: 18, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: true, summary: 'legacy' } });
+    await log.append({ correlationId: cid, ts: 19, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: true, summary: 'no retries' }, stats: { source: 'pipeline', hops: 3, toolCalls: 2, wallClockMs: 700, reviewRetries: 0 } });
+    await log.append({ correlationId: cid, ts: 20, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: true, summary: 'two retries, ok' }, stats: { source: 'pipeline', hops: 7, toolCalls: 5, wallClockMs: 2200, reviewRetries: 2 } });
+
     const text = await renderMetrics(log);
 
     expect(text).toContain('support_agent_llm_calls_total{model="gpt-4o",ok="true"} 1');
@@ -46,8 +54,9 @@ describe('renderMetrics', () => {
     expect(text).toContain('support_agent_tool_calls_total{tool="query_logs",ok="false"} 1');
     expect(text).toContain('support_agent_tool_latency_ms_bucket{tool="query_logs",le="100"} 1');
     expect(text).toContain('support_agent_tool_latency_ms_bucket{tool="query_logs",le="1000"} 2');
-    expect(text).toContain('support_agent_agent_outcomes_total{ok="true"} 1');
-    expect(text).toContain('support_agent_agent_outcomes_total{ok="false"} 1');
+    // 5 ok / 1 failed overall (the retry fixtures above are agent_outcomes too).
+    expect(text).toContain('support_agent_agent_outcomes_total{ok="true"} 5');
+    expect(text).toContain('support_agent_agent_outcomes_total{ok="false"} 2');
     expect(text).toContain('support_agent_governance_decisions_total{effect="allow"} 1');
     expect(text).toContain('support_agent_governance_decisions_total{effect="require_approval"} 1');
     expect(text).toContain('support_agent_safety_net_vetoes_total{check="rbac"} 1');
@@ -56,12 +65,22 @@ describe('renderMetrics', () => {
     expect(text).toContain('support_agent_approvals_total{outcome="denied"} 1');
     expect(text).toContain('support_agent_approvals_total{outcome="timed_out"} 1');
     expect(text).toContain('support_agent_approvals_total{outcome="executed"} 1');
+
+    // Review-retry recovery: counts runs that needed a re-dance (retried),
+    // split by final result. reviewRetries: 0 and legacy events never count.
+    expect(text).toContain('support_agent_review_retries_total{outcome="retried"} 3');
+    expect(text).toContain('support_agent_review_retries_total{outcome="recovered"} 2');
+    expect(text).toContain('support_agent_review_retries_total{outcome="failed"} 1');
   });
 
   it('renders a valid (empty) body when the log has no events', async () => {
     const log = new JsonlFileEventLog({ baseDir: join(dir, 'events') });
     const text = await renderMetrics(log);
     expect(text).toContain('support_agent_agent_outcomes_total{ok="true"} 0');
+    // Explicit zero series so dashboard ratio panels render (not NoData).
+    expect(text).toContain('support_agent_review_retries_total{outcome="retried"} 0');
+    expect(text).toContain('support_agent_review_retries_total{outcome="recovered"} 0');
+    expect(text).toContain('support_agent_review_retries_total{outcome="failed"} 0');
     expect(text.endsWith('\n')).toBe(true);
   });
 
