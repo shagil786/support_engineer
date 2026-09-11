@@ -33,5 +33,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify Node toolchain floor
+        run: npm run check:node
+
       - name: LLM chaos probe (production-shaped ladder)
         run: npm run probe:llm-chaos

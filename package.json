@@ -5,10 +5,11 @@
   "description": "Freebuff Desktop — Support Voice Agent: meeting etiquette state machine with Jira, log (Splunk/CloudWatch), runbook, and Slack integrations",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "check:node": "tsx scripts/check-node.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
