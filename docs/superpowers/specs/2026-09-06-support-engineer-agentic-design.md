@@ -484,8 +484,9 @@ intent/decisions/feedback/token fields in v1.)
 **risk: high**, evidence-carrying, malformed-file tolerant. Suggestions are
 proposals only; they never touch the store.
 
-**`EvalRunner`** — runs `policies/eval/scenarios.yaml` (8 scenarios) against a
-bundle; scenario files are Zod-validated (fail loud). Ships with
+**`EvalRunner`** — runs `policies/eval/scenarios.yaml` (24 scenarios) against a
+bundle; scenario files are Zod-validated (fail loud) and duplicate ids are
+rejected (report integrity). Ships with
 `policies/eval/safety_net_regression.yaml` (3 must-still-veto scenarios).
 
 **`PromotionGate`** — the only PolicyStore writer. Order of operations:
@@ -547,7 +548,7 @@ As drafted (§8 union), with these as-built notes: all events carry
 policies/
 ├── default.yaml                     # shipped defaults; parity-tested
 └── eval/
-    ├── scenarios.yaml               # 8 eval scenarios
+    ├── scenarios.yaml               # 24 eval scenarios
     └── safety_net_regression.yaml   # 3 must-veto scenarios
 
 src/
@@ -608,7 +609,11 @@ phase ended typecheck-clean with the full suite green.
 
 ## 12. Open questions (unchanged in substance)
 
-1. Eval-suite size before enabling online promotion (8 shipped; 50+ recommended pre-enable).
+1. Eval-suite size before enabling online promotion (24 shipped as of
+   2026-09-10 — default-deny, PII rule order, the destructive-detection
+   surface, and cross-intent policy pinned; still short of the ~50
+   recommended pre-enable, and the remaining distance should come from real
+   incident behavior, not padded duplicates).
 2. Cross-meeting memory persistence: **resolved for procedures** —
    `EpisodicMemory({ crossPath })` persists via `FileBackedVectorMemory`
    (JSON snapshot under the deployment's data dir). Larger-scale vector

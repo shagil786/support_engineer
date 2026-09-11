@@ -2,7 +2,17 @@
 # Each scenario is (envelope, action, expected decision) evaluated against
 # the candidate bundle. Every scenario must pass before a promotion lands.
 # Tool names bind to the real ToolName union.
+#
+# Rule-order matrix: the PII rule fires before every allow/approval rule, so
+# card-shaped args deny regardless of tool or intent
+# (pii_*_denied scenarios). No matching rule at all = default-deny
+# (default_deny_* scenarios). The default bundle's p01_alert_auto_incident
+# rule is currently shadowed by non_destructive_default_allow (its tools are
+# a subset and the allow rule carries no other conditions) — the P2 alert
+# scenario below pins the *behavior* either way; tightening that rule is a
+# bundle change the suite will catch.
 scenarios:
+  # --- shipped baseline (behavior preserved) -------------------------------
   - id: read_only_log_query_allowed
     intent: { kind: meeting_response, subKind: question }
     entities: { ticketKeys: [SUPPORT-7] }
@@ -45,8 +55,112 @@ scenarios:
     action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'card 4111 1111 1111 1111' } }
     expect: deny
 
-  - id: unknown_tool_default_denied
+  # --- PII rule order: the card rule precedes every allow/approval rule ----
+  - id: pii_card_in_query_args_denied
     intent: { kind: meeting_response, subKind: question }
     entities: {}
-    action: { tool: query_logs, args: { query_string: x } }
+    action: { tool: query_logs, args: { query_string: 'errors mentioning card 4111 1111 1111 1111' } }
+    expect: deny
+
+  - id: pii_card_in_destructive_runbook_denied
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-all] }
+    action: { tool: execute_runbook_script, args: { script_name: 'restart-4111-1111-1111-1111' } }
+    expect: deny
+
+  - id: pii_9_digits_not_matched_allowed
+    intent: { kind: meeting_response, subKind: question }
+    entities: {}
+    action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'reference 123456789 on file' } }
+    expect: allow
+
+  # --- default-deny: no rule matches ---------------------------------------
+  - id: default_deny_unknown_tool
+    intent: { kind: meeting_response, subKind: question }
+    entities: {}
+    action: { tool: delete_database, args: {} }
+    expect: deny
+
+  # The non-destructive allow rule carries NO intent condition (it mirrors
+  # handlers.ts, which gates only destructive runbooks) — policy is
+  # intent-agnostic for listed tools. Pinned so any future intent-scoping
+  # forces a conscious decision rather than a silent bundle edit.
+  - id: human_action_envelope_allowed_intent_agnostic
+    intent: { kind: human_action, subKind: approval }
+    entities: {}
+    action: { tool: meeting_interrupt, args: { message: echo } }
+    expect: allow
+
+  # --- destructive-runbook detection surface -------------------------------
+  - id: destructive_prod_marker_id
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-prod] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-prod } }
+    expect: require_approval
+
+  - id: destructive_production_casing
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-Production] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-Production } }
+    expect: require_approval
+
+  - id: destructive_marker_inside_longer_id
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [deploy-all-rolling] }
+    action: { tool: execute_runbook_script, args: { script_name: deploy-all-rolling } }
+    expect: require_approval
+
+  - id: destructive_provider_confirmed_flag
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-canary], runbookDestructive: true }
+    action: { tool: execute_runbook_script, args: { script_name: restart-canary } }
+    expect: require_approval
+
+  - id: non_destructive_provider_flag_overrides_marker
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [restart-prod], runbookDestructive: false }
+    action: { tool: execute_runbook_script, args: { script_name: restart-prod } }
+    expect: allow
+
+  - id: prod_marker_on_non_runbook_tool_allowed
+    intent: { kind: meeting_response, subKind: runbook_offer }
+    entities: { runbookIds: [cleanup-prod] }
+    action: { tool: jira_create_issue, args: { summary: file cleanup-prod notes } }
+    expect: allow
+
+  # --- cross-intent policy (async triage, alerts, complaints) --------------
+  - id: async_triage_p1_incident_files_issue
+    intent: { kind: async_triage, subKind: incident }
+    entities: { severity: P1 }
+    action: { tool: jira_create_issue, args: { summary: queue backlog breach } }
+    expect: allow
+
+  - id: async_triage_question_read_only
+    intent: { kind: async_triage, subKind: question }
+    entities: {}
+    action: { tool: query_logs, args: { query_string: latency } }
+    expect: allow
+
+  - id: async_triage_service_request_pages_human
+    intent: { kind: async_triage, subKind: service_request }
+    entities: {}
+    action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'please rotate the key' } }
+    expect: allow
+
+  - id: proactive_alert_p2_anomaly_creates_issue
+    intent: { kind: proactive_alert, subKind: anomaly }
+    entities: { severity: P2 }
+    action: { tool: jira_create_issue, args: { summary: error rate anomaly } }
+    expect: allow
+
+  - id: proactive_alert_p0_interrupt_with_card_denied
+    intent: { kind: proactive_alert, subKind: incident }
+    entities: { severity: P0 }
+    action: { tool: meeting_interrupt, args: { message: 'card 4111 1111 1111 1111 declined' } }
+    expect: deny
+
+  - id: complaint_pages_human_allowed
+    intent: { kind: meeting_response, subKind: complaint }
+    entities: {}
+    action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'customer escalates' } }
     expect: allow
