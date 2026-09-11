@@ -51,6 +51,7 @@ async function seededRender(): Promise<string> {
   // alert's ratio needs both outcomes present in the seeded render.
   await log.append({ ...base, ts: 10, kind: 'agent_outcome', finalResult: { ok: true, summary: 'recovered' }, stats: { source: 'pipeline', hops: 3, toolCalls: 2, wallClockMs: 900, reviewRetries: 1 } });
   await log.append({ ...base, ts: 11, kind: 'agent_outcome', finalResult: { ok: false, summary: 'retried then failed' }, stats: { source: 'pipeline', hops: 5, toolCalls: 4, wallClockMs: 1500, reviewRetries: 2 } });
+  await log.append({ ...base, ts: 12, kind: 'agent_outcome', finalResult: { ok: true, summary: 'two retries then ok' }, stats: { source: 'pipeline', hops: 7, toolCalls: 5, wallClockMs: 2200, reviewRetries: 2 } });
   return renderMetrics(log);
 }
 
@@ -70,7 +71,7 @@ describe('Prometheus alert rules ↔ /metrics contract', () => {
   it('contains the alert classes', () => {
     const names = rules.map((r) => r.alert);
     expect(names).toEqual(
-      expect.arrayContaining(['SupportAgentLlmSaturation', 'SupportAgentLlmCircuitOpen', 'SupportAgentApprovalBacklog', 'SupportAgentVetoSpike', 'SupportAgentReviewRecoveryLow']),
+      expect.arrayContaining(['SupportAgentLlmSaturation', 'SupportAgentLlmCircuitOpen', 'SupportAgentApprovalBacklog', 'SupportAgentVetoSpike', 'SupportAgentReviewRecoveryLow', 'SupportAgentReviewThrash']),
     );
   });
 
@@ -125,6 +126,18 @@ describe('Prometheus alert rules ↔ /metrics contract', () => {
     expect(backlog!.expr).not.toContain('outcome="executed"');
   });
 
+  it('the thrash alert keys on repeated depth (depth pin, volume-gated)', () => {
+    const thrash = rules.find((r) => r.alert === 'SupportAgentReviewThrash');
+    expect(thrash).toBeDefined();
+    expect(thrash!.expr).toContain('support_agent_review_retry_depth_total');
+    expect(thrash!.expr).toContain('depth="repeated"');
+    expect(thrash!.expr).toContain('outcome="retried"');
+    // The totals family must never leak into the depth alert.
+    expect(thrash!.expr).not.toContain('support_agent_review_retries_total{');
+    // Volume-gated like VetoSpike so sparse traffic cannot fire it.
+    expect(thrash!.expr).toContain('increase(');
+  });
+
   it('the recovery-rate alert divides recovered by retried (ratio arithmetic pin)', async () => {
     const text = await seededRender();
     const recovery = rules.find((r) => r.alert === 'SupportAgentReviewRecoveryLow');
@@ -139,6 +152,9 @@ describe('Prometheus alert rules ↔ /metrics contract', () => {
     // the approvals family (a typo would cross-wire two lifecycles).
     expect(recovery!.expr).not.toContain('outcome="failed"');
     expect(recovery!.expr).not.toContain('approvals_total');
+    // Depth-blind by design: recovery is about all repaired runs; thrash
+    // is the alert that owns the depth split.
+    expect(recovery!.expr).not.toContain('depth=');
     // And the renderer really emits both label values, so the alert can
     // never be silently absent due to a label typo on the renderer side.
     expect(text).toContain('support_agent_review_retries_total{outcome="recovered"}');

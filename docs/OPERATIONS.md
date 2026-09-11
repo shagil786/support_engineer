@@ -127,7 +127,9 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   resolved `signerIds`. `GET /metrics` (same bearer auth) exposes the
   Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
   governed-run outcomes, policy decisions, SafetyNet vetoes, review-retry
-  recovery counts (`retried`/`recovered`/`failed`), and approval lifecycle
+  recovery counts (`retried`/`recovered`/`failed`, plus the depth split
+  `support_agent_review_retry_depth_total{depth=one_shot|repeated}` for
+  one-shot repairs vs thrash), and approval lifecycle
   counts (`requested`/`granted`/`denied`/`timed_out`/`executed`) —
   aggregated live from the event log.
 
@@ -135,12 +137,13 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   scrape config), then import `deploy/grafana/support-agent-dashboard.json`
   (uid `support-agent-ops`) — LLM error rate, latency percentiles, token
   burn, per-tool latency, policy decisions, vetoes, review-recovery rate,
-  and the approval queue out of the box. A contract test keeps the dashboard and the metric set
+  review-thrash share, and the approval queue out of the box. A contract test keeps the dashboard and the metric set
   from drifting apart. Add
   `deploy/prometheus/support-agent-alerts.yml` to your `rule_files` for
   provider-saturation (early warning + open breaker), approval-queue
   backlog, review-recovery sag (the reviewer's re-dance stops rescuing
-  runs), and SafetyNet veto-spike alerting — also contract-pinned.
+  runs), review thrash (repairs stop landing on the first try), and
+  SafetyNet veto-spike alerting — also contract-pinned.
   Pending approvals are in-memory, but boot-time reconciliation sweeps
   requests orphaned by a dead process (a terminal `approval_timeout` event
   per swept id, reported as `approvalsSwept` by `/readyz`-backed readiness

@@ -71,6 +71,18 @@ describe('renderMetrics', () => {
     expect(text).toContain('support_agent_review_retries_total{outcome="retried"} 3');
     expect(text).toContain('support_agent_review_retries_total{outcome="recovered"} 2');
     expect(text).toContain('support_agent_review_retries_total{outcome="failed"} 1');
+    // Depth split lives in its OWN family so label selectors can never match
+    // both granularities: one_shot = 1 repair landed, repeated = 2+ (thrash).
+    // Fixture: ts16 = 1 retry ok (one_shot/recovered), ts17 = 2 retries failed
+    // (repeated/failed), ts20 = 2 retries ok (repeated/recovered).
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="retried",depth="one_shot"} 1');
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="retried",depth="repeated"} 2');
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="recovered",depth="one_shot"} 1');
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="recovered",depth="repeated"} 1');
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="failed",depth="one_shot"} 0');
+    expect(text).toContain('support_agent_review_retry_depth_total{outcome="failed",depth="repeated"} 1');
+    // The depth family reconstructs the totals family exactly.
+    expect(text).not.toContain('support_agent_review_retry_depth_total{outcome="retried"}');
   });
 
   it('renders a valid (empty) body when the log has no events', async () => {
@@ -81,6 +93,11 @@ describe('renderMetrics', () => {
     expect(text).toContain('support_agent_review_retries_total{outcome="retried"} 0');
     expect(text).toContain('support_agent_review_retries_total{outcome="recovered"} 0');
     expect(text).toContain('support_agent_review_retries_total{outcome="failed"} 0');
+    for (const outcome of ['retried', 'recovered', 'failed']) {
+      for (const depth of ['one_shot', 'repeated']) {
+        expect(text).toContain(`support_agent_review_retry_depth_total{outcome="${outcome}",depth="${depth}"} 0`);
+      }
+    }
     expect(text.endsWith('\n')).toBe(true);
   });
 

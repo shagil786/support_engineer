@@ -88,6 +88,22 @@ describe('Grafana dashboard ↔ /metrics contract', () => {
     expect(raw).toContain('support_agent_review_retries_total');
   });
 
+  it('the thrash-share panel divides repeated-depth by total retried (depth ratio pin)', async () => {
+    const text = await seededRender();
+    const d = JSON.parse(readFileSync(dashboardPath, 'utf8')) as { panels: Array<{ title: string; targets?: Array<{ expr: string }> }> };
+    const thrashPanels = d.panels.filter((p) => /thrash/i.test(p.title));
+    expect(thrashPanels.length, 'a review thrash-share panel must exist').toBeGreaterThan(0);
+    for (const p of thrashPanels) {
+      const exprs = (p.targets ?? []).map((t) => t.expr).join('\n');
+      expect(exprs, `${p.title} must use the depth family`).toContain('support_agent_review_retry_depth_total');
+      expect(exprs, `${p.title} must use depth="repeated"`).toContain('depth="repeated"');
+      expect(exprs, `${p.title} must divide by the totals family`).toContain('support_agent_review_retries_total');
+      expect(exprs, `${p.title} must divide by outcome="retried"`).toContain('outcome="retried"');
+    }
+    // The renderer really emits the depth label the panel references.
+    expect(text).toContain('depth="repeated"');
+  });
+
   it('dashboard templating only uses label keys the renderer emits ({{model}}, {{ok}}, …)', async () => {
     const text = await seededRender();
     const { labelKeys } = metricRefsFromDashboard();

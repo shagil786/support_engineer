@@ -18,6 +18,7 @@
  *   safety_net_vetoes_total    which guardrail fires?
  *   approvals_total            how many approvals are requested, granted, denied, timed out?
  *   review_retries_total       how often did the reviewer's re-dance save a governed run?
+ *   review_retry_depth_total   of those, how many were repaired once vs thrashed (2+ repairs)?
  */
 import type { EventLog } from '../event-log/log.js';
 
@@ -83,6 +84,14 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   let reviewRetried = 0;
   let reviewRecovered = 0;
   let reviewFailed = 0;
+  // outcome x depth counters (depth: one_shot = 1 repair landed, repeated =
+  // 2+ — "did the first repair land?" is the thrash discriminator).
+  const reviewByDepth = new Map<string, number>(); // `${outcome}|${depth}` → count
+  const bumpDepth = (outcome: 'retried' | 'recovered' | 'failed', retries: number): void => {
+    const depth = retries === 1 ? 'one_shot' : 'repeated';
+    const key = `${outcome}|${depth}`;
+    reviewByDepth.set(key, (reviewByDepth.get(key) ?? 0) + 1);
+  };
 
   for await (const e of log.query({})) {
     switch (e.kind) {
@@ -110,6 +119,8 @@ export async function renderMetrics(log: EventLog): Promise<string> {
           reviewRetried += 1;
           if (e.finalResult.ok) reviewRecovered += 1;
           else reviewFailed += 1;
+          bumpDepth('retried', e.stats!.reviewRetries!);
+          bumpDepth(e.finalResult.ok ? 'recovered' : 'failed', e.stats!.reviewRetries!);
         }
         break;
       }
@@ -203,6 +214,17 @@ export async function renderMetrics(log: EventLog): Promise<string> {
   out.push(`support_agent_review_retries_total{outcome="retried"} ${reviewRetried}`);
   out.push(`support_agent_review_retries_total{outcome="recovered"} ${reviewRecovered}`);
   out.push(`support_agent_review_retries_total{outcome="failed"} ${reviewFailed}`);
+  // Thrash view: the SAME runs split by retry depth as a separate family —
+  // a {depth} label on the family above would make label selectors match
+  // both granularities and double-count additive queries (e.g. the recovery
+  // alert's volume floor). Separate names keep every existing query exact.
+  out.push('# HELP support_agent_review_retry_depth_total Governed runs that passed review only after a re-dance, by final result and retry depth (one_shot = first repair landed, repeated = 2+).');
+  out.push('# TYPE support_agent_review_retry_depth_total counter');
+  for (const outcome of ['retried', 'recovered', 'failed'] as const) {
+    for (const depth of ['one_shot', 'repeated'] as const) {
+      out.push(`support_agent_review_retry_depth_total{outcome="${outcome}",depth="${depth}"} ${reviewByDepth.get(`${outcome}|${depth}`) ?? 0}`);
+    }
+  }
 
   return `${out.join('\n')}\n`;
 }
