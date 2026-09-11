@@ -6,11 +6,12 @@
 # Rule-order matrix: the PII rule fires before every allow/approval rule, so
 # card-shaped args deny regardless of tool or intent
 # (pii_*_denied scenarios). No matching rule at all = default-deny
-# (default_deny_* scenarios). The default bundle's p01_alert_auto_incident
-# rule is currently shadowed by non_destructive_default_allow (its tools are
-# a subset and the allow rule carries no other conditions) — the P2 alert
-# scenario below pins the *behavior* either way; tightening that rule is a
-# bundle change the suite will catch.
+# (default_deny_* scenarios). Destructive-runbook approval is
+# intent-agnostic (matches handlers.ts): the *_destructive_runbook_requires
+# _approval scenarios pin the seams where an alert or triage incident tries
+# to execute a destructive runbook. The p01_alert_auto_incident rule is live
+# (ordered before the generic allow as of 2026-09-10) — the P2 alert scenario
+# pins that non-P0/P1 severities fall through to the generic allow.
 scenarios:
   # --- shipped baseline (behavior preserved) -------------------------------
   - id: read_only_log_query_allowed
@@ -164,3 +165,27 @@ scenarios:
     entities: {}
     action: { tool: invoke_human_on_slack, args: { target_user: oncall, message: 'customer escalates' } }
     expect: allow
+
+  # --- destructive approval is intent-agnostic (matches handlers.ts) -------
+  # The hard gate is DESTRUCTIVENESS, not how the request arrived. An alert
+  # (or any non-runbook_offer intent) proposing a destructive runbook must
+  # hit the same approval gate as a spoken offer.
+  - id: proactive_alert_destructive_runbook_requires_approval
+    intent: { kind: proactive_alert, subKind: incident }
+    entities: { severity: P1, runbookIds: [restart-all] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-all } }
+    expect: require_approval
+
+  - id: async_triage_destructive_runbook_requires_approval
+    intent: { kind: async_triage, subKind: incident }
+    entities: { severity: P1, runbookIds: [restart-all] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-all } }
+    expect: require_approval
+
+  # P0/P1 auto-filing covers file-and-notify tools; execute_runbook_script is
+  # not auto-approvable even at P0 — it needs explicit human sign-off.
+  - id: p0_alert_destructive_runbook_still_requires_approval
+    intent: { kind: proactive_alert, subKind: incident }
+    entities: { severity: P0, runbookIds: [restart-all] }
+    action: { tool: execute_runbook_script, args: { script_name: restart-all } }
+    expect: require_approval

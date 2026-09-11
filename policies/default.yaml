@@ -13,12 +13,13 @@ rules:
     effect: deny
     reason: PII guard
 
-  # Today's Guardrails.checkDestructive behavior as data: a destructive
-  # runbook offered in a meeting needs 2 admin signatures within 5 minutes.
-  # Must precede the generic runbook allow below (first match wins).
+  # Destructiveness is the gate, regardless of how the request arrived —
+  # a spoken offer, an async-triage incident, or a P0/P1 alert all hit the
+  # same approval ceremony (mirrors handlers.ts, which gates
+  # execute_runbook_script on action.destructive alone). No
+  # intent_subKind condition on purpose.
   - id: destructive_runbook_requires_admin_approval
     when:
-      intent_subKind: runbook_offer
       runbook_destructive: true
       tools_in: [execute_runbook_script]
     effect: require_approval
@@ -35,18 +36,10 @@ rules:
     effect: allow
     reason: read-only ops are default-allowed
 
-  # Everything else is allowed — matches handlers.ts, which gates only
-  # destructive runbooks behind approval. Non-destructive runbooks
-  # (no all/prod scope marker) fall through to this rule.
-  - id: non_destructive_default_allow
-    when:
-      tools_in: [jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt]
-    effect: allow
-    reason: non-destructive ops are default-allowed
-
-  # P0/P1 proactive alerts skip ceremony entirely (also covered by the rule
-  # above, but stated explicitly so tightening the default later cannot
-  # silently un-file incidents).
+  # P0/P1 proactive alerts skip ceremony for file-and-notify tools. Stated
+  # BEFORE the generic non-destructive allow so the rule is live (it was
+  # shadowed by the rule below until 2026-09-10) and so later tightening of
+  # the default cannot silently un-file incidents.
   - id: p01_alert_auto_incident
     when:
       intent_kind: proactive_alert
@@ -54,3 +47,14 @@ rules:
       tools_in: [jira_create_issue, meeting_interrupt]
     effect: allow
     reason: P0/P1 alerts are auto-filed
+
+  # Everything else is allowed — matches handlers.ts, which gates only
+  # destructive runbooks behind approval. Non-destructive runbooks
+  # (no all/prod scope marker, no provider flag) fall through to this rule.
+  # Deliberately intent-agnostic: pinning this to specific intent kinds would
+  # deny legitimate arrivals from async triage and alerts.
+  - id: non_destructive_default_allow
+    when:
+      tools_in: [jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt]
+    effect: allow
+    reason: non-destructive ops are default-allowed

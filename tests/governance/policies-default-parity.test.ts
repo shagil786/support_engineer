@@ -73,6 +73,18 @@ describe('policies/default.yaml parity with today\'s behavior', () => {
     expect(engine.evaluate(e, { tool: 'meeting_interrupt', args: { message: 'P1' } }).effect).toBe('allow');
   });
 
+  it('destructive runbooks require approval regardless of intent (alerts included)', () => {
+    const e = env({
+      intent: { kind: 'proactive_alert', subKind: 'incident' },
+      entities: { severity: 'P1', runbookIds: ['restart-all'] },
+      rawContext: { source: 'cloudwatch', ts: 1, payload: {} },
+    });
+    const r = engine.evaluate(e, { tool: 'execute_runbook_script', args: { script_name: 'restart-all' } });
+    expect(r.effect).toBe('require_approval');
+    expect(r.policyIds[0]).toBe('destructive_runbook_requires_admin_approval');
+    expect(r.approverCount).toBe(2);
+  });
+
   it('an unknown tool is default-denied', () => {
     const r = engine.evaluate(env(), { tool: 'deploy_to_prod' as ProposedAction['tool'], args: {} });
     expect(r.effect).toBe('deny');
