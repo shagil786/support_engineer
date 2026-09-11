@@ -31,4 +31,23 @@ describe('EvalRunner', () => {
     const runner = new EvalRunner({ engine });
     expect(() => runner.runScenarios('scenarios:\n  - id: x\n    bogus: true\n')).toThrow();
   });
+
+  it('rejects duplicate scenario ids (a doubled id makes passed/total ambiguous)', () => {
+    const engine = new PolicyEngine({ yaml: defaultYaml });
+    const runner = new EvalRunner({ engine });
+    const dup = [
+      'scenarios:',
+      '  - id: same_twice',
+      '    intent: { kind: meeting_response, subKind: question }',
+      '    entities: {}',
+      '    action: { tool: query_logs, args: { query_string: x } }',
+      '    expect: allow',
+      '  - id: same_twice',
+      '    intent: { kind: meeting_response, subKind: question }',
+      '    entities: {}',
+      '    action: { tool: query_logs, args: { query_string: x } }',
+      '    expect: allow',
+    ].join('\n');
+    expect(() => runner.runScenarios(dup)).toThrow(/duplicate scenario id/i);
+  });
 });

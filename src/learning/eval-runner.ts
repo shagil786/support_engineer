@@ -45,6 +45,14 @@ export class EvalRunner {
     const parsed: unknown = parseYaml(scenariosYaml);
     const file = ScenarioFileSchema.parse(parsed);
 
+    // Report integrity: a duplicated id makes `passed/total` ambiguous and a
+    // failure report unreadable — fail loud instead.
+    const seen = new Set<string>();
+    for (const s of file.scenarios) {
+      if (seen.has(s.id)) throw new Error(`duplicate scenario id: ${s.id}`);
+      seen.add(s.id);
+    }
+
     let passed = 0;
     const failures: EvalResult['failures'] = [];
     for (const s of file.scenarios) {
