@@ -17,7 +17,7 @@ dev; production should point at a mounted volume):
 
 | Path | Contents |
 |---|---|
-| `<DATA_DIR>/events/` | The append-only audit spine (`llm_call`, `understanding`, `governance`, `tool_call`, `agent_outcome`, …) |
+| `<DATA_DIR>/events/` | The append-only audit spine (`llm_call`, `understanding`, `governance`, `tool_call`, `agent_outcome` — whose `stats.reviewRetries` counts reviewer-repair re-dances —, …) |
 | `<DATA_DIR>/outcomes/` | Per-request outcome records the learning loop extracts from |
 | `<DATA_DIR>/memory/procedures.json` (+ `.meta.json`) | Durable learned procedures; the sidecar records the embedding identity |
 | `<DATA_DIR>/knowledge/kb.json` | The knowledge base snapshot (chunks; vectors re-embed on boot) |
@@ -126,19 +126,21 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   (ADR-0005). Grants are attributed: `approval_granted` events record the
   resolved `signerIds`. `GET /metrics` (same bearer auth) exposes the
   Prometheus text format: LLM calls/tokens/latency, tool calls/latency,
-  governed-run outcomes, policy decisions, SafetyNet vetoes, and approval
-  lifecycle counts (`requested`/`granted`/`denied`/`timed_out`/`executed`) —
+  governed-run outcomes, policy decisions, SafetyNet vetoes, review-retry
+  recovery counts (`retried`/`recovered`/`failed`), and approval lifecycle
+  counts (`requested`/`granted`/`denied`/`timed_out`/`executed`) —
   aggregated live from the event log.
 
 - **Monitoring**: scrape `GET /metrics` with Prometheus (bearer token in the
   scrape config), then import `deploy/grafana/support-agent-dashboard.json`
   (uid `support-agent-ops`) — LLM error rate, latency percentiles, token
-  burn, per-tool latency, policy decisions, vetoes, and the approval queue
-  out of the box. A contract test keeps the dashboard and the metric set
+  burn, per-tool latency, policy decisions, vetoes, review-recovery rate,
+  and the approval queue out of the box. A contract test keeps the dashboard and the metric set
   from drifting apart. Add
   `deploy/prometheus/support-agent-alerts.yml` to your `rule_files` for
   provider-saturation (early warning + open breaker), approval-queue
-  backlog, and SafetyNet veto-spike alerting — also contract-pinned.
+  backlog, review-recovery sag (the reviewer's re-dance stops rescuing
+  runs), and SafetyNet veto-spike alerting — also contract-pinned.
   Pending approvals are in-memory, but boot-time reconciliation sweeps
   requests orphaned by a dead process (a terminal `approval_timeout` event
   per swept id, reported as `approvalsSwept` by `/readyz`-backed readiness
@@ -169,12 +171,31 @@ Outcomes flow from serve; the cron extracts procedures, refreshes the library
 serve short-circuits with, and writes the efficacy snapshot. Ticks report via
 `[learning] tick …` log lines.
 
+The efficacy snapshot's pipeline bucket carries the review-retry evidence
+alongside the aggregates: `retried` (requests that spent reviewer-retry
+budget), `recovered` (of those, the ones whose final outcome was ok),
+`recoveryRate`, and `avgReviewRetries`. The SuggestionQueue reads the same
+signal and **withholds destructive-approval relaxation** (`approver_count`
+lowering) while at least half of the approval outcomes in its window needed
+review retries — a review that passes only after a re-dance is evidence the
+pre-grant bar is doing real work, not ceremony.
+
 ## Supervisor caps — `SUPERVISOR_*`
 
-`SUPERVISOR_MAX_WALLCLOCK_MS` (default 60s), `SUPERVISOR_MAX_HOPS` (8),
-`SUPERVISOR_MAX_TOKENS` (50k), `SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS` (3).
+`SUPERVISOR_MAX_WALLCLOCK_MS` (default 60s), `SUPERVISOR_MAX_HOPS` (10),
+`SUPERVISOR_MAX_TOKENS` (50k), `SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS` (3),
+`SUPERVISOR_MAX_REVIEW_RETRIES` (1).
 Raise the wall clock for slow LLM providers; each var is optional and
 independently floor-checked.
+
+When the pre-execution review returns a correctable `fail`, the supervisor
+re-runs the investigation dance (triage → investigate → review) so the
+planners can act on the reviewer's feedback — up to
+`SUPERVISOR_MAX_REVIEW_RETRIES` times. A `reask` verdict (needs a human)
+never retries or executes. Retries consume the shared hop/token caps — the
+retry budget widens fidelity, never the caps — and the count lands on the
+`agent_outcome` event (`stats.reviewRetries`) so degraded-but-recovered
+requests are visible on the spine.
 
 ## LLM transient failures — retry ladder + saturation breaker
 
