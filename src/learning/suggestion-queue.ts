@@ -32,7 +32,15 @@ export interface SuggestionQueueOptions {
 interface LoadedOutcome {
   id: string;
   approvals: unknown[];
+  /** Reviewer-fail re-dances this request needed (OutcomeRecord field).
+   *  Absent/malformed = 0 — unknown retry history never invents evidence. */
+  reviewRetries: number;
 }
+
+/** Above this share of approval outcomes needing review retries, relaxation
+ *  is withheld: a review that passes only after a re-dance is evidence the
+ *  pre-grant bar is doing real work, not ceremony. */
+const RETRY_LOAD_RATIO = 0.5;
 
 export class SuggestionQueue {
   private readonly outcomesDir: string;
@@ -63,11 +71,19 @@ export class SuggestionQueue {
       }
       const approvals = (data as { approvals?: unknown }).approvals;
       if (Array.isArray(approvals) && approvals.length > 0) {
-        withApprovals.push({ id: f.replace(/\.json$/, ''), approvals });
+        const rawRetries = (data as { reviewRetries?: unknown }).reviewRetries;
+        const reviewRetries = typeof rawRetries === 'number' && Number.isFinite(rawRetries) && rawRetries > 0 ? rawRetries : 0;
+        withApprovals.push({ id: f.replace(/\.json$/, ''), approvals, reviewRetries });
       }
     }
 
     const out: PolicySuggestion[] = [];
+    const retried = withApprovals.filter((o) => o.reviewRetries > 0).length;
+    if (withApprovals.length > 0 && retried / withApprovals.length >= RETRY_LOAD_RATIO) {
+      // Reviews are repairing requests before every grant — keep the bar.
+      // This is a deliberate stand-down (no suggestion), not an error.
+      return [];
+    }
     if (withApprovals.length >= this.threshold) {
       out.push({
         id: correlationId(this.now()),

@@ -12,12 +12,13 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const approvalOutcome = (i: number): string =>
+const approvalOutcome = (i: number, reviewRetries?: number): string =>
   JSON.stringify({
     correlationId: `o${i}`,
     ts: i,
     toolCalls: [{ kind: 'tool_call', tool: 'execute_runbook_script', args: { script_name: 'restart-all' }, result: { ok: true, data: {} }, latencyMs: 5, attempts: 1 }],
     approvals: [{ correlationId: `o${i}`, ts: i, layer: 'governance', source: 'slack', kind: 'approval_granted', approvalId: `a${i}`, signerRole: 'admin' }],
+    ...(reviewRetries !== undefined ? { reviewRetries } : {}),
   });
 
 describe('SuggestionQueue', () => {
@@ -48,6 +49,27 @@ describe('SuggestionQueue', () => {
     }
     const q = new SuggestionQueue({ outcomesDir: dir, destructiveApprovalsThreshold: 3 });
     expect(await q.scan()).toEqual([]);
+  });
+
+  it('stands down relaxation while review retries are load-bearing before approvals', async () => {
+    mkdirSync(dir, { recursive: true });
+    // 4 approval outcomes, half of them recovered only after review retries —
+    // the pre-grant review is doing real work, so relaxation is withheld.
+    for (let i = 0; i < 2; i++) writeFileSync(join(dir, `r${i}.json`), approvalOutcome(i, 1));
+    for (let i = 0; i < 2; i++) writeFileSync(join(dir, `p${i}.json`), approvalOutcome(i));
+    const q = new SuggestionQueue({ outcomesDir: dir, destructiveApprovalsThreshold: 3 });
+    expect(await q.scan()).toEqual([]);
+  });
+
+  it('still proposes relaxation when retries are rare among approval outcomes', async () => {
+    mkdirSync(dir, { recursive: true });
+    // 4 approval outcomes, only one touched by a retry — calm process.
+    writeFileSync(join(dir, 'r0.json'), approvalOutcome(0, 1));
+    for (let i = 0; i < 3; i++) writeFileSync(join(dir, `p${i}.json`), approvalOutcome(i));
+    const q = new SuggestionQueue({ outcomesDir: dir, destructiveApprovalsThreshold: 3 });
+    const out = await q.scan();
+    expect(out.length).toBeGreaterThan(0);
+    expect(out[0]?.proposedChange.type).toBe('modify_rule');
   });
 
   it('tolerates malformed outcome files', async () => {

@@ -48,6 +48,8 @@ interface OutcomeStats {
   wallClockMs: number;
   procedureId?: string;
   fallbackFrom?: string;
+  /** Reviewer-fail re-dances this request needed (supervisor additive). */
+  reviewRetries?: number;
 }
 
 function parseStats(x: unknown): OutcomeStats | undefined {
@@ -66,6 +68,7 @@ function parseStats(x: unknown): OutcomeStats | undefined {
     wallClockMs,
     procedureId: typeof o['procedureId'] === 'string' ? o['procedureId'] : undefined,
     fallbackFrom: typeof o['fallbackFrom'] === 'string' ? o['fallbackFrom'] : undefined,
+    reviewRetries: num(o['reviewRetries']),
   };
 }
 
@@ -90,6 +93,14 @@ export interface EfficacySnapshot {
     avgWallClockMs: number;
     /** Pipeline requests that attempted (and abandoned) a procedure. */
     fallbacks: number;
+    /** Pipeline requests that spent reviewer-retry budget. */
+    retried: number;
+    /** Of those, the requests whose final outcome was ok — true recoveries. */
+    recovered: number;
+    /** recovered / retried (0 when nothing retried). */
+    recoveryRate: number;
+    /** Mean retries per served pipeline request (0 when none). */
+    avgReviewRetries: number;
   };
   observedEvents: number;
   /** Ids retired by the last applyFeedback(). */
@@ -113,7 +124,7 @@ export class EfficacyTracker {
   private readonly minLiveSuccessRate: number;
   private readonly now: () => number;
   private readonly perProcedure = new Map<string, { served: number; ok: number; hops: number; calls: number; ms: number }>();
-  private readonly pipeline = { served: 0, ok: 0, hops: 0, calls: 0, ms: 0, fallbacks: 0 };
+  private readonly pipeline = { served: 0, ok: 0, hops: 0, calls: 0, ms: 0, fallbacks: 0, retries: 0, retried: 0, retriedOk: 0 };
   private observedEvents = 0;
   private retiredIds: string[] = [];
   /** agent_outcome correlationIds already counted. The event log's query API
@@ -152,8 +163,15 @@ export class EfficacyTracker {
         this.pipeline.hops += stats.hops;
         this.pipeline.calls += stats.toolCalls;
         this.pipeline.ms += stats.wallClockMs;
-        if (e.finalResult.ok) this.pipeline.ok++;
+        const ok = e.finalResult.ok;
+        if (ok) this.pipeline.ok++;
         if (stats.fallbackFrom) this.pipeline.fallbacks++;
+        const retries = Math.max(0, stats.reviewRetries ?? 0);
+        if (retries > 0) {
+          this.pipeline.retried++;
+          this.pipeline.retries += retries;
+          if (ok) this.pipeline.retriedOk++;
+        }
       }
     }
     await this.persistSnapshot();
@@ -221,6 +239,10 @@ export class EfficacyTracker {
         avgToolCalls: this.pipeline.served ? this.pipeline.calls / this.pipeline.served : 0,
         avgWallClockMs: this.pipeline.served ? this.pipeline.ms / this.pipeline.served : 0,
         fallbacks: this.pipeline.fallbacks,
+        retried: this.pipeline.retried,
+        recovered: this.pipeline.retriedOk,
+        recoveryRate: this.pipeline.retried ? this.pipeline.retriedOk / this.pipeline.retried : 0,
+        avgReviewRetries: this.pipeline.served ? this.pipeline.retries / this.pipeline.served : 0,
       },
       observedEvents: this.observedEvents,
       retiredIds: [...this.retiredIds],

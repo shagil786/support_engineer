@@ -44,6 +44,27 @@ describe('OutcomeRecorder', () => {
     expect(json.correlationId).toBe(cid);
   });
 
+  it('carries stats.reviewRetries onto the record when the outcome event has it', async () => {
+    const log = new JsonlFileEventLog({ baseDir: eventsDir });
+    const rec = new OutcomeRecorder({ eventLog: log, outcomesDir });
+    const cid = 'cid-retry';
+    await log.append({
+      correlationId: cid, ts: 1, layer: 'execution', source: 'internal', kind: 'agent_outcome',
+      finalResult: { ok: true, summary: 'done' },
+      stats: { source: 'pipeline', hops: 9, toolCalls: 2, wallClockMs: 500, reviewRetries: 1 },
+    });
+    const got = await rec.record(cid);
+    expect(got?.reviewRetries).toBe(1);
+  });
+
+  it('omits reviewRetries for legacy outcome events without stats', async () => {
+    const log = new JsonlFileEventLog({ baseDir: eventsDir });
+    const rec = new OutcomeRecorder({ eventLog: log, outcomesDir });
+    await log.append({ correlationId: 'cid-legacy', ts: 1, layer: 'execution', source: 'internal', kind: 'agent_outcome', finalResult: { ok: true, summary: 'done' } });
+    const got = await rec.record('cid-legacy');
+    expect(got?.reviewRetries).toBeUndefined();
+  });
+
   it('returns a record with no finalResult when the agent outcome is missing', async () => {
     const log = new JsonlFileEventLog({ baseDir: eventsDir });
     const rec = new OutcomeRecorder({ eventLog: log, outcomesDir });

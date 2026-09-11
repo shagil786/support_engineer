@@ -17,6 +17,9 @@ export interface OutcomeRecord {
   correlationId: string;
   toolCalls: ToolCallEvent[];
   finalResult?: AgentOutcomeEvent['finalResult'];
+  /** Reviewer-fail re-dances the request needed before its outcome
+   *  (additive, from agent_outcome.stats; absent on legacy records). */
+  reviewRetries?: number;
   approvals: ApprovalGrantedEvent[];
   ts: number;
 }
@@ -51,6 +54,7 @@ export class OutcomeRecorder {
       correlationId,
       toolCalls,
       ...(final ? { finalResult: final.finalResult } : {}),
+      ...(final?.stats?.reviewRetries !== undefined ? { reviewRetries: final.stats.reviewRetries } : {}),
       approvals,
       ts: this.now(),
     };

@@ -17,6 +17,7 @@ type OutcomeStats = {
   wallClockMs: number;
   procedureId?: string;
   fallbackFrom?: string;
+  reviewRetries?: number;
 };
 
 const procStats = (over: Partial<OutcomeStats> = {}): OutcomeStats => ({
@@ -86,6 +87,33 @@ describe('EfficacyTracker.scan', () => {
     expect(snap.pipeline.served).toBe(2);
     expect(snap.pipeline.fallbacks).toBe(1);
     expect(snap.pipeline.avgToolCalls).toBe(5); // (6 + 4) / 2
+  });
+
+  it('aggregates review-retry evidence into the pipeline bucket', async () => {
+    // 4 pipeline requests: one recovered after 2 retries, one recovered after 1,
+    // one retried but still failed, one never retried.
+    await log.append(outcomeEvent('r1', true, { source: 'pipeline', hops: 9, toolCalls: 3, wallClockMs: 800, reviewRetries: 2 }));
+    await log.append(outcomeEvent('r2', true, { source: 'pipeline', hops: 6, toolCalls: 2, wallClockMs: 500, reviewRetries: 1 }));
+    await log.append(outcomeEvent('r3', false, { source: 'pipeline', hops: 6, toolCalls: 1, wallClockMs: 400, reviewRetries: 1 }));
+    await log.append(outcomeEvent('r4', true, { source: 'pipeline', hops: 3, toolCalls: 1, wallClockMs: 200 }));
+    const tracker = new EfficacyTracker({ eventLog: log, episodic: new EpisodicMemory({}) });
+    await tracker.scan();
+    const p = tracker.snapshot().pipeline;
+    expect(p.retried).toBe(3);
+    expect(p.recovered).toBe(2); // r1 + r2; r3 failed after retries
+    expect(p.recoveryRate).toBeCloseTo(2 / 3);
+    expect(p.avgReviewRetries).toBeCloseTo(1); // (2+1+1+0)/4
+  });
+
+  it('keeps zero retry aggregates when no request spent budget (legacy shape)', async () => {
+    await log.append(outcomeEvent('n1', true, { source: 'pipeline', hops: 3, toolCalls: 1, wallClockMs: 100 }));
+    const tracker = new EfficacyTracker({ eventLog: log, episodic: new EpisodicMemory({}) });
+    await tracker.scan();
+    const p = tracker.snapshot().pipeline;
+    expect(p.retried).toBe(0);
+    expect(p.recovered).toBe(0);
+    expect(p.recoveryRate).toBe(0);
+    expect(p.avgReviewRetries).toBe(0);
   });
 
   it('ignores legacy agent_outcome events without stats', async () => {
