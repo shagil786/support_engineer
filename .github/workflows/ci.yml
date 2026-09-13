@@ -68,8 +68,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Tests
-        run: npm test
+      - name: Tests (with coverage ratchet)
+        # Same suite as `npm test`, but the v8 coverage run enforces the
+        # thresholds in vitest.config.ts — a coverage drop fails the job.
+        run: npm run test:coverage
 
       - name: Policy eval scenarios
         run: npm run eval
