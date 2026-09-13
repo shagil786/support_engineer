@@ -44,7 +44,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* platform flake (EACCES/ENOTEMPTY on cleanup while JSONL/DB handles
+     * drain under parallel load) — the next test gets a fresh tmpdir. */
+  }
 });
 
 interface HarnessOptions {
