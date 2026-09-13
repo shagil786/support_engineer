@@ -70,6 +70,9 @@ Integrations are dependency-free ports you wire in:
 
 ## Getting started
 
+Requires Node ≥ 22.12 (the `.nvmrc` line is what production ships); npm refuses
+installs below the floor.
+
 ```bash
 npm install
 npm run typecheck
