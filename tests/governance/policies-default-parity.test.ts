@@ -85,6 +85,28 @@ describe('policies/default.yaml parity with today\'s behavior', () => {
     expect(r.approverCount).toBe(2);
   });
 
+  it('evidence/change/signal/blast reads are allowed (read-only)', () => {
+    for (const action of [
+      { tool: 'query_evidence', args: { service: 'checkout-service' } },
+      { tool: 'correlate_changes', args: { service: 's', incident_ts: 5 } },
+      { tool: 'query_signals', args: { service: 's', from: 0, to: 5 } },
+      { tool: 'assess_blast_radius', args: { service: 's', action: 'restart' } },
+    ] as Array<{ tool: 'query_evidence'; args: Record<string, unknown> }>) {
+      const r = engine.evaluate(env(), action as never);
+      expect(r.effect).toBe('allow');
+      expect(r.policyIds).toContain('read_only_default_allow');
+    }
+  });
+
+  it('remediation verification is allowed (fail-closed reads)', () => {
+    const r = engine.evaluate(env(), {
+      tool: 'verify_remediation',
+      args: { service: 's', criteria: [{ metric: 'error_rate', op: 'lt', threshold: 0.01, label: 'x' }] },
+    } as never);
+    expect(r.effect).toBe('allow');
+    expect(r.policyIds).toContain('remediation_verification_allow');
+  });
+
   it('an unknown tool is default-denied', () => {
     const r = engine.evaluate(env(), { tool: 'deploy_to_prod' as ProposedAction['tool'], args: {} });
     expect(r.effect).toBe('deny');

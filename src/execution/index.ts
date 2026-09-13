@@ -13,6 +13,11 @@ export {
   ExecuteRunbookSchema,
   InvokeHumanOnSlackSchema,
   MeetingInterruptSchema,
+  QueryEvidenceSchema,
+  CorrelateChangesSchema,
+  QuerySignalsSchema,
+  VerifyRemediationSchema,
+  AssessBlastSchema,
 } from './tools/schemas.js';
 export { TriageAgent, type TriageDecision } from './agents/triage.js';
 export { InvestigatorAgent, type InvestigatorDecision } from './agents/investigator.js';

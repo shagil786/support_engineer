@@ -115,6 +115,18 @@ export interface PlatformOptions {
   };
   /** SafetyNet speaker registry. Default: unknown = guest, 'approver' = admin. */
   speakerRole?: (speakerId: string) => 'admin' | 'engineer' | 'viewer' | 'guest' | undefined;
+  /** Live incident evidence graph (read-only investigator queries). */
+  evidenceGraph?: import('./evidence/graph.js').EvidenceGraph;
+  /** GitHub/CI-CD change feed (read-only correlation). */
+  changeProvider?: import('./change/types.js').ChangeProvider;
+  /** Metrics backend (Prometheus/Grafana/Datadog/New Relic adapters). */
+  metricsProvider?: import('./signals/types.js').MetricsProvider;
+  /** Distributed-trace backend (OpenTelemetry adapters). */
+  traceProvider?: import('./signals/types.js').TraceProvider;
+  /** Service dependency graph for blast-radius assessment. */
+  topology?: import('./topology/blast.js').ServiceTopology;
+  /** Named synthetic check runner (e.g. synthetic checkout). */
+  syntheticCheck?: (name: string) => Promise<boolean>;
   /** Where pipeline speech is delivered (TTS bridge / console). The optional
    *  second argument is the Slack thread to reply in when the utterance came
    *  from one; hosts that ignore it keep the bare-text shape. */
@@ -303,6 +315,12 @@ export function createPlatform(opts: PlatformOptions): Platform {
       ...(opts.slack ? { slackNotifier: opts.slack } : {}),
       runbookProvider,
       ...(opts.deliverSpeech ? { speak: (text: string) => opts.deliverSpeech!(text) } : {}),
+      ...(opts.evidenceGraph ? { evidenceGraph: opts.evidenceGraph } : {}),
+      ...(opts.changeProvider ? { changeProvider: opts.changeProvider } : {}),
+      ...(opts.metricsProvider ? { metricsProvider: opts.metricsProvider } : {}),
+      ...(opts.traceProvider ? { traceProvider: opts.traceProvider } : {}),
+      ...(opts.topology ? { topology: opts.topology } : {}),
+      ...(opts.syntheticCheck ? { syntheticCheck: opts.syntheticCheck } : {}),
     },
     safetyNet,
     eventLog,

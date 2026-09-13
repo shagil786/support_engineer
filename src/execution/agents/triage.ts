@@ -10,6 +10,7 @@ import { LlmAgent, type AgentRunInput } from './base.js';
 const ToolEnum = z.enum([
   'jira_create_issue', 'query_logs', 'execute_runbook_script',
   'invoke_human_on_slack', 'meeting_interrupt',
+  'query_evidence', 'correlate_changes', 'query_signals', 'assess_blast_radius', 'verify_remediation',
 ]);
 
 const Schema = z.object({

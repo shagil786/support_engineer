@@ -295,9 +295,10 @@ describe('OpenAiCompatibleClient', () => {
 });
 
 describe('tool registry schemas', () => {
-  it('defines the six required tools with spec names', () => {
+  it('defines the six required tools with spec names (plus evidence/change/signal additions)', () => {
     expect(Object.keys(TOOL_SCHEMAS).sort()).toEqual([
-      'execute_runbook_script', 'invoke_human_on_slack', 'jira_create_issue', 'jira_get_issue', 'meeting_interrupt', 'query_logs',
+      'assess_blast_radius', 'correlate_changes', 'execute_runbook_script', 'invoke_human_on_slack', 'jira_create_issue',
+      'jira_get_issue', 'meeting_interrupt', 'query_evidence', 'query_logs', 'query_signals', 'verify_remediation',
     ]);
   });
 
@@ -310,7 +311,7 @@ describe('tool registry schemas', () => {
 
   it('serialize to the OpenAI tools array format (type wrapper)', () => {
     const tools = schemasToOpenAiTools();
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(11);
     for (const t of tools) {
       expect(t.type).toBe('function');
       expect(typeof t.function.name).toBe('string');

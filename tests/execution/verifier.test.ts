@@ -33,6 +33,24 @@ describe('verifier', () => {
     expect(r.reason).toMatch(/PII|filter/i);
   });
 
+  it('passes read-only evidence/change/signal results, fails their errors', () => {
+    expect(verifyResult('query_evidence', { ok: true, data: { nodes: [] } }).passed).toBe(true);
+    expect(verifyResult('correlate_changes', { ok: true, data: { suspects: [] } }).passed).toBe(true);
+    expect(verifyResult('query_signals', { ok: true, data: {} }).passed).toBe(true);
+    expect(verifyResult('query_evidence', { ok: false, error: 'unwired' }).passed).toBe(false);
+  });
+
+  it('requires a real risk tier on blast assessments', () => {
+    expect(verifyResult('assess_blast_radius', { ok: true, data: { risk: 'medium' } }).passed).toBe(true);
+    expect(verifyResult('assess_blast_radius', { ok: true, data: {} }).passed).toBe(false);
+  });
+
+  it('requires a confirmed verdict on remediation verification', () => {
+    expect(verifyResult('verify_remediation', { ok: true, data: { passed: true } }).passed).toBe(true);
+    expect(verifyResult('verify_remediation', { ok: true, data: { passed: false } }).passed).toBe(false);
+    expect(verifyResult('verify_remediation', { ok: false, error: 'not verified → escalate' }).passed).toBe(false);
+  });
+
   it('unknown tools fall back to ok/not-ok', () => {
     expect(verifyResult('meeting_interrupt', { ok: true, data: {} }).passed).toBe(true);
     expect(verifyResult('meeting_interrupt', { ok: false, error: 'x' }).passed).toBe(false);

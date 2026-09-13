@@ -2,6 +2,7 @@
  *
  *  Run:  npm run demo          (interactive: type  speakerId: text  lines)
  *         npm run demo -- --script   (built-in scripted war-room scene)
+ *         npm run demo -- --incident (autonomous support-engineer incident demo)
  *
  *  One brain, driven like production: every utterance — scripted or typed —
  *  enters through platform.pipeline.processUtterance, the same entry the
@@ -139,6 +140,13 @@ async function main(): Promise<void> {
   console.log(`📚 knowledge: ${chunks} chunks seeded from examples/knowledge/*.md`);
   await platform.ready();
   console.log('=== Support Voice Agent — offline demo (one pipeline brain, fake Jira/Slack, no network) ===');
+
+  if (process.argv.includes('--incident')) {
+    const { runIncidentDemo } = await import('./incident.js');
+    await runIncidentDemo();
+    return;
+  }
+
   console.log('Type lines as  speaker: text   — or: /script /summary /quit (or restart with --script)\n');
 
   if (process.argv.includes('--script')) {

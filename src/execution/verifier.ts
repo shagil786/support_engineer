@@ -39,6 +39,23 @@ const CHECKS: Record<string, Check> = {
   invoke_human_on_slack: (r) =>
     r.ok ? { passed: true } : { passed: false, reason: 'slack notification did not succeed' },
   query_logs: (r) => (r.ok ? { passed: true } : { passed: false, reason: 'log query failed' }),
+  query_evidence: (r) => (r.ok ? { passed: true } : { passed: false, reason: 'evidence query failed' }),
+  correlate_changes: (r) => (r.ok ? { passed: true } : { passed: false, reason: 'change correlation failed' }),
+  query_signals: (r) => (r.ok ? { passed: true } : { passed: false, reason: 'signal query failed' }),
+  assess_blast_radius: (r) => {
+    if (!r.ok) return { passed: false, reason: 'blast assessment failed' };
+    const risk = (r.data as { risk?: unknown } | undefined)?.risk;
+    if (risk !== 'low' && risk !== 'medium' && risk !== 'critical') {
+      return { passed: false, reason: 'blast assessment missing risk tier' };
+    }
+    return { passed: true };
+  },
+  verify_remediation: (r) => {
+    if (!r.ok) return { passed: false, reason: 'remediation not verified' };
+    const v = (r.data as { passed?: unknown } | undefined)?.passed;
+    if (v !== true) return { passed: false, reason: 'remediation verdict not confirmed' };
+    return { passed: true };
+  },
 };
 
 export function verifyResult(tool: string, result: ToolResult, opts: VerifyOptions = {}): Verification {

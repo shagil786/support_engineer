@@ -120,6 +120,42 @@ export const handlers: Record<ToolName, (args: unknown, deps: ToolDependencies) 
     }
   },
 
+  async query_evidence(args, deps) {
+    void deps;
+    const a = (args ?? {}) as Record<string, unknown>;
+    const service = str(a, 'service');
+    if (!service) return { ok: false, error: 'query_evidence requires service' };
+    return { ok: false, error: 'query_evidence unavailable — evidence graph not configured' };
+  },
+
+  async correlate_changes(args, deps) {
+    void deps;
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (!str(a, 'service')) return { ok: false, error: 'correlate_changes requires service' };
+    return { ok: false, error: 'correlate_changes unavailable — change provider not configured' };
+  },
+
+  async query_signals(args, deps) {
+    void deps;
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (!str(a, 'service')) return { ok: false, error: 'query_signals requires service' };
+    return { ok: false, error: 'query_signals unavailable — metrics/trace providers not configured' };
+  },
+
+  async verify_remediation(args, deps) {
+    void deps;
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (!str(a, 'service')) return { ok: false, error: 'verify_remediation requires service' };
+    return { ok: false, error: 'verify_remediation unavailable — metrics provider not configured' };
+  },
+
+  async assess_blast_radius(args, deps) {
+    void deps;
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (!str(a, 'service')) return { ok: false, error: 'assess_blast_radius requires service' };
+    return { ok: false, error: 'assess_blast_radius unavailable — topology not configured' };
+  },
+
   async meeting_interrupt(args, deps) {
     if (!deps.speak) return unwired('meeting_interrupt');
     const a = (args ?? {}) as Record<string, unknown>;

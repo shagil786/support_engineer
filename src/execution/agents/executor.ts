@@ -10,7 +10,7 @@ import { LlmAgent, type AgentRunInput } from './base.js';
 const Schema = z.object({
   sideEffects: z.array(
     z.object({
-      tool: z.enum(['jira_create_issue', 'execute_runbook_script', 'invoke_human_on_slack', 'meeting_interrupt']),
+      tool: z.enum(['jira_create_issue', 'execute_runbook_script', 'invoke_human_on_slack', 'meeting_interrupt', 'verify_remediation', 'assess_blast_radius']),
       args: z.record(z.string(), z.unknown()),
     }),
   ).default([]),
@@ -23,7 +23,8 @@ export class ExecutorAgent extends LlmAgent<typeof Schema> {
   protected systemPrompt =
     'You are the ExecutorAgent. Plan the minimal side-effect steps that resolve the request. ' +
     'Output ONLY JSON: { "sideEffects": [{ "tool": string, "args": object }] }. ' +
-    'Tools: jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt.';
+    'Tools: jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt, verify_remediation, assess_blast_radius. ' +
+    'After every execute_runbook_script, plan verify_remediation for the same service; before risky actions plan assess_blast_radius first.';
 
   protected fallback(_input: AgentRunInput): ExecutorDecision {
     return { sideEffects: [] };

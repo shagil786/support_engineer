@@ -11,12 +11,22 @@ import {
   ExecuteRunbookSchema,
   InvokeHumanOnSlackSchema,
   MeetingInterruptSchema,
+  QueryEvidenceSchema,
+  CorrelateChangesSchema,
+  QuerySignalsSchema,
+  VerifyRemediationSchema,
+  AssessBlastSchema,
   type JiraGetIssueArgs,
   type JiraCreateIssueArgs,
   type QueryLogsArgs,
   type ExecuteRunbookArgs,
   type InvokeHumanOnSlackArgs,
   type MeetingInterruptArgs,
+  type QueryEvidenceArgs,
+  type CorrelateChangesArgs,
+  type QuerySignalsArgs,
+  type VerifyRemediationArgs,
+  type AssessBlastArgs,
 } from './schemas.js';
 import { jiraGetIssue } from './jira-get.js';
 import { jiraCreateIssue } from './jira.js';
@@ -24,6 +34,11 @@ import { queryLogs } from './logs.js';
 import { executeRunbook } from './runbook.js';
 import { invokeHumanOnSlack } from './slack.js';
 import { meetingInterrupt } from './memory.js';
+import { queryEvidence } from './evidence.js';
+import { correlateChangesTool } from './changes.js';
+import { querySignals } from './signals.js';
+import { verifyRemediationTool } from './verify-remediation.js';
+import { assessBlast } from './blast.js';
 
 /** Integration ports injected into tool executors. Mirrors the real client
  *  interfaces so the Supervisor can wire actual instances directly. */
@@ -38,6 +53,18 @@ export interface ToolContext {
   speak?: (text: string) => void;
   /** The speaker whose utterance triggered this tool round. */
   currentSpeaker?: () => string | undefined;
+  /** Live incident evidence graph (read-only queries). Unwired → query_evidence degrades honestly. */
+  evidenceGraph?: import('../../evidence/graph.js').EvidenceGraph;
+  /** GitHub/CI-CD change feed (read-only). Unwired → correlate_changes degrades honestly. */
+  changeProvider?: import('../../change/types.js').ChangeProvider;
+  /** Metrics backend (Prometheus/Grafana/Datadog/New Relic adapters satisfy this). */
+  metricsProvider?: import('../../signals/types.js').MetricsProvider;
+  /** Distributed-trace backend (OpenTelemetry adapters satisfy this). */
+  traceProvider?: import('../../signals/types.js').TraceProvider;
+  /** Service dependency graph for blast-radius assessment. */
+  topology?: import('../../topology/blast.js').ServiceTopology;
+  /** Named synthetic check runner (e.g. synthetic checkout). */
+  syntheticCheck?: (name: string) => Promise<boolean>;
 }
 
 export interface ToolEntry<TSchema extends z.ZodType = z.ZodType> {
@@ -69,6 +96,26 @@ export const TOOL_REGISTRY = {
   meeting_interrupt: {
     schema: MeetingInterruptSchema,
     execute: (args: MeetingInterruptArgs, ctx: ToolContext): Promise<ToolResult> => meetingInterrupt(args, ctx),
+  },
+  query_evidence: {
+    schema: QueryEvidenceSchema,
+    execute: (args: QueryEvidenceArgs, ctx: ToolContext): Promise<ToolResult> => queryEvidence(args, ctx),
+  },
+  correlate_changes: {
+    schema: CorrelateChangesSchema,
+    execute: (args: CorrelateChangesArgs, ctx: ToolContext): Promise<ToolResult> => correlateChangesTool(args, ctx),
+  },
+  query_signals: {
+    schema: QuerySignalsSchema,
+    execute: (args: QuerySignalsArgs, ctx: ToolContext): Promise<ToolResult> => querySignals(args, ctx),
+  },
+  verify_remediation: {
+    schema: VerifyRemediationSchema,
+    execute: (args: VerifyRemediationArgs, ctx: ToolContext): Promise<ToolResult> => verifyRemediationTool(args, ctx),
+  },
+  assess_blast_radius: {
+    schema: AssessBlastSchema,
+    execute: (args: AssessBlastArgs, ctx: ToolContext): Promise<ToolResult> => assessBlast(args, ctx),
   },
 } as const satisfies Record<ToolName, ToolEntry>;
 

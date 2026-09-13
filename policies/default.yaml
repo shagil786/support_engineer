@@ -29,10 +29,11 @@ rules:
     on_timeout: deny
     reason: destructive runbooks require 2 admin signatures
 
-  # Read-only ops are always allowed.
+  # Read-only ops are always allowed — evidence/change/signal/blast reads
+  # never mutate state, so the investigator can use them freely.
   - id: read_only_default_allow
     when:
-      tools_in: [query_logs, jira_get_issue]
+      tools_in: [query_logs, jira_get_issue, query_evidence, correlate_changes, query_signals, assess_blast_radius]
     effect: allow
     reason: read-only ops are default-allowed
 
@@ -53,6 +54,14 @@ rules:
   # (no all/prod scope marker, no provider flag) fall through to this rule.
   # Deliberately intent-agnostic: pinning this to specific intent kinds would
   # deny legitimate arrivals from async triage and alerts.
+  # Post-action verification reads metrics (fail-closed): allowed so the
+  # executor can always confirm mitigation after a runbook.
+  - id: remediation_verification_allow
+    when:
+      tools_in: [verify_remediation]
+    effect: allow
+    reason: remediation verification is default-allowed
+
   - id: non_destructive_default_allow
     when:
       tools_in: [jira_create_issue, execute_runbook_script, invoke_human_on_slack, meeting_interrupt]

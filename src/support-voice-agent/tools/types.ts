@@ -77,6 +77,73 @@ export const TOOL_SCHEMAS = {
       required: ['message'],
     },
   },
+  query_evidence: {
+    name: 'query_evidence',
+    description: 'Read the live incident evidence graph around a service (read-only).',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string' },
+        kinds: { type: 'array' },
+        limit: { type: 'number' },
+      },
+      required: ['service'],
+    },
+  },
+  correlate_changes: {
+    name: 'correlate_changes',
+    description: 'Rank recent deploys/PRs/config/flag changes against an incident (read-only).',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string' },
+        incident_ts: { type: 'number' },
+        lookback_ms: { type: 'number' },
+        signals: { type: 'array' },
+      },
+      required: ['service', 'incident_ts'],
+    },
+  },
+  query_signals: {
+    name: 'query_signals',
+    description: 'Summarize metrics + distributed traces for a service window (read-only).',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string' },
+        from: { type: 'number' },
+        to: { type: 'number' },
+      },
+      required: ['service', 'from', 'to'],
+    },
+  },
+  verify_remediation: {
+    name: 'verify_remediation',
+    description: 'Evaluate post-action success criteria (metrics + synthetic). Fails closed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string' },
+        criteria: { type: 'array' },
+        synthetic: { type: 'string' },
+        on_failure: { type: 'string', enum: ['rollback', 'escalate'] },
+        rollback_runbook_id: { type: 'string' },
+      },
+      required: ['service', 'criteria'],
+    },
+  },
+  assess_blast_radius: {
+    name: 'assess_blast_radius',
+    description: 'Assess the blast radius of restart/rollback/scale/failover on a service (read-only).',
+    parameters: {
+      type: 'object',
+      properties: {
+        service: { type: 'string' },
+        action: { type: 'string', enum: ['restart', 'rollback', 'scale', 'failover'] },
+      },
+      required: ['service', 'action'],
+    },
+  },
 } as const;
 
 export type ToolName = keyof typeof TOOL_SCHEMAS;
