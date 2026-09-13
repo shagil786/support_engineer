@@ -1,0 +1,36 @@
+# Secrets baseline — gitleaks over the working tree and recent history.
+#
+# The repo's TypeScript scanner (tests/hardcoded-values.test.ts) covers src/
+# string literals by design. This job closes the rest of the surface that
+# scanner cannot see: non-TypeScript files (.env files, scripts, docs,
+# policies, deploy configs) and git history (a secret removed from HEAD but
+# still reachable in a past commit).
+#
+# Failure mode is fail-closed: any finding fails the job. The single
+# allowlist entry below is the only thing that has ever fired in this repo's
+# history, and it is scoped by path AND content (condition = "and"): a real
+# secret anywhere else — including elsewhere in README.md, or a real value
+# pasted into those example lines — still fails the job. No blanket
+# path-based exemptions for docs.
+#
+# Note for local runs: a developer checkout holding a real .env will
+# (correctly) light up when the worktree is scanned. That file is
+# gitignored, never committed, and never checked out in CI, so the job
+# itself stays green.
+
+title = "support_engineer secret-scanning config"
+
+[extend]
+# Track gitleaks' default rules (AWS keys, Slack tokens, private keys,
+# curl auth headers, generic API keys, …) instead of pinning a frozen copy.
+useDefault = true
+
+# README's quickstart boots the server with HTTP_TOKEN=dev-token and its
+# curl examples send `Authorization: Bearer dev-token`. That is a documented
+# local-dev placeholder, not a credential, but gitleaks' curl-auth-header
+# rule cannot know that. Allowlist exactly that: this file, this string.
+[[allowlists]]
+description = "README quickstart placeholder dev token (HTTP_TOKEN=dev-token); not a credential"
+condition = "and"
+paths = ['''^README\.md$''']
+regexes = ['''dev-token''']

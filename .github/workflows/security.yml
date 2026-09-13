@@ -1,0 +1,56 @@
+# Secrets baseline — gitleaks over the working tree and recent history.
+#
+# The repo's TypeScript scanner (tests/hardcoded-values.test.ts) covers src/
+# string literals, by design. This job closes the rest of the surface that
+# scanner cannot see: non-TypeScript files (.env files, scripts, docs,
+# policies, deploy configs) and git history (a secret removed from HEAD but
+# still reachable in a past commit).
+#
+# Failure mode is fail-closed: any finding fails the job. .gitleaks.toml
+# carries exactly one allowlist entry — the README quickstart's placeholder
+# dev token — scoped by path AND content (condition = "and"); anything else
+# fails the job. gitleaks' default rules are extended, not pinned.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays 06:23 UTC — weekly baseline over every ref (all branches, full
+    # history), independent of push/PR event ranges.
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks (tree + history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — the point of the scheduled scan
+
+      # Free for personal repos; organizations need a GITLEAKS_LICENSE secret.
+      - name: gitleaks-action scan (push/PR)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: .gitleaks.toml
+
+      - name: Scan full history (weekly baseline; fail-closed)
+        if: github.event_name == 'schedule'
+        # Tag pinned to the gitleaks version this config was validated against
+        # locally (8.28.0); bump deliberately when adopting new default rules.
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            zricethezav/gitleaks:v8.28.0 detect --source=/repo \
+            --config=/repo/.gitleaks.toml --log-opts="--all" --verbose
