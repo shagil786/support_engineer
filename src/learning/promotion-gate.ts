@@ -18,6 +18,7 @@ import { PolicyEngine } from '../governance/policy-engine.js';
 import { EvalRunner } from './eval-runner.js';
 import { runSafetyNetRegression } from './safety-net-regression.js';
 import type { ShadowReplay } from './shadow-replay.js';
+import { synthesizeScenarios, toScenarioFragmentYaml } from './scenario-synthesis.js';
 import type { SafetyNet } from '../governance/safety-net/index.js';
 import type { EventLog } from '../event-log/log.js';
 import type { PolicySuggestion } from './suggestion-queue.js';
@@ -125,10 +126,30 @@ export class PromotionGate {
     if (this.opts.shadowReplay) {
       const replay = await this.opts.shadowReplay.run({ engine: candidateEngine, bundlePromotedAt: current.promotedAt });
       if (replay.divergences.length > 0) {
+        // ADR-0011: every divergence is a pin candidate — a scenario that
+        // would have caught this candidate in the handwritten suite. Report
+        // them so the divergence becomes durable, not spine-dependent.
+        let pinNote = '';
+        try {
+          const evalYaml = readFileSync(this.opts.evalScenariosPath, 'utf8');
+          const pins = synthesizeScenarios({ divergences: replay.divergences, existingScenariosYaml: evalYaml });
+          if (pins.length > 0) {
+            const provenance = new Map(
+              replay.divergences
+                .filter((d) => pins.some((p) => p.action.tool === d.tool && p.expect === d.recorded))
+                .map((d) => [pins.find((p) => p.action.tool === d.tool && p.expect === d.recorded)?.id ?? '', { correlationId: d.correlationId, ts: d.ts }]),
+            );
+            pinNote =
+              `\n  ${pins.length} of ${replay.divergences.length} divergence(s) would pin as eval scenarios (` +
+              `e.g. \`npm run replay --synthesize\`):\n${toScenarioFragmentYaml(pins.slice(0, 2), provenance)}`;
+          }
+        } catch {
+          pinNote = ''; // synthesis is advisory; the refusal stands regardless
+        }
         throw new Error(
           `Shadow replay failed: ${replay.divergences.length} divergence(s) on recorded traffic ` +
             `(replayed ${replay.replayed} of ${replay.inspected} events; window: ${replay.window.reason}) — ` +
-            `first: ${JSON.stringify(replay.divergences[0])}`,
+            `first: ${JSON.stringify(replay.divergences[0])}${pinNote}`,
         );
       }
     }

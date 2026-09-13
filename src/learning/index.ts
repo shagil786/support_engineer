@@ -11,6 +11,12 @@ export { EvalRunner, type EvalResult, type EvalRunnerOptions } from './eval-runn
 export { runSafetyNetRegression } from './safety-net-regression.js';
 export { ShadowReplay, type ShadowReplayOptions, type ShadowReplayResult, type ShadowDivergence } from './shadow-replay.js';
 export {
+  synthesizeScenarios,
+  toScenarioFragmentYaml,
+  type SynthesizedScenario,
+  type SynthesizeOptions,
+} from './scenario-synthesis.js';
+export {
   EfficacyTracker,
   type EfficacySnapshot,
   type EfficacyTrackerOptions,

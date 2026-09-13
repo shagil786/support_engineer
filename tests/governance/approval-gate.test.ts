@@ -249,10 +249,18 @@ describe('ApprovalGate', () => {
       const { approvalId } = await gate.request({ policyId: 'p', decision, action });
       gate.signAs(approvalId, 'alice');
       gate.signAs(approvalId, 'bob');
-      await new Promise((r) => setTimeout(r, 30));
-      const kinds: Array<{ kind: string; signerIds?: string[] }> = [];
-      for await (const e of log.query({})) kinds.push(e as { kind: string; signerIds?: string[] });
-      const granted = kinds.find((e) => e.kind === 'approval_granted');
+      // Poll until the fire-and-forget grant event lands with the expected
+      // signers (deadline, not a fixed sleep — same race as the deny tests).
+      const deadline = Date.now() + 2_000;
+      let granted: { kind: string; signerIds?: string[] } | undefined;
+      while (Date.now() < deadline) {
+        for await (const e of log.query({})) {
+          const ev = e as { kind: string; signerIds?: string[] };
+          if (ev.kind === 'approval_granted') granted = ev;
+        }
+        if (granted?.signerIds?.length === 2) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
       expect(granted?.signerIds).toEqual(['alice', 'bob']);
     });
   });

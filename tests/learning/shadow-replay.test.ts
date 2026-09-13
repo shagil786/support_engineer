@@ -128,7 +128,15 @@ describe('ShadowReplay', () => {
     const candidate = new PolicyEngine({ yaml: divergeYaml });
     const r = await new ShadowReplay({ eventLog: log, engine: candidate }).run();
     expect(r.divergences).toEqual([
-      { correlationId: 'cid-1', ts: 1_000, tool: 'query_evidence', recorded: 'allow', candidate: 'deny' },
+      {
+        correlationId: 'cid-1',
+        ts: 1_000,
+        tool: 'query_evidence',
+        recorded: 'allow',
+        candidate: 'deny',
+        intent: intent(1_000),
+        action: { tool: 'query_evidence', args: { query_string: 'x' } },
+      },
     ]);
     expect(r.replayed).toBe(1);
   });
@@ -145,7 +153,15 @@ describe('ShadowReplay', () => {
     expect(r.replayed).toBe(1); // first event only
     expect(r.skipped).toBe(1); // the escalation re-audit
     expect(r.divergences).toEqual([
-      { correlationId: 'cid-1', ts: 1_000, tool: 'query_evidence', recorded: 'allow', candidate: 'deny' },
+      {
+        correlationId: 'cid-1',
+        ts: 1_000,
+        tool: 'query_evidence',
+        recorded: 'allow',
+        candidate: 'deny',
+        intent: intent(1_000),
+        action: { tool: 'query_evidence', args: { query_string: 'x' } },
+      },
     ]);
   });
 
@@ -273,5 +289,52 @@ describe('ShadowReplay through the PromotionGate', () => {
     });
     const v2 = await gate.promote(suggestion, ['admin1', 'admin2']);
     expect(v2.version).toBe(2);
+  });
+});
+describe('synthesis through the PromotionGate (ADR-0011)', () => {
+  const suggestion: PolicySuggestion = {
+    id: 's-shadow-synth',
+    rationale: 'test: narrow read-only allow',
+    evidence: { outcomeIds: [], sampleSize: 3, confidence: 0.9 },
+    proposedChange: { type: 'modify_rule', ruleId: 'read_only_default_allow', patch: { when: { tools_in: ['query_logs', 'jira_get_issue'] } } },
+    risk: 'medium',
+    estimatedImpact: { outcomeMetric: 'none', expectedDelta: '0' },
+  };
+
+  let dir: string;
+  let store: PolicyStore;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'shadow-gate-synth-'));
+    store = new PolicyStore({ dbPath: join(dir, 'p.db'), yamlDir: join(dir, 'bundles'), now: () => 5_000 });
+    const v1 = await store.save({ yaml: defaultYaml, authoredBy: 'alice', signedBy: 'alice' });
+    await store.promote(v1.version, { promotedBy: ['admin1', 'admin2'], evalRunId: 'e1', safetyNetPassed: true });
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refusal message names the pin so the divergence becomes durable, not spine-dependent', async () => {
+    await log.append(govt('cid-live', 6_000, 'assess_blast_radius', 'allow'));
+    const gate = new PromotionGate({
+      store,
+      safetyNet: new SafetyNet({}),
+      evalScenariosPath,
+      safetyNetScenariosPath,
+      eventLog: log,
+      shadowReplay: new ShadowReplay({ eventLog: log, engine: new PolicyEngine({ yaml: defaultYaml }) }),
+    });
+    const error = await gate.promote(suggestion, ['admin1', 'admin2']).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeDefined();
+    expect((error as Error).message).toMatch(/Shadow replay failed/);
+    expect((error as Error).message).toMatch(/would pin as eval scenarios/);
+    expect((error as Error).message).toMatch(/shadow_assess_blast_radius_allow/);
+    // Store unchanged — the divergence still blocks promotion.
+    expect(store.current().version).toBe(1);
   });
 });

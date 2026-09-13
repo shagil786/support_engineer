@@ -39,6 +39,10 @@ export interface ShadowDivergence {
   recorded: DecisionEventOf<'governance'>['decision']['effect'];
   /** What the candidate bundle would decide. */
   candidate: DecisionEventOf<'governance'>['decision']['effect'];
+  /** The full recorded traffic shape (ADR-0011): scenario synthesis needs
+   *  the real envelope + args, not just the tool name. */
+  intent: DecisionEventOf<'governance'>['intent'];
+  action: { tool: string; args: Record<string, unknown> };
 }
 
 export interface ShadowReplayResult {
@@ -140,6 +144,8 @@ export class ShadowReplay {
           tool: action.tool,
           recorded: event.decision.effect,
           candidate: candidate.effect,
+          intent: event.intent,
+          action,
         });
       }
     }
