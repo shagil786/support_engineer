@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "check:node": "tsx scripts/check-node.ts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "eval": "tsx scripts/eval.ts",
     "eval:retrieval": "tsx scripts/retrieval-eval.ts",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^5.0.0",
     "tsx": "^4.23.13",
     "typescript": "^5.7.3",
     "vitest": "^5.0.0"
