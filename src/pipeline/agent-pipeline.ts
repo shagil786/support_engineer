@@ -93,6 +93,11 @@ export interface OrchestratedPipelineOptions {
    *  recorded as per-meeting memories and assembled with the per-meeting
    *  scope, so the dance sees this conversation's history. */
   episodic?: EpisodicMemory;
+  /** Service topology (optional): enables risk-aware approvals — actions
+   *  whose tool/args resolve to a known (service, action) pair are gated by
+   *  the topology's blast assessment (signature floor + critical-risk
+   *  maintenance window). Unwired → no blast gating. */
+  topology?: import('../topology/blast.js').ServiceTopology;
   now?: () => number;
 }
 
@@ -138,6 +143,7 @@ export class OrchestratedPipeline {
       assembler: opts.assembler,
       eventLog: opts.eventLog,
       ...(opts.outcomeRecorder ? { outcomeRecorder: opts.outcomeRecorder } : {}),
+      ...(opts.topology ? { topology: opts.topology } : {}),
       now: this.now,
     });
     this.questions = new GroundedQuestionStage({

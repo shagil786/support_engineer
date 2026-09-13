@@ -16,9 +16,11 @@ import type { ContextAssembler, ContextBundle } from '../understanding/context-a
 import type { PolicyEngine } from '../governance/policy-engine.js';
 import type { SafetyNet } from '../governance/safety-net/index.js';
 import type { ApprovalGate } from '../governance/approval-gate.js';
-import type { Decision, ProposedAction } from '../governance/decision.js';
+import { MaintenanceWindowError } from '../governance/maintenance-window.js';
+import type { Decision, GovernanceDecision, ProposedAction } from '../governance/decision.js';
 import type { SupervisorAgent } from '../execution/supervisor.js';
 import type { OutcomeRecorder } from '../learning/outcome-recorder.js';
+import { inferBlastAssessment, type ServiceTopology } from '../topology/blast.js';
 import type { ApprovedAction, PipelineRouting } from './types.js';
 
 export interface GovernedDispatchOptions {
@@ -29,6 +31,11 @@ export interface GovernedDispatchOptions {
   assembler: ContextAssembler;
   eventLog: EventLog;
   outcomeRecorder?: OutcomeRecorder;
+  /** Service topology (optional): when wired, actions whose tool/args
+   *  resolve to a known (service, action) pair get a topology-derived
+   *  blast assessment — the required signature floor and the critical-risk
+   *  maintenance-window gate follow from it, never from agent claims. */
+  topology?: ServiceTopology;
   now: () => number;
 }
 
@@ -58,6 +65,7 @@ export class GovernedDispatch {
   private readonly assembler: ContextAssembler;
   private readonly eventLog: EventLog;
   private readonly outcomeRecorder?: OutcomeRecorder;
+  private readonly topology?: ServiceTopology;
   private readonly now: () => number;
   /** approvalId → staged action awaiting (or holding) a grant. */
   private readonly staged = new Map<string, ApprovedAction>();
@@ -70,6 +78,7 @@ export class GovernedDispatch {
     this.assembler = opts.assembler;
     this.eventLog = opts.eventLog;
     this.outcomeRecorder = opts.outcomeRecorder;
+    this.topology = opts.topology;
     this.now = opts.now;
   }
 
@@ -94,15 +103,27 @@ export class GovernedDispatch {
     if (decision.effect === 'deny') {
       return { kind: 'halted', routing: { routed: 'pipeline', correlationId: input.cid, ok: false, reason: `denied: ${decision.reason}` } };
     }
-    if (decision.effect === 'require_approval') {
-      const { approvalId } = await this.approvals.request({
-        policyId: decision.policyIds[0] ?? 'policy',
-        decision,
-        action: input.action,
-        ...(input.thread ? { thread: input.thread } : {}),
+    // Risk-aware approvals (ADR-0007): when the topology resolves a
+    // (service, action) pair from the args, the assessment is authoritative.
+    // Medium/critical risk escalates even an `allow` into a staged approval;
+    // a require_approval keeps its semantics but gains the blast floor.
+    const blast = this.topology ? inferBlastAssessment(input.action, this.topology).assessment : undefined;
+    if (blast && decision.effect === 'allow' && blast.approvalsRequired > 0) {
+      const escalated: GovernanceDecision = { ...decision, effect: 'require_approval', reason: `blast radius: ${blast.reason}`, blastAssessment: blast };
+      await this.eventLog.append({
+        correlationId: input.cid,
+        ts: this.now(),
+        layer: 'governance',
+        source: 'internal',
+        kind: 'governance',
+        intent: input.envelope,
+        decision: { ...escalated, unconditionalSafetyNetCheck: true },
       });
-      this.staged.set(approvalId, { approvalId, correlationId: input.cid, action: input.action, decision });
-      return { kind: 'staged', routing: { routed: 'pipeline', correlationId: input.cid, approvalId, approvalStatus: 'pending' } };
+      return this.stageApproval(input.cid, input.envelope, input.action, escalated, input.thread);
+    }
+    if (decision.effect === 'require_approval') {
+      const withBlast: GovernanceDecision = blast ? { ...decision, blastAssessment: blast } : decision;
+      return this.stageApproval(input.cid, input.envelope, input.action, withBlast, input.thread);
     }
 
     // Allow (or transform) → execute through the Supervisor.
@@ -147,7 +168,38 @@ export class GovernedDispatch {
     if (snap?.status !== 'granted') {
       return { routed: 'pipeline', correlationId, ok: false, reason: `approval not granted (status: ${snap?.status ?? 'unknown'})` };
     }
+    // Critical-risk actions also need an open maintenance window at
+    // execution time (not just at grant time) — fail-closed.
+    try {
+      this.approvals.assertExecutable(approvalId);
+    } catch (e) {
+      if (e instanceof MaintenanceWindowError) {
+        return { routed: 'pipeline', correlationId, ok: false, reason: `maintenance window: ${e.message}` };
+      }
+      throw e;
+    }
     return this.runApproved(staged);
+  }
+
+  /** Stage one approval request and record it for the later grant→execute
+   *  path. The blast assessment rides the decision (audited) and the gate
+   *  request (signature floor + window requirement). */
+  private async stageApproval(
+    cid: string,
+    envelope: IntentEnvelope,
+    action: ProposedAction,
+    decision: GovernanceDecision,
+    thread?: { channel: string; ts: string },
+  ): Promise<{ kind: 'staged'; routing: PipelineRouting }> {
+    const { approvalId } = await this.approvals.request({
+      policyId: decision.policyIds[0] ?? 'policy',
+      decision,
+      action,
+      ...(decision.blastAssessment ? { blastAssessment: decision.blastAssessment } : {}),
+      ...(thread ? { thread } : {}),
+    });
+    this.staged.set(approvalId, { approvalId, correlationId: cid, action, decision });
+    return { kind: 'staged', routing: { routed: 'pipeline', correlationId: cid, approvalId, approvalStatus: 'pending' } };
   }
 
   private async runApproved(staged: ApprovedAction): Promise<PipelineRouting> {

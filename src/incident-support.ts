@@ -22,10 +22,18 @@ export {
 } from './remediation/verifier.js';
 export {
   ServiceTopology,
+  inferBlastAssessment,
   type BlastAction,
   type BlastAssessment,
+  type BlastInference,
   type RiskTier,
 } from './topology/blast.js';
+export {
+  CLOSED_MAINTENANCE_WINDOW,
+  LocalTimeMaintenanceWindow,
+  MaintenanceWindowError,
+  type MaintenanceWindow,
+} from './governance/maintenance-window.js';
 export {
   assessImpact,
   attachHypotheses,

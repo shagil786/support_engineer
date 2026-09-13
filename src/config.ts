@@ -70,6 +70,11 @@ export interface IntegrationsFromEnv {
   /** APPROVAL_CHANNEL: Slack channel for staged approvals
    *  (default: the gate's #support-agent-approvals). */
   approvalChannel?: string;
+  /** MAINTENANCE_WINDOW=HH:MM-HH:MM: the daily wall-clock window during
+   *  which critical-risk (blast radius) actions may execute. Malformed
+   *  values THROW at boot (fail-closed — an operator typo must not silently
+   *  open the window); absent = no window wired, critical actions blocked. */
+  maintenanceWindow?: { startMinute: number; endMinute: number };
   /** Supervisor caps from env: SUPERVISOR_MAX_WALLCLOCK_MS (>= 1000),
    *  SUPERVISOR_MAX_HOPS (>= 1), SUPERVISOR_MAX_TOKENS (>= 1000),
    *  SUPERVISOR_MAX_IDENTICAL_TOOL_CALLS (>= 1),
@@ -300,6 +305,23 @@ export function configFromEnv(env: Env = process.env): IntegrationsFromEnv {
   if (approvalChannel) out.approvalChannel = approvalChannel;
   const runbooksFile = envVar(env, 'RUNBOOKS_FILE')?.trim();
   if (runbooksFile) out.runbooksFile = runbooksFile;
+
+  // MAINTENANCE_WINDOW=HH:MM-HH:MM — the critical-risk execution window.
+  // Malformed → THROW (fail-closed): a typo must never silently disable the
+  // gate that ADR-0007 puts around failover/rollback at critical blast radii.
+  const mw = envVar(env, 'MAINTENANCE_WINDOW');
+  if (mw) {
+    const m = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/.exec(mw);
+    const invalid = () => {
+      throw new Error(`MAINTENANCE_WINDOW must be HH:MM-HH:MM (server-local, e.g. 22:00-04:00); got "${mw}"`);
+    };
+    if (!m) invalid();
+    const [, sh, sm, eh, em] = m!;
+    const startMinute = Number(sh) * 60 + Number(sm);
+    const endMinute = Number(eh) * 60 + Number(em);
+    if (Number(sh) > 23 || Number(sm) > 59 || Number(eh) > 23 || Number(em) > 59) invalid();
+    out.maintenanceWindow = { startMinute, endMinute };
+  }
 
   return out;
 }

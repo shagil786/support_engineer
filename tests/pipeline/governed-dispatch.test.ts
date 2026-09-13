@@ -119,6 +119,8 @@ function fakeGate(trace: string[]) {
       if (status.get(id) === 'granted') status.set(id, 'executed');
       return { status: status.get(id) };
     },
+    // No blast assessment in this fake's requests → no window refusal ever.
+    assertExecutable: (id: string) => ({ status: status.get(id) }),
   };
   return {
     approvals: gate as unknown as GovernedDispatchOptions['approvals'],

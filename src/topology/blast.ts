@@ -69,4 +69,59 @@ export class ServiceTopology {
         : `${action} ${service}: ${affected.length} service(s) in blast radius (${affected.join(', ') || 'none'})`;
     return { service, action, affected, risk, approvalsRequired, requiresMaintenanceWindow, reason };
   }
+
+  /** True when the graph has an entry for `service` (it was upserted, even
+   *  with zero dependencies). Unknown services never produce an assessment —
+   *  gating on invented topology would be worse than no gating. */
+  knowsService(service: string): boolean {
+    return this.deps.has(service);
+  }
+}
+
+/** Tools whose args can carry an infrastructure mutation the topology can
+ *  assess. Only real ToolNames plus the canonical action verbs — an unknown
+ *  tool is never blast-assessed. */
+const BLAST_CAPABLE_TOOLS: ReadonlySet<string> = new Set(['execute_runbook_script', 'restart', 'rollback', 'scale', 'failover']);
+
+/** What inferBlastAssessment concluded. `determined: false` means the tool
+ *  args carried no resolvable (service, action) pair — callers must treat
+ *  that as "no assessment", never as "low risk". */
+export interface BlastInference {
+  /** The concrete blast action, when one was inferable. */
+  action?: BlastAction;
+  /** The target service, when one was inferable. */
+  service?: string;
+  /** The authoritative assessment, only when the topology knows the service. */
+  assessment?: BlastAssessment;
+  /** True iff a (service, action) pair was resolved from the args. */
+  determined: boolean;
+}
+
+const ACTION_VERBS = ['restart', 'rollback', 'scale', 'failover'] as const;
+
+/** Deterministic (tool, args) → blast assessment. Infers the action from a
+ *  leading verb in the runbook id (`restart-checkout-service` → restart) or
+ *  an explicit `action` arg, and the service from the remainder of the id or
+ *  an explicit `service` arg. Nothing here calls out, guesses, or defaults:
+ *  no verb → not determined; unknown service → not determined. */
+export function inferBlastAssessment(action: { tool: string; args: Record<string, unknown> }, topology: ServiceTopology): BlastInference {
+  if (!BLAST_CAPABLE_TOOLS.has(action.tool)) return { determined: false };
+  const args = action.args ?? {};
+  const scriptName = typeof args.script_name === 'string' ? args.script_name : undefined;
+  const argService = typeof args.service === 'string' ? args.service : undefined;
+  const argAction =
+    typeof args.action === 'string' && (ACTION_VERBS as readonly string[]).includes(args.action) ? (args.action as BlastAction) : undefined;
+
+  let blastAction: BlastAction | undefined = argAction;
+  let service = argService;
+  if (scriptName) {
+    const m = /^(restart|rollback|scale|failover)[-_ ](.+)$/i.exec(scriptName.trim());
+    if (m) {
+      blastAction ??= m[1]!.toLowerCase() as BlastAction;
+      service ??= m[2]!.trim();
+    }
+  }
+  if (!blastAction || !service) return { determined: false };
+  if (!topology.knowsService(service)) return { action: blastAction, service, determined: false };
+  return { action: blastAction, service, assessment: topology.assess(service, blastAction), determined: true };
 }

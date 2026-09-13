@@ -21,6 +21,9 @@ import type { Decision, ProposedAction } from './decision.js';
 import type { SpeakerRole, SpeakerRegistry } from './safety-net/rbac.js';
 import { SignerRoleError, roleSatisfies, type ApprovalStatus } from './approval-roles.js';
 import { ApprovalIntake, type ReactionEvent, type ReactionResult, type ActionEvent } from './approval-intake.js';
+import type { MaintenanceWindow } from './maintenance-window.js';
+import { MaintenanceWindowError } from './maintenance-window.js';
+import type { BlastAssessment, RiskTier } from '../topology/blast.js';
 import {
   deliverRequestCard,
   renderApprovalCard,
@@ -44,6 +47,10 @@ export interface ApprovalRequestInput {
   decision: Decision;
   action: ProposedAction;
   timeoutMs?: number;
+  /** Topology-derived blast assessment (dispatch-attached; never trusted
+   *  from agent output). Drives the per-approval signature floor and the
+   *  maintenance-window requirement for critical actions. */
+  blastAssessment?: BlastAssessment;
   /** When set, the approval card posts in-thread under this message
    *  (the meeting where the action was requested) instead of the security
    *  channel. Lifecycle updates and reaction correlation follow the same
@@ -79,6 +86,20 @@ export interface ApprovalGateOptions {
   /** Roles allowed to contribute an approval signature over REST (default:
    *  admin only — keep approval power narrow). */
   approverRoles?: SpeakerRole[];
+  /** Maintenance-window port for critical-risk actions (blast assessment).
+   *  Absent = critical actions can never execute (fail-closed). */
+  maintenanceWindow?: MaintenanceWindow;
+}
+
+/** The per-approval signature floor: the strictest of the gate's default,
+ *  the policy's approver_count, and the blast-radius tier (low→0, medium→1,
+ *  critical→2 — ADR-0007). Blast can only escalate, never de-escalate: a
+ *  policy demanding 3 signatures on a low-risk action still requires 3. */
+export function requiredSignatures(policyCount: number | undefined, blast: BlastAssessment | undefined, gateDefault: number): number {
+  const floor = Math.max(1, gateDefault);
+  const policy = policyCount !== undefined ? Math.max(1, Math.floor(policyCount)) : undefined;
+  const blastFloor = blast ? (blast.risk === 'low' ? 0 : blast.risk === 'medium' ? 1 : 2) : undefined;
+  return Math.max(floor, policy ?? 0, blastFloor ?? 0);
 }
 
 interface PendingApproval {
@@ -90,6 +111,9 @@ interface PendingApproval {
   status: ApprovalStatus;
   createdAt: number;
   timeoutMs: number;
+  /** Blast-radius assessment attached by the dispatch (topology-derived,
+   *  never agent-asserted). Absent = no assessment → no escalation. */
+  blast?: BlastAssessment;
   /** Exactly what was posted when the request was created; lifecycle
    *  updates re-render this so the message stays the full record. */
   originalText?: string;
@@ -117,6 +141,7 @@ export class ApprovalGate {
    *  affects the queue listing; listeners receive no payload and re-read via
    *  listPending(), so the notification carries no data to leak. */
   private readonly listeners = new Set<() => void>();
+  private readonly maintenanceWindow: MaintenanceWindow | undefined;
 
   constructor(opts: ApprovalGateOptions) {
     this.slack = opts.slack;
@@ -127,6 +152,7 @@ export class ApprovalGate {
     this.now = opts.now ?? Date.now;
     this.resolveSignerRole = opts.resolveSignerRole;
     this.approverRoles = opts.approverRoles ?? ['admin'];
+    this.maintenanceWindow = opts.maintenanceWindow;
     this.intake = new ApprovalIntake(
       {
         find: (approvalId) => {
@@ -161,6 +187,12 @@ export class ApprovalGate {
 
   async request(input: ApprovalRequestInput): Promise<{ approvalId: string }> {
     const id = correlationId(this.now());
+    const blast = input.blastAssessment;
+    const required = requiredSignatures(
+      (input.decision as { approverCount?: number }).approverCount,
+      blast,
+      this.approverCount,
+    );
     const p: PendingApproval = {
       id,
       policyId: input.policyId,
@@ -170,6 +202,7 @@ export class ApprovalGate {
       status: 'pending',
       createdAt: this.now(),
       timeoutMs: input.timeoutMs ?? this.defaultTimeoutMs,
+      ...(blast ? { blast } : {}),
     };
     this.pending.set(id, p);
     this.notify();
@@ -190,7 +223,8 @@ export class ApprovalGate {
       kind: 'approval_request',
       approvalId: id,
       policyId: p.policyId,
-      approver_count: this.approverCount,
+      approver_count: required,
+      ...(blast ? { blastRisk: blast.risk, blastReason: blast.reason } : {}),
     }).catch(() => {});
     return { approvalId: id };
   }
@@ -200,7 +234,7 @@ export class ApprovalGate {
     if (p.status === 'pending') {
       const before = p.signatures.size;
       p.signatures.add(signerId ?? `signature-${p.signatures.size + 1}`);
-      if (p.signatures.size >= this.approverCount) {
+      if (p.signatures.size >= requiredSignatures((p.decision as { approverCount?: number }).approverCount, p.blast, this.approverCount)) {
         p.status = 'granted';
         void this.eventLog?.append({
           correlationId: p.id,
@@ -401,7 +435,7 @@ export class ApprovalGate {
         tool: p.action.tool,
         args: p.action.args,
         signatures: p.signatures.size,
-        required: this.approverCount,
+        required: requiredSignatures((p.decision as { approverCount?: number }).approverCount, p.blast, this.approverCount),
         ageMs: Math.max(0, t - p.createdAt),
         expires: p.timeoutMs > 0,
         status,
@@ -425,8 +459,25 @@ export class ApprovalGate {
       args: p.action.args,
       status: p.status,
       signatures: p.signatures.size,
-      required: this.approverCount,
+      required: requiredSignatures((p.decision as { approverCount?: number }).approverCount, p.blast, this.approverCount),
     };
+  }
+
+  /** Last gate before tool execution: granted is necessary but not
+   *  sufficient. A critical-risk blast assessment must ALSO find an open
+   *  maintenance window — fail-closed (no window wired, or a throwing
+   *  window port, refuses execution). Returns an OK snapshot; throws
+   *  MaintenanceWindowError on refusal. */
+  assertExecutable(approvalId: string): ApprovalSnapshot {
+    const p = this.require(approvalId);
+    if (p.blast?.risk === ('critical' satisfies RiskTier)) {
+      if (!this.maintenanceWindow || !this.maintenanceWindow.isOpen(this.now())) {
+        throw new MaintenanceWindowError(
+          `critical-risk action (${p.blast.action} ${p.blast.service}) requires an open maintenance window${this.maintenanceWindow ? '' : ' — none configured'}`,
+        );
+      }
+    }
+    return this.snapshot(p);
   }
 
   private rerender(p: PendingApproval): void {
@@ -438,6 +489,6 @@ export class ApprovalGate {
   }
 
   private snapshot(p: PendingApproval): ApprovalSnapshot {
-    return { status: p.status, signatures: p.signatures.size, required: this.approverCount };
+    return { status: p.status, signatures: p.signatures.size, required: requiredSignatures((p.decision as { approverCount?: number }).approverCount, p.blast, this.approverCount) };
   }
 }

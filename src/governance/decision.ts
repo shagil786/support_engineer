@@ -37,6 +37,13 @@ export interface GovernanceDecision extends Decision {
   timeoutSeconds?: number;
   /** What happens when the approval times out. */
   onTimeout?: 'allow' | 'deny';
+  /** Blast-radius assessment from ServiceTopology (risk-aware approvals,
+   *  ADR-0007): attached by GovernedDispatch when the action's tool/args
+   *  resolve to a known (service, action) pair. The gate escalates the
+   *  required signature count from it — never from agent claims — and
+   *  critical-risk actions additionally require a maintenance window
+   *  before execution. Absent = no topology assessment (no gating). */
+  blastAssessment?: import('../topology/blast.js').BlastAssessment;
 }
 
 export type GovernedAction =

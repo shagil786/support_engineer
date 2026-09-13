@@ -34,6 +34,7 @@ import { PolicyEngine } from './governance/policy-engine.js';
 import { SafetyNet } from './governance/safety-net/index.js';
 import type { SpeakerRole } from './governance/safety-net/index.js';
 import { ApprovalGate, type SlackLike } from './governance/approval-gate.js';
+import { LocalTimeMaintenanceWindow } from './governance/maintenance-window.js';
 import { SupervisorAgent } from './execution/supervisor.js';
 import { ToolRunner } from './execution/tool-runner.js';
 import { TriageAgent } from './execution/agents/triage.js';
@@ -125,6 +126,11 @@ export interface PlatformOptions {
   traceProvider?: import('./signals/types.js').TraceProvider;
   /** Service dependency graph for blast-radius assessment. */
   topology?: import('./topology/blast.js').ServiceTopology;
+  /** Maintenance window for critical-risk (blast radius) executions: the
+   *  daily wall-clock range (minutes-since-midnight, server-local) during
+   *  which they may run. Absent = critical actions can never execute
+   *  (fail-closed). Provided by configFromEnv as `maintenanceWindow`. */
+  maintenanceWindow?: { startMinute: number; endMinute: number };
   /** Named synthetic check runner (e.g. synthetic checkout). */
   syntheticCheck?: (name: string) => Promise<boolean>;
   /** Where pipeline speech is delivered (TTS bridge / console). The optional
@@ -291,6 +297,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     // REST signatures resolve identity through the SAME registry the
     // SafetyNet uses — one trust boundary for the whole platform.
     resolveSignerRole: speakerRole,
+    ...(opts.maintenanceWindow ? { maintenanceWindow: new LocalTimeMaintenanceWindow(opts.maintenanceWindow) } : {}),
     ...(opts.approvalTimeoutMs !== undefined ? { defaultTimeoutMs: opts.approvalTimeoutMs } : {}),
     eventLog,
     ...(now ? { now } : {}),
@@ -362,6 +369,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     toolRunner,
     eventLog,
     episodic,
+    ...(opts.topology ? { topology: opts.topology } : {}),
     outcomeRecorder: new OutcomeRecorder({ eventLog, outcomesDir, ...(now ? { now } : {}) }),
     runbookProvider,
     // Tier-3 runbook resolution shares the citation engine's hybrid scorer
