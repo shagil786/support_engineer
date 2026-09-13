@@ -7,6 +7,7 @@
  */
 import type { ToolName, ToolResult } from '../support-voice-agent/tools/types.js';
 import type { Severity } from '../support-voice-agent/types.js';
+import type { ProposedAction } from '../governance/decision.js';
 
 export type EventLayer = 'understanding' | 'governance' | 'execution' | 'learning' | 'surface';
 
@@ -69,7 +70,16 @@ export type DecisionEvent =
       refused: boolean;
       usedLlm: boolean;
     })
-  | (BaseEvent & { kind: 'governance'; intent: IntentEnvelope; decision: Decision })
+  | (BaseEvent & {
+      kind: 'governance';
+      intent: IntentEnvelope;
+      decision: Decision;
+      /** The action this decision was evaluated against. Additive, optional:
+       *  emitted by GovernedDispatch (2026-09-13, ADR-0010) so shadow replay
+       *  can re-evaluate recorded traffic against a candidate policy bundle;
+       *  legacy events omit it and are skipped by the replayer. */
+      action?: ProposedAction;
+    })
   | (BaseEvent & { kind: 'safety_net'; vetoed: boolean; check: string; reason: string })
   | (BaseEvent & { kind: 'approval_request'; approvalId: string; policyId: string; approver_count: number; /** Topology-derived blast tier when the action was blast-assessed. */ blastRisk?: 'low' | 'medium' | 'critical'; blastReason?: string })
   | (BaseEvent & { kind: 'approval_granted'; approvalId: string; signerRole: string; /** Resolved signer identities at grant time (attribution). */ signerIds?: string[] })

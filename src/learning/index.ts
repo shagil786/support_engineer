@@ -9,6 +9,7 @@ export {
 } from './knowledge-extractor.js';
 export { EvalRunner, type EvalResult, type EvalRunnerOptions } from './eval-runner.js';
 export { runSafetyNetRegression } from './safety-net-regression.js';
+export { ShadowReplay, type ShadowReplayOptions, type ShadowReplayResult, type ShadowDivergence } from './shadow-replay.js';
 export {
   EfficacyTracker,
   type EfficacySnapshot,

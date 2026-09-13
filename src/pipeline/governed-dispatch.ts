@@ -93,7 +93,7 @@ export class GovernedDispatch {
       tokens: { prompt: 0, completion: 0 },
       candidateOutput: JSON.stringify(input.action.args),
     });
-    await this.emitGovernance(input.cid, input.envelope, decision, safety.vetoed);
+    await this.emitGovernance(input.cid, input.envelope, input.action, decision, safety.vetoed);
     if (safety.vetoed) {
       return {
         kind: 'halted',
@@ -117,6 +117,7 @@ export class GovernedDispatch {
         source: 'internal',
         kind: 'governance',
         intent: input.envelope,
+        action: input.action,
         decision: { ...escalated, unconditionalSafetyNetCheck: true },
       });
       return this.stageApproval(input.cid, input.envelope, input.action, escalated, input.thread);
@@ -229,6 +230,7 @@ export class GovernedDispatch {
   private async emitGovernance(
     cid: string,
     envelope: IntentEnvelope,
+    action: ProposedAction,
     decision: Decision,
     vetoed: boolean,
   ): Promise<void> {
@@ -239,6 +241,7 @@ export class GovernedDispatch {
       source: 'internal',
       kind: 'governance',
       intent: envelope,
+      action,
       decision: { ...decision, unconditionalSafetyNetCheck: true },
     });
     if (vetoed) {

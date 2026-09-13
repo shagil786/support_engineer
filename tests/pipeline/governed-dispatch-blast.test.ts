@@ -234,6 +234,11 @@ describe('GovernedDispatch risk-aware escalation', () => {
     // escalated decision both hit the spine for this cid.
     const governanceEvents = (await eventsFor(parts.eventLog, '1f4-00000001')).filter((e) => e.kind === 'governance');
     expect(governanceEvents.length).toBeGreaterThanOrEqual(2);
+    // Both emission sites record the action (ADR-0010) so shadow replay
+    // can re-evaluate this traffic; the replayer dedupes the second event.
+    for (const ev of governanceEvents) {
+      expect((ev as unknown as { action?: unknown }).action).toEqual(runInput().action);
+    }
   });
 
   it('allow + medium blast → staged with the assessment attached', async () => {

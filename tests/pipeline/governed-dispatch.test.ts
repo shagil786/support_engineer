@@ -321,6 +321,9 @@ describe('GovernedDispatch deny ordering', () => {
       reason: 'not allowed for guests',
       unconditionalSafetyNetCheck: true,
     });
+    // The evaluated action rides the governance event (ADR-0010) — shadow
+    // replay's input. Absent `action` = a legacy event the replayer skips.
+    expect((gov as unknown as { action?: unknown }).action).toEqual(LOG_QUERY);
   });
 
   it('allow executes through the supervisor and records the outcome (policy → safety → supervisor)', async () => {

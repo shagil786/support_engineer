@@ -17,6 +17,7 @@ import type { PolicyStore, PolicyBundle } from '../governance/policy-store.js';
 import { PolicyEngine } from '../governance/policy-engine.js';
 import { EvalRunner } from './eval-runner.js';
 import { runSafetyNetRegression } from './safety-net-regression.js';
+import type { ShadowReplay } from './shadow-replay.js';
 import type { SafetyNet } from '../governance/safety-net/index.js';
 import type { EventLog } from '../event-log/log.js';
 import type { PolicySuggestion } from './suggestion-queue.js';
@@ -49,6 +50,12 @@ export interface PromotionGateOptions {
   evalScenariosPath: string;
   safetyNetScenariosPath: string;
   eventLog?: EventLog;
+  /** Shadow-replay harness (ADR-0010): when wired, promotion additionally
+   *  replays recorded governance traffic against the CANDIDATE bundle and
+   *  is refused on any divergence from the live bundle's recorded
+   *  decisions. The handwritten eval suite pins what we thought to pin;
+   *  the event spine holds what actually happened. */
+  shadowReplay?: ShadowReplay;
   /** Resolves whether a signer holds the policy_admin role. When omitted,
    *  only the signature COUNT is enforced (no role registry is wired). */
   hasPolicyAdminRole?: (signerId: string) => boolean;
@@ -110,7 +117,23 @@ export class PromotionGate {
     // 5. SafetyNet regression on the candidate's action space.
     runSafetyNetRegression(readFileSync(this.opts.safetyNetScenariosPath, 'utf8'), this.opts.safetyNet);
 
-    // 6. Persist + promote atomically via the store.
+    // 6. Shadow replay (ADR-0010): the candidate must agree with every
+    //    recorded decision the live bundle made since ITS promotion —
+    //    traffic decided by older bundles does not vote on this candidate.
+    //    Fail-closed, exactly like an eval failure: a bundle that regresses
+    //    real traffic is refused before it lands, not discovered in prod.
+    if (this.opts.shadowReplay) {
+      const replay = await this.opts.shadowReplay.run({ engine: candidateEngine, bundlePromotedAt: current.promotedAt });
+      if (replay.divergences.length > 0) {
+        throw new Error(
+          `Shadow replay failed: ${replay.divergences.length} divergence(s) on recorded traffic ` +
+            `(replayed ${replay.replayed} of ${replay.inspected} events; window: ${replay.window.reason}) — ` +
+            `first: ${JSON.stringify(replay.divergences[0])}`,
+        );
+      }
+    }
+
+    // 7. Persist + promote atomically via the store.
     const saved = await this.opts.store.save({
       yaml: candidateYaml,
       authoredBy: signatures[0] ?? 'unknown',
@@ -123,7 +146,7 @@ export class PromotionGate {
       safetyNetPassed: true,
     });
 
-    // 7. Audit trail.
+    // 8. Audit trail.
     if (this.opts.eventLog) {
       await this.opts.eventLog
         .append({
