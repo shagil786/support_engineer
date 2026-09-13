@@ -16,6 +16,19 @@ class FakeSlack implements SlackLike {
 const decision: Decision = { effect: 'require_approval', reason: 'destructive', policyIds: ['p1'] };
 const action: ProposedAction = { tool: 'execute_runbook_script', args: { script_name: 'restart-all' } };
 
+/** Polls the spine until every expected kind is visible for the cid (or a
+ *  2s deadline expires). Replaces fixed sleeps: fire-and-forget audit writes
+ *  are async, and 20ms is not reliable under full-suite parallel load. */
+async function waitForKinds(log: JsonlFileEventLog, cid: string, expected: string[]): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  const remaining = new Set(expected);
+  while (remaining.size > 0 && Date.now() < deadline) {
+    for await (const e of log.query({ correlationId: cid })) remaining.delete(e.kind);
+    if (remaining.size === 0) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 let dir: string;
 
 beforeEach(() => {
@@ -160,8 +173,9 @@ describe('ApprovalGate', () => {
     const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 1, eventLog: log });
     const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
     gate.sign(approvalId, 'admin', 'alice');
-    // flush the fire-and-forget audit writes
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait until the fire-and-forget audit writes actually land (deadline,
+    // not a fixed sleep — 20ms is not reliable under full-suite load).
+    await waitForKinds(log, approvalId, ['approval_request', 'approval_granted']);
 
     const kinds: string[] = [];
     for await (const e of log.query({ correlationId: approvalId })) kinds.push(e.kind);
@@ -175,7 +189,7 @@ describe('ApprovalGate', () => {
     const gate = new ApprovalGate({ slack, securityChannel: '#sec', approverCount: 2, eventLog: log });
     const { approvalId } = await gate.request({ policyId: 'p1', decision, action });
     gate.deny(approvalId);
-    await new Promise((r) => setTimeout(r, 20));
+    await waitForKinds(log, approvalId, ['approval_denied']);
 
     const kinds: string[] = [];
     for await (const e of log.query({ correlationId: approvalId })) kinds.push(e.kind);
