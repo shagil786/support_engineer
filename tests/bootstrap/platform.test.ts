@@ -7,6 +7,7 @@ import { createPlatform } from '../../src/bootstrap';
 import { LearningLoop } from '../../src/learning/learning-loop';
 import { OrchestratedPipeline } from '../../src/pipeline/agent-pipeline';
 import { JsonlFileEventLog } from '../../src/event-log/log';
+import { PolicyEngine } from '../../src/governance/policy-engine';
 
 let dir: string;
 
@@ -77,6 +78,25 @@ describe('createPlatform', () => {
     });
     await p2.ready();
     expect(p2.knowledge.docIds().sort()).toEqual(['runbook:restart-x', 'seed-handbook']);
+  });
+
+  it('shadowReplay is wired over the platform spine: live-bundle drift is zero, a divergent candidate is caught', async () => {
+    const p = createPlatform({ dataDir: dir });
+    // Real dispatch traffic through the platform pipeline: governance events
+    // land on the spine with the action recorded (ADR-0010).
+    await p.pipeline.processUtterance('U-oncall', 'can you check the logs for errors', 500);
+    // Identity: the live bundle re-replayed against its own recorded
+    // decisions must agree everywhere.
+    const drift = await p.shadowReplay.run();
+    expect(drift.divergences).toEqual([]);
+    expect(drift.replayed).toBeGreaterThanOrEqual(1);
+    // Candidate preview: drop the read-only allow → the recorded read-only
+    // traffic would flip to default-deny; the replayer catches it.
+    const candidateYaml = `rules:\n  - id: never_emit_credit_card\n    when:\n      output_matches_regex: '\\b(?:\\d[ -]*?){13,19}\\b'\n    effect: deny\n    reason: PII guard\n`;
+    const candidate = new PolicyEngine({ yaml: candidateYaml });
+    const preview = await p.shadowReplay.run({ engine: candidate });
+    expect(preview.divergences.length).toBeGreaterThanOrEqual(1);
+    expect(preview.divergences.every((d) => d.recorded === 'allow' && d.candidate === 'deny')).toBe(true);
   });
 
   it('knowledge base: ingest → provenance-tagged retrieval through the pipeline assembler', async () => {

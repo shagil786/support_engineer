@@ -71,3 +71,23 @@ composed from existing parts — no runtime, no new subsystem:
   shadow "what-if" HTTP surface, no divergence metrics/alerts — promotion
   is the single enforcement point and it is human-gated regardless.
 
+## As-built addendum (same day)
+
+Two consumption surfaces shipped with it, completing the loop:
+
+- **`Platform.shadowReplay`** — `createPlatform` wires a `ShadowReplay`
+  over the platform's event spine and the live bundle's engine. Hosts pass
+  the handle to their PromotionGate's `shadowReplay` option (the gate
+  swaps in the candidate engine at promotion time) or call `run()` for a
+  drift report — the live bundle re-replayed against its own recorded
+  decisions must yield zero divergences.
+- **`npm run replay`** (`scripts/replay.ts`) — the ops-facing report,
+  mirroring `scripts/eval.ts`:
+  `npm run replay [-- --bundle <path>] [--from <ms>] [--to <ms>] [--promoted-at <ms>]`.
+  No `--bundle` replays the live bundle (drift check, exit 1 on any
+  divergence); `--bundle` previews a candidate (exit 1 = this bundle would
+  change real decisions); `--promoted-at` scopes the window to traffic
+  since the live bundle's promotion stamp (read it from your PolicyStore);
+  exit 2 = usage/IO error. Exit 1 is CI-gateable, so a drift check can run
+  on the same ladder as the eval CLI.
+

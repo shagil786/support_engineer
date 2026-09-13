@@ -44,6 +44,7 @@ import { ExecutorAgent } from './execution/agents/executor.js';
 import { ReviewerAgent } from './execution/agents/reviewer.js';
 import { OutcomeRecorder } from './learning/outcome-recorder.js';
 import { LearningLoop } from './learning/learning-loop.js';
+import { ShadowReplay } from './learning/shadow-replay.js';
 import { ProcedureLibrary } from './execution/procedure-library.js';
 import { OrchestratedPipeline } from './pipeline/agent-pipeline.js';
 import { SlackBotClient } from './support-voice-agent/integrations/slack-bot.js';
@@ -169,6 +170,11 @@ export interface Platform {
   /** Durable case-based incident memory (`<dataDir>/memory/incident-cases.json`);
    *  past-incident recall survives restarts. */
   incidentMemory: FileBackedIncidentMemory;
+  /** Shadow-replay harness (ADR-0010) over the live bundle and this
+   *  platform's event spine. Pass it to your PromotionGate's `shadowReplay`
+   *  option so recorded traffic guards promotion, or `run()` it for a
+   *  drift report (live bundle vs its own recorded decisions). */
+  shadowReplay: ShadowReplay;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
   /** Resolves when boot-time async work has settled (KB vector indexing,
@@ -287,6 +293,12 @@ export function createPlatform(opts: PlatformOptions): Platform {
 
   const policyYaml = readFileSync(opts.policyPath ?? resolve(process.cwd(), 'policies/default.yaml'), 'utf8');
   const policyEngine = new PolicyEngine({ yaml: policyYaml });
+  // Shadow replay (ADR-0010): recorded governance traffic vs the LIVE
+  // bundle's engine. Hosts pass this handle to their PromotionGate (which
+  // overrides the engine with the candidate at promotion time) or call
+  // `run()` directly for a drift report — the live bundle re-replayed
+  // against its own recorded decisions must yield zero divergences.
+  const shadowReplay = new ShadowReplay({ eventLog, engine: policyEngine });
   // The gate-minted 'approver' identity is ALWAYS trusted as admin — it only
   // exists after M-of-N human approval, so it is not client-assertable. Host
   // resolvers handle everyone else; replacing (not composing) the approver
@@ -408,6 +420,7 @@ export function createPlatform(opts: PlatformOptions): Platform {
     eventLog,
     incidents: incidentStore,
     incidentMemory,
+    shadowReplay,
     learningLoop,
     library,
     knowledge,

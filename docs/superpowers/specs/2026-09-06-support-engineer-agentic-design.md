@@ -678,7 +678,12 @@ Policy behavior is gated at three stages, all running the same scenarios:
    back to an in-job source rebuild, which fails the job only if it cannot
    fix the binary.
 3. **Promotion time** — the PromotionGate re-runs eval + SafetyNet regression
-   against the candidate bundle before any store write (§7.1).
+   against the candidate bundle before any store write (§7.1). When wired
+   (ADR-0010), it additionally shadow-replays the candidate over recorded
+   governance traffic and is refused on any divergence from the live
+   bundle's decisions. `npm run replay` reports the same diff from the CLI
+   (drift check without `--bundle`; candidate preview with it), exit 1
+   gateable the same way as `npm run eval`.
 
 The first two share `scripts/eval.ts` (`npm run eval [--bundle <path>]`):
 every eval scenario + every must-veto SafetyNet regression scenario, exit 1
