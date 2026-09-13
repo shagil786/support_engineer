@@ -17,6 +17,7 @@
 import { join, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { JsonlFileEventLog } from './event-log/log.js';
+import { FileBackedIncidentStore, FileBackedIncidentMemory } from './incident/durable.js';
 import { LegacyClassifierAdapter } from './understanding/legacy/classifier-adapter.js';
 import { Guardrails } from './support-voice-agent/guardrails.js';
 import { MeetingNotes } from './meeting/notes.js';
@@ -162,6 +163,12 @@ export interface Platform {
   /** Grounded answering over the knowledge base: refuses when retrieval is
    *  empty, cites [n] sources otherwise, extractive fallback without an LLM. */
   answerer: GroundedAnswerer;
+  /** Durable incident lifecycle records (`<dataDir>/incidents/records.json`).
+   *  Hosts drive the incident brain and call `save()` at each transition. */
+  incidents: FileBackedIncidentStore;
+  /** Durable case-based incident memory (`<dataDir>/memory/incident-cases.json`);
+   *  past-incident recall survives restarts. */
+  incidentMemory: FileBackedIncidentMemory;
   /** Safe to call always; stops the scheduled loop when one exists. */
   stopLearning(): void;
   /** Resolves when boot-time async work has settled (KB vector indexing,
@@ -186,12 +193,19 @@ export function createPlatform(opts: PlatformOptions): Platform {
   const outcomesDir = join(dataDir, 'outcomes');
   const crossPath = join(dataDir, 'memory', 'procedures.json');
   const statsPath = join(dataDir, 'stats', 'procedure-stats.json');
+  // Durable incident support: the lifecycle records (one per incident, with
+  // timeline and approval linkage) and the case-based memory (past-incident
+  // signatures for recall) both persist under the runtime data root.
+  const incidentStorePath = join(dataDir, 'incidents', 'records.json');
+  const incidentCasesPath = join(dataDir, 'memory', 'incident-cases.json');
   const learningEnabled = opts.learning?.enabled === true;
   const learningIntervalRaw = opts.learning?.intervalMs ?? 15 * 60_000;
   const learningIntervalMs = Number.isFinite(learningIntervalRaw) && learningIntervalRaw >= 1000 ? learningIntervalRaw : 15 * 60_000;
   const now = opts.now;
 
   const eventLog = new JsonlFileEventLog({ baseDir: eventsDir });
+  const incidentStore = new FileBackedIncidentStore({ path: incidentStorePath });
+  const incidentMemory = new FileBackedIncidentMemory({ path: incidentCasesPath });
   // Observability: every LLM completion (client-side, cross-layer) lands in
   // the event spine as llm_call — model/latency/attempts/usage, never
   // prompt or response content. correlationId is synthetic: a completion is
@@ -392,6 +406,8 @@ export function createPlatform(opts: PlatformOptions): Platform {
     urgency: pipeline.urgency,
     pipeline,
     eventLog,
+    incidents: incidentStore,
+    incidentMemory,
     learningLoop,
     library,
     knowledge,

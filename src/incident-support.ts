@@ -52,3 +52,9 @@ export {
   type IncidentRecord,
 } from './incident/brain.js';
 export { IncidentMemory, similarity as incidentSimilarity, type IncidentSignature, type SimilarIncident } from './incident/memory.js';
+export {
+  FileBackedIncidentMemory,
+  FileBackedIncidentStore,
+  type FileBackedIncidentMemoryOptions,
+  type FileBackedIncidentStoreOptions,
+} from './incident/durable.js';
