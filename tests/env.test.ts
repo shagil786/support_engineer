@@ -73,6 +73,18 @@ describe('configFromEnv auto-loads .env when reading process.env', () => {
       );
       const prev = process.cwd();
       process.chdir(dir); // per-worker process: safe under vitest forks pool
+      // Park ambient LLM_* vars for the duration: a dev shell that exports
+      // its real LLM_* config would otherwise beat the fixture under the
+      // loader's "real env wins" rule and the assertions would see prod
+      // values. Saved and restored in the finally block — per-worker
+      // process, so parallel suites are unaffected.
+      const parked: Record<string, string | undefined> = {};
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith('LLM_')) {
+          parked[key] = process.env[key];
+          delete process.env[key];
+        }
+      }
       try {
         const envConfig = configFromEnv(); // auto-loads the .env we just wrote
         expect(envConfig.llm).toEqual({
@@ -86,6 +98,10 @@ describe('configFromEnv auto-loads .env when reading process.env', () => {
           model: 'test-model',
         });
       } finally {
+        for (const [key, value] of Object.entries(parked)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
         process.chdir(prev);
       }
     } finally {
