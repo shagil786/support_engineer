@@ -40,6 +40,6 @@ is framework-agnostic; a host supplies mic/STT/TTS.
 
 ## Status 2026-09-14
 
-- Latest commit `c218e14` (scenario synthesis); replay-CLI integration test committed as `267017b` on branch `test/replay-cli-integration` (not yet pushed/merged to main).
+- Latest commit `c218e14` (scenario synthesis); replay-CLI integration test committed as `267017b`, pushed and open as PR #4 (`test/replay-cli-integration`).
 - That test file had been broken mid-write (afterEach never closed → describes nested inside it → "No test suite found"; plus a wrong test premise: it seeded a card-bearing event as recorded `deny`, which the live bundle also denies, so no divergence — fixed to recorded `allow`, the pre-PII-guard drift case). Header-promised `--bundle` candidate-preview and usage/IO-error (exit 2) cases are now written too; a missing events dir is documented as the empty-spine steady state (exit 0, by design in JsonlFileEventLog.query).
 - Suite totals: 99 files / 817 tests, all green; typecheck clean.
