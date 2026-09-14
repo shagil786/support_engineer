@@ -12,7 +12,7 @@ is framework-agnostic; a host supplies mic/STT/TTS.
 ## Stack
 
 - TypeScript strict ESM (`noUncheckedIndexedAccess`, `isolatedModules`), Node ≥ 22.12 with engine-strict (`.nvmrc` is the production floor).
-- Runtime deps kept minimal: `better-sqlite3`, `zod`, `yaml`, `@huggingface/transformers`. All integrations are injected ports — no SDK clients in `src/`, no hardcoded hosts/tokens.
+- Runtime deps kept minimal: `better-sqlite3`, `zod`, `yaml` (the `@huggingface/transformers` ONNX embedder was removed 2026-09-14 — `EMBEDDINGS_PROVIDER=local` is the built-in hash embedder; `npm audit` is clean). All integrations are injected ports — no SDK clients in `src/`, no hardcoded hosts/tokens.
 - Vitest 5, tsx, gitleaks; pre-push hook in `.githooks/`; CI in `.github/workflows/` (ci.yml, security.yml, hourly chaos.yml).
 
 ## Architecture (src/)

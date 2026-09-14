@@ -140,16 +140,15 @@ describe('configFromEnv', () => {
     ).toEqual({ provider: 'remote', baseUrl: 'https://e.test', apiKey: 'k', model: 'm' });
   });
 
-  it('parses EMBEDDINGS_PROVIDER=local as a keyless embedder with optional model/dim', () => {
+  it('parses EMBEDDINGS_PROVIDER=local as the bare keyless hash embedder', () => {
     expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local' }).embeddings).toEqual({ provider: 'local' });
-    expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_MODEL: 'Xenova/foo' }).embeddings).toEqual({
-      provider: 'local',
-      model: 'Xenova/foo',
-    });
-    expect(configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_DIM: '128' }).embeddings).toEqual({
-      provider: 'local',
-      dim: 128,
-    });
+  });
+
+  it('EMBEDDINGS_MODEL / EMBEDDINGS_DIM with local is a loud contradiction, not a silent ignore', () => {
+    // The former ONNX local backend made these meaningful; silently changing
+    // what an operator's environment produces would be worse than failing.
+    expect(() => configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_MODEL: 'Xenova/foo' })).toThrow(/apply to EMBEDDINGS_PROVIDER=remote only/);
+    expect(() => configFromEnv({ EMBEDDINGS_PROVIDER: 'local', EMBEDDINGS_DIM: '128' })).toThrow(/apply to EMBEDDINGS_PROVIDER=remote only/);
   });
 
   it('rejects contradictory and unknown embeddings config', () => {

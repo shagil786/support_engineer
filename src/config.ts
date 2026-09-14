@@ -83,23 +83,27 @@ export interface IntegrationsFromEnv {
   supervisorCaps?: import('./bootstrap.js').PlatformOptions['supervisorCaps'];
   /** Embedding backend for the knowledge base (absent = built-in hash
    *  embedder). Remote: OpenAI-compatible /embeddings (baseUrl/apiKey/model
-   *  required together). Local: an in-process transformers.js model — no
-   *  key, EMBEDDINGS_MODEL selects the HF model id (default MiniLM). */
+   *  required together). Local: the same deterministic in-process hash
+   *  embedder as the default — keyless, dependency-free, no model download. */
   embeddings?:
     | { provider: 'remote'; baseUrl: string; apiKey: string; model: string; dim?: number }
-    | { provider: 'local'; model?: string; dim?: number };
+    | { provider: 'local' };
 }
 
 /** Embeddings config from the environment. Two providers:
  *
- *  - EMBEDDINGS_PROVIDER=local → in-process transformers.js model; no key,
- *    no URL; optional EMBEDDINGS_MODEL (HF id) and EMBEDDINGS_DIM.
+ *  - EMBEDDINGS_PROVIDER=local → the built-in deterministic hash embedder
+ *    (identical vectors and identity to the absent-config default). No key,
+ *    no URL, no model, no dependencies. EMBEDDINGS_MODEL/EMBEDDINGS_DIM are
+ *    remote-only — passing them with local is an error, not a silent ignore
+ *    (a former ONNX backend made them meaningful; failing loud beats
+ *    silently changing what an operator's environment produces).
  *  - EMBEDDINGS_PROVIDER=remote (or omitted — the legacy default) → an
  *    OpenAI-compatible /embeddings endpoint; EMBEDDINGS_BASE_URL,
  *    EMBEDDINGS_API_KEY and EMBEDDINGS_MODEL are required together (partial
  *    config is an error, never a silent half-wired embedder).
  *
- *  EMBEDDINGS_DIM (>= 8) folds longer vectors to a fixed dimension. */
+ *  EMBEDDINGS_DIM (>= 8) folds longer remote vectors to a fixed dimension. */
 export function embeddingsFromEnv(env: Env): IntegrationsFromEnv['embeddings'] {
   const provider = envVar(env, 'EMBEDDINGS_PROVIDER')?.toLowerCase();
   const baseUrl = envVar(env, 'EMBEDDINGS_BASE_URL');
@@ -112,7 +116,10 @@ export function embeddingsFromEnv(env: Env): IntegrationsFromEnv['embeddings'] {
     if (baseUrl || apiKey) {
       throw new Error('embeddings config contradiction: EMBEDDINGS_PROVIDER=local runs in-process and takes no EMBEDDINGS_BASE_URL/EMBEDDINGS_API_KEY');
     }
-    return { provider: 'local', ...(model ? { model } : {}), ...(dim !== undefined ? { dim } : {}) };
+    if (model || dim !== undefined) {
+      throw new Error('embeddings config contradiction: EMBEDDINGS_PROVIDER=local is the built-in hash embedder; EMBEDDINGS_MODEL/EMBEDDINGS_DIM apply to EMBEDDINGS_PROVIDER=remote only');
+    }
+    return { provider: 'local' };
   }
   if (provider && provider !== 'remote') {
     throw new Error(`unknown EMBEDDINGS_PROVIDER '${provider}' (known: local, remote)`);
