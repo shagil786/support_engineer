@@ -158,18 +158,18 @@ The KB re-embeds on boot under the configured embedding backend, so changing
   endpoint. Unwired LLM = the deterministic floor everywhere (classifier,
   agents, answers) — the platform still runs.
 - `EMBEDDINGS_PROVIDER=local|remote` + `EMBEDDINGS_MODEL`/`EMBEDDINGS_DIM` —
-  local MiniLM needs no key; remote uses an OpenAI-compatible `/embeddings`.
-  **Accepted supply-chain exposure (decision, 2026-09-10):** the `local`
-  backend pulls in `@huggingface/transformers` → `onnxruntime-node`, which
-  carries unresolved high-severity advisories through `adm-zip` (memory/
-  symlink issues on crafted ZIPs in the model path) and `sharp` (libvips/
-  libheif CVEs needing *image* inputs). No upstream fix exists. Reachability:
-  only when an operator sets `EMBEDDINGS_PROVIDER=local`; the embedder is
-  text-only and `EMBEDDINGS_MODEL` is pinned to a trusted id by default, so
-  the known attack surfaces (image decoding, hostile model archives) are
-  out of the configured path. Accepted for now; **prefer `remote` with a
-  trusted endpoint in production**, keep the model pin if you use `local`,
-  and revisit when onnxruntime/sharp ship fixes.
+  `local` is the built-in deterministic hash embedder (256-dim, same vectors
+  as the absent-config default); `remote` uses an OpenAI-compatible
+  `/embeddings` endpoint for true semantic similarity.
+  **Supply-chain exposure CLOSED (2026-09-14, supersedes the 2026-09-10
+  acceptance):** the transformers.js ONNX local backend was removed along
+  with `@huggingface/transformers` → `onnxruntime-node` (unfixable
+  high-severity advisories in `adm-zip` and `sharp`/libvips — `npm audit`
+  is now clean). `EMBEDDINGS_PROVIDER=local` is dependency-free by
+  construction; operators who need semantic (not lexical) similarity set
+  `EMBEDDINGS_PROVIDER=remote` with a trusted endpoint. After any backend
+  swap, run `npx tsx scripts/knowledge-cli.ts reindex` — persisted stores
+  fail loudly on dimension/identity mismatch otherwise.
 - `JIRA_*` — ticket integration. `SPLUNK_URL`/`SPLUNK_TOKEN` — log provider
   for `query_logs`. Absent = the dance reports `unwired` honestly.
 

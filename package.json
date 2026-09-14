@@ -34,7 +34,6 @@
     "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
     "better-sqlite3": "^13.0.3",
     "yaml": "^2.9.0",
     "zod": "^4.5.4"

@@ -16,7 +16,7 @@ export type Embedder = (text: string) => number[];
  *
  *  `identity` (optional, attachable to the function): a stable string
  *  naming the embedding model that produced the vectors — e.g.
- *  `local:Xenova/all-MiniLM-L6-v2` or `remote:vendor/model@dim`. Durable
+ *  `hash:v1` (the built-in) or `remote:vendor/model@dim`. Durable
  *  stores use it to detect a same-dim MODEL swap, which dimension checks
  *  alone cannot see: two different 384-dim models are dimensionally
  *  identical but embed into incompatible vector spaces. Absent identity →
