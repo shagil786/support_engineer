@@ -64,20 +64,27 @@ export interface FaithfulnessJudge {
 
 const STOP = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'it', 'this', 'that', 'of', 'to', 'and', 'or', 'in', 'on', 'for', 'with', 'as', 'by', 'at', 'be', 'been']);
 
-/** Content words, for the lexical verdict's overlap test. */
+/** Content words, for the lexical verdict's overlap test. Words are
+ *  truncated to a 4-char prefix so regular inflections converge
+ *  (routes/route, escalated/escalation/escalate, pages/page) — without
+ *  this the judge under-credited faithful LLM paraphrases as multiple
+ *  "misses" (found live: the f3 PagerDuty claim failed despite the corpus
+ *  saying exactly that). Prefix-4 stays conservative: the corpus is still
+ *  the union of cited contexts, every word must match, ≤1 miss. */
 function contentWords(text: string): string[] {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP.has(w));
+    .filter((w) => w.length > 2 && !STOP.has(w))
+    .map((w) => w.slice(0, 4));
 }
 
 /**
  * Deterministic judge: a claim is supported when every one of its content
- * words appears somewhere in the cited context (head-noun overlap, the same
- * principle as the re-ranker's coverage). Conservative by design — it
- * under-credits paraphrases, so its score is a floor, never a ceiling.
+ * words (prefix-normalized) appears somewhere in the cited context
+ * (head-noun overlap, the same principle as the re-ranker's coverage).
+ * Conservative by design — its score is a floor, never a ceiling.
  */
 export class LexicalClaimJudge implements FaithfulnessJudge {
   async judge(claim: string, contexts: string[]): Promise<Verdict> {

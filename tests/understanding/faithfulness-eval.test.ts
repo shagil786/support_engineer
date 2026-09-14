@@ -142,3 +142,33 @@ describe('evaluateFaithfulness', () => {
     expect(() => assertFaithfulnessGate(bad, { minScore: 0.9 })).toThrow(/faithfulness/i);
   });
 });
+
+describe('LexicalClaimJudge morphology tolerance', () => {
+  const ONCALL_CONTEXT = [
+    'Pages route through PagerDuty. Acknowledge within five minutes; escalate to the secondary after fifteen.',
+  ];
+
+  it('credits a faithful PARAPHRASE whose inflections the raw-overlap judge counted as misses (live f3 regression)', async () => {
+    const judge = new LexicalClaimJudge();
+    // Verbatim overlap was always fine.
+    await expect(judge.judge('Pages route through PagerDuty.', ONCALL_CONTEXT)).resolves.toBe('supported');
+    // The exact live f3 claim: escalation/routes/escalated are inflection
+    // variants of corpus words; prefix-4 normalization converges them.
+    await expect(
+      judge.judge(
+        'The on-call escalation routes through PagerDuty, and the secondary is escalated to after fifteen minutes.',
+        ONCALL_CONTEXT,
+      ),
+    ).resolves.toBe('supported');
+  });
+
+  it('still rejects invented specifics — multiple foreign words stay unsupported', async () => {
+    const judge = new LexicalClaimJudge();
+    await expect(
+      judge.judge(
+        'The on-call escalation pages the CFO and the VP of engineering through Slack immediately.',
+        ONCALL_CONTEXT,
+      ),
+    ).resolves.toBe('unsupported');
+  });
+});

@@ -82,6 +82,13 @@ jobs:
         # re-rank — fails CI exactly like a regressed policy bundle.
         run: npm run eval:retrieval
 
+      - name: Faithfulness quality gate
+        # LLM-free in CI (no .env): the answerer runs the extractive floor
+        # and the lexical judge grades deterministically — a regressed
+        # grounding pipeline fails here. Locally with LLM_* wired the same
+        # command exercises the LLM-verified answer path.
+        run: npm run eval:faithfulness
+
       - name: LLM chaos probe (quick)
         # Boots the real platform against a local broken provider and asserts
         # the degradation ladder end to end (429 saturation, breaker trip,
