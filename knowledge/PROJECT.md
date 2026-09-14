@@ -38,8 +38,9 @@ is framework-agnostic; a host supplies mic/STT/TTS.
 - `npm run replay` — shadow-replay drift check; `npm run learn:once` — learning cron
 - `npm run eval` / `eval:retrieval` / `eval:faithfulness` — eval suites
 
-## Status 2026-09-14
+## Status 2026-09-14 (end of session — PRs #4–#8 all merged to main)
 
-- Latest commit `c218e14` (scenario synthesis); replay-CLI integration test committed as `267017b`, pushed and open as PR #4 (`test/replay-cli-integration`).
-- That test file had been broken mid-write (afterEach never closed → describes nested inside it → "No test suite found"; plus a wrong test premise: it seeded a card-bearing event as recorded `deny`, which the live bundle also denies, so no divergence — fixed to recorded `allow`, the pre-PII-guard drift case). Header-promised `--bundle` candidate-preview and usage/IO-error (exit 2) cases are now written too; a missing events dir is documented as the empty-spine steady state (exit 0, by design in JsonlFileEventLog.query).
-- Suite totals: 99 files / 817 tests, all green; typecheck clean.
+- **Shipped:** repaired replay-CLI integration test (12 cases incl. `--bundle` + exit-2 coverage); direct unit pins for `meeting/notes`, `topology/blast`, `signals/types` (34 tests); coverage ratchet (85/75/85/88 enforced by CI's coverage run); lockfile bumps (zod 4.6.5, yaml 2.9.1); **embeddings exposure closed** — `@huggingface/transformers` removed, `local` = built-in hash embedder, `npm audit` = 0 (was 4 high).
+- **Suite:** 101 files / 843 tests green; retrieval eval hitRate 1.000; chaos probe 9/9; boot-check passes.
+- **LLM live smoke (go-live item 5):** endpoint + key valid; `.env` model id fixed (`qwen38-flash-next` → `Qwen3.8-27B-FP8`). **BLOCKED on provider quota** — tenant `tn-bv0a8gvb9d` returns account-wide 429 `quota exceeded` on all completions. Re-run when topped up: isolated server (temp `DATA_DIR`, LLM-only env file — never the full `.env`, it holds live Jira/Slack creds), then assert `llm_call ok:true` on the spine + `support_agent_llm_calls_total{ok="true"}`. Note: real-world saturation already proven — breaker opened, floor caught everything.
+- **Operator note:** if your persisted KB (`var/knowledge`) was written by MiniLM (384-dim), first boot after #8 fails loudly → `npx tsx scripts/knowledge-cli.ts reindex` once.
