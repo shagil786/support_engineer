@@ -10,3 +10,4 @@ coverage/
 var/
 demo/.demo-kb/
 demo/.demo-data/
+.openclaw/

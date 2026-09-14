@@ -129,7 +129,9 @@ describe('GroundedAnswerer', () => {
       judge: async (claim: string) => (claim.includes('paged') ? 'unsupported' : 'supported'),
     };
     const ga = new GroundedAnswerer({ knowledge: kb, llm, claimJudge: strictJudge });
-    const r = await ga.answer('who gets paged when oncall escalation fires');
+    // Retrieval-strong question (the floor gate needs real hits to pass) with
+    // an LLM claim the corpus never supports ("paged") — the guard's target.
+    const r = await ga.answer('connection pool exhaustion');
     expect(r.usedLlm).toBe(false); // the LLM answer was rejected
     expect(r.answer).not.toContain('paged');
     expect(r.citations).toEqual([1]);
@@ -170,5 +172,53 @@ describe('GroundedAnswerer', () => {
     const r = await ga.answer('checkout not responding');
     expect(r.usedLlm).toBe(false);
     expect(r.citations).toEqual([1]);
+  });
+
+  it('refuses near-zero relevance by default — weak hits never reach the LLM', async () => {
+    let called = 0;
+    const llm: LlmClient = {
+      isWired: () => true,
+      complete: async () => {
+        called += 1;
+        throw new Error('LLM must not be called for out-of-corpus questions');
+      },
+    };
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer(wired(kb, llm));
+    const r = await ga.answer('who won the 1998 FIFA world cup final?'); // best hit ~0.2
+    expect(called).toBe(0);
+    expect(r.refused).toBe(true);
+    expect(r.citations).toEqual([]);
+    expect(r.sources).toEqual([]);
+    expect(r.contextSize).toBe(0);
+  });
+
+  it('in-corpus questions still answer above the default floor', async () => {
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer(wired(kb, { isWired: () => false, complete: async () => { throw new Error('unwired'); } }));
+    const r = await ga.answer('connection pool exhaustion'); // scores ~1.25
+    expect(r.refused).toBe(false);
+    expect(r.usedLlm).toBe(false);
+    expect(r.citations).toContain(1);
+  });
+
+  it('a constructor relevanceFloor can tighten the gate', async () => {
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer({
+      knowledge: kb,
+      llm: { isWired: () => false, complete: async () => { throw new Error('unwired'); } },
+      relevanceFloor: 1.3, // 'checkout not responding' scores ~1.27 → refused
+    });
+    const r = await ga.answer('checkout not responding');
+    expect(r.refused).toBe(true);
+  });
+
+  it('a per-call relevanceFloor: 0 override disables the gate (back-compat)', async () => {
+    const kb = await seededKb(root);
+    const ga = new GroundedAnswerer(wired(kb, { isWired: () => false, complete: async () => { throw new Error('unwired'); } }));
+    const r = await ga.answer('who won the 1998 FIFA world cup final?', { relevanceFloor: 0 });
+    expect(r.refused).toBe(false);
+    expect(r.usedLlm).toBe(false);
+    expect(r.sources.length).toBeGreaterThan(0);
   });
 });

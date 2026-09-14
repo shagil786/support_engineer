@@ -96,6 +96,21 @@ async function main(): Promise<void> {
       `status ${ask.status} body ${JSON.stringify(askBody).slice(0, 200)}`,
     );
 
+    // 3b. The refusal is the product: an out-of-corpus question must refuse
+    // (near-zero retrieval — the answerer's relevance floor), never answer
+    // from weak hits. Go-live item 1, verified on purpose.
+    const askNonsense = await fetch(`${url}/ask`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ question: 'what is the airspeed velocity of an unladen swallow?' }),
+    });
+    const askNonsenseBody = (await askNonsense.json()) as { refused?: boolean };
+    check(
+      '/ask refuses an out-of-corpus question (near-zero relevance → refused)',
+      askNonsense.status === 200 && askNonsenseBody.refused === true,
+      `status ${askNonsense.status} body ${JSON.stringify(askNonsenseBody).slice(0, 200)}`,
+    );
+
     // 4. Destructive imperative: RBAC fails closed for a guest...
     const guest = await fetch(`${url}/utterance`, {
       method: 'POST',
