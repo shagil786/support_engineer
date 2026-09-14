@@ -62,6 +62,13 @@ export interface GroundedAnswererOptions {
    *  whole answer to the deterministic extractive floor. Hallucination
    *  prevention, not detection-after-the-fact. */
   claimJudge?: FaithfulnessJudge;
+  /** Answerer-level relevance floor on the top hit's FINAL rerank score —
+   *  the "near-zero retrieval" tier of the refusal contract. Below it the
+   *  question is out-of-corpus → refuse (same shape as empty retrieval),
+   *  BEFORE any LLM call. Distinct from `minScore` (the candidate trim
+   *  inside `knowledge.search`). Default DEFAULT_RELEVANCE_FLOOR (0.4);
+   *  per-call override via AnswerOptions.relevanceFloor (0 disables). */
+  relevanceFloor?: number;
 }
 
 export interface AnswerOptions {
@@ -70,17 +77,33 @@ export interface AnswerOptions {
   minScore?: number;
   /** Query-time metadata filter (e.g. { source: 'runbooks' }). */
   where?: SearchOptions['where'];
+  /** Per-call relevance-floor override (0 disables the gate — back-compat
+   *  escape hatch; see GroundedAnswererOptions.relevanceFloor). */
+  relevanceFloor?: number;
 }
 
 const REFUSAL =
   "I don't have verified knowledge about that in my sources, so I won't guess. Add a runbook or postmortem covering it and ask again.";
 
+/** Default answerer-level relevance floor on the top hit's final rerank
+ *  score (the "near-zero retrieval" tier of the refusal contract).
+ *  Calibrated 2026-09-14 against the built-in hash embedder: in-corpus
+ *  questions score >= ~0.5 (typically 1.0+); out-of-corpus noise tops out
+ *  ~0.28 on the examples corpus (~0.35 worst case). 0.4 sits mid-gap and
+ *  matches the faithfulness harness's own retrieval floor (minScore 0.4). */
+export const DEFAULT_RELEVANCE_FLOOR = 0.4;
+
 export class GroundedAnswerer {
-  constructor(private readonly opts: GroundedAnswererOptions) {}
+  private readonly relevanceFloor: number;
+
+  constructor(private readonly opts: GroundedAnswererOptions) {
+    this.relevanceFloor = opts.relevanceFloor ?? DEFAULT_RELEVANCE_FLOOR;
+  }
 
   async answer(question: string, opts: AnswerOptions = {}): Promise<GroundedAnswer> {
     const topK = opts.topK ?? 4;
     const minScore = opts.minScore ?? 0.05;
+    const floor = opts.relevanceFloor ?? this.relevanceFloor;
     const hits = await this.opts.knowledge.search(question, {
       topK,
       minScore,
@@ -96,7 +119,12 @@ export class GroundedAnswerer {
       text: h.text,
     }));
 
-    if (hits.length === 0) {
+    // Refusal contract, both tiers: empty retrieval (nothing found) or
+    // near-zero retrieval (best hit below the relevance floor — the
+    // question is out-of-corpus and weak hits are noise, not grounding).
+    // Both refuse BEFORE any LLM call: fail-closed, no tokens spent on
+    // garbage.
+    if (hits.length === 0 || (hits[0]?.score ?? 0) < floor) {
       return {
         answer: REFUSAL,
         citations: [],
