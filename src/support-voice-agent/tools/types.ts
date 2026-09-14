@@ -84,7 +84,16 @@ export const TOOL_SCHEMAS = {
       type: 'object',
       properties: {
         service: { type: 'string' },
-        kinds: { type: 'array' },
+        kinds: {
+          type: 'array',
+          // Must mirror QueryEvidenceSchema's node-kind enum (drift-guarded by
+          // tests/execution/tool-schemas-drift.test.ts): the model can only
+          // emit valid kinds if the enum is visible in its tool definition.
+          items: {
+            type: 'string',
+            enum: ['service', 'dependency', 'log', 'trace', 'metric', 'deployment', 'pr', 'jira', 'incident', 'runbook'],
+          },
+        },
         limit: { type: 'number' },
       },
       required: ['service'],
